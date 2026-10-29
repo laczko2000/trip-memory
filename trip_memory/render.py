@@ -369,6 +369,83 @@ def _join(
     out: Path,
     progress: Callable[[float], None],
 ) -> None:
+    """Join the prepared clips. If the result comes out too short, try again more carefully: on the computer's
+    main processor, then with every clip re-made in one plain format. A report is saved next to the video."""
+    total = _planned_length(lengths, styles, s)
+    made = _join_once(segments, lengths, styles, s, out, progress)
+    if made >= total - 1.0:
+        return
+    tries = [f"First try: {made:.2f} s"]
+    saved = _hardware["ok"]
+    _hardware["ok"] = False
+    try:
+        made = _join_once(segments, lengths, styles, s, out, progress)
+        tries.append(f"Main processor: {made:.2f} s")
+        if made < total - 1.0:
+            plain_dir = Path(tempfile.mkdtemp(prefix="trip-memory-plain-"))
+            try:
+                plain = [_plain_copy(seg, plain_dir / f"{k}.mp4") for k, seg in enumerate(segments)]
+                plain_lengths = [_segment_length(p) for p in plain]
+                made = _join_once(plain, plain_lengths, styles, s, out, progress)
+                tries.append(f"Plain clips: {made:.2f} s")
+            finally:
+                shutil.rmtree(plain_dir, ignore_errors=True)
+    finally:
+        _hardware["ok"] = saved
+    report = _write_report(out, segments, lengths, styles, total, tries)
+    if made < total - 1.0:  # never hand over a video that silently stops early
+        raise FFmpegError(f"The finished video is only {made:.1f} s long instead of {total:.1f} s. "
+                          f"Please send me the report saved at {report}.")
+
+
+def _planned_length(lengths: list[float], styles: list[tuple[str | None, float]], s: RenderSettings) -> float:
+    total = lengths[0]
+    for k in range(1, len(lengths)):
+        style, seconds = styles[k - 1]
+        t = min(seconds, lengths[k - 1] * 0.4, lengths[k] * 0.4) if style else 1 / FPS
+        total += lengths[k] - t
+    return total
+
+
+def _plain_copy(seg: Path, out: Path) -> Path:
+    """The clip re-made in the plainest way: steady 30 pictures a second, a clean clock, standard sound."""
+    run_ffmpeg([
+        "-i", str(seg), "-vf", f"settb=AVTB,setpts=PTS-STARTPTS,fps={FPS},format=yuv420p,setsar=1",
+        "-af", "asetpts=PTS-STARTPTS,aresample=48000", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        "-r", str(FPS), *AUDIO, str(out),
+    ])
+    return out
+
+
+def _write_report(out: Path, segments, lengths, styles, total: float, tries: list[str]) -> Path:
+    """What went into a video that came out too short, so the problem can be found."""
+    lines = [f"Planned {total:.2f} s", *tries, ""]
+    for k, (seg, length) in enumerate(zip(segments, lengths)):
+        try:
+            info = probe(str(seg))
+            streams = [
+                {key: st.get(key) for key in ("codec_type", "codec_name", "width", "height", "sample_aspect_ratio",
+                                              "r_frame_rate", "avg_frame_rate", "time_base", "start_time", "duration",
+                                              "nb_frames", "sample_rate")}
+                for st in info["streams"]
+            ]
+        except Exception as exc:
+            streams = [f"could not read: {exc}"]
+        style = styles[k - 1] if k else None
+        lines.append(f"{k}: {length:.3f} s, transition in {style}, {streams}")
+    path = out.with_suffix(".report.txt")
+    path.write_text("\n".join(lines))
+    return path
+
+
+def _join_once(
+    segments: list[Path],
+    lengths: list[float],
+    styles: list[tuple[str | None, float]],
+    s: RenderSettings,
+    out: Path,
+    progress: Callable[[float], None],
+) -> float:
     n = len(segments)
     inputs: list[str] = []
     for seg in segments:
@@ -426,6 +503,4 @@ def _join(
         total_seconds=total,
         on_progress=progress,
     )
-    made = _segment_length(out)
-    if made < total - 1.0:  # never hand over a video that silently stops early
-        raise FFmpegError(f"The finished video is only {made:.1f} s long instead of {total:.1f} s. Please report this.")
+    return _segment_length(out)

@@ -126,3 +126,20 @@ def test_slow_motion_and_speed_up_change_the_length(tmp_path):
         items[0].speed, items[0].sound = speed, True
         out = render(items, settings, tmp_path / f"s{speed}.mp4")
         assert abs(float(probe(str(out))["format"]["duration"]) - expected) < 0.15
+
+
+def test_a_short_join_is_tried_again_and_reported(tmp_path, monkeypatch):
+    from trip_memory import render as r
+
+    calls = []
+
+    def fake_join(segments, lengths, styles, s, out, progress):
+        calls.append(r._hardware["ok"])
+        return 2.0 if len(calls) == 1 else sum(lengths) - 0.1  # the first try stops early
+
+    monkeypatch.setattr(r, "_join_once", fake_join)
+    monkeypatch.setattr(r, "probe", lambda _p: {"streams": []})
+    seg = tmp_path / "a.mp4"
+    seg.write_bytes(b"")
+    r._join([seg, seg], [5.0, 5.0], [(None, 0.8)], RenderSettings(), tmp_path / "v.mp4", lambda _f: None)
+    assert len(calls) == 2 and (tmp_path / "v.report.txt").exists()

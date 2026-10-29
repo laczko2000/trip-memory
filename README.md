@@ -58,6 +58,7 @@ Everything runs on your Mac. Nothing is uploaded.
 
 ## What's new
 
+- **0.21.2:** if a finished video ever comes out shorter than planned, the app now tries again by itself (on the main processor, then with every clip re-made in one plain format) and saves a report next to the video.
 - **0.21.1:** the Storyboard is one long list you scroll through, with no pages.
 - **0.21:** speed effects. Auto-edit plays calm, cinematic moments in calm music in slow motion (0.5× for high-frame-rate videos such as iPhone slo-mo, 0.75× otherwise, so it stays smooth), and speeds slow shots up 1.5× in lively music, with the reason shown. Change any clip's speed in the Storyboard (0.5× to 2×), or switch *Speed effects* off in Auto-edit.
 - **0.20:** *Analyse* now reads how the camera moves in each video: Static camera, Pan left/right, Tilt up/down, Zoom in/out, Whip pan, Turn around, Rolling, Fast camera. They show as tags (filter by them in the Library). Auto-edit uses them: a whip pan or fast camera counts as action, a pan carries on into the next shot with a whip in the same direction, and a zoom in leads into a Zoom punch. Click *Analyse* once so existing videos get read.
