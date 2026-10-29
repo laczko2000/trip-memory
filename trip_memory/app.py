@@ -71,6 +71,18 @@ def fmt_length(seconds: float) -> str:
     return f"{m}:{s:02d}"
 
 
+def rotate_button(on_click) -> None:
+    ui.button(icon="rotate_right", on_click=on_click).props("flat dense round size=sm").tooltip("Turn 90° clockwise")
+
+
+def video_turn(rotation: int) -> str:
+    """CSS that turns the hover video the same way as its preview picture."""
+    if rotation in (90, 270):
+        return f"width:96px;height:144px;left:24px;top:-24px;transform:rotate({rotation}deg);"
+    turn = f"transform:rotate({rotation}deg);" if rotation else ""
+    return f"inset:0;width:144px;height:96px;{turn}"
+
+
 class Page:
     """Everything on the screen for one browser tab."""
 
@@ -345,7 +357,7 @@ class Page:
                     f'<div class="tm-hover" style="position:relative;width:144px;height:96px">'
                     f'<img src="{thumb}" style="width:144px;height:96px;object-fit:cover;border-radius:4px">'
                     f'<video data-src="{src}" muted loop playsinline preload="none" '
-                    f'style="display:none;position:absolute;inset:0;width:144px;height:96px;object-fit:cover;border-radius:4px"></video>'
+                    f'style="display:none;position:absolute;{video_turn(it.get("rotation") or 0)}object-fit:cover;border-radius:4px"></video>'
                     f'<span style="position:absolute;left:4px;bottom:2px;color:white;font-size:11px;text-shadow:0 0 3px black">'
                     f'▶ {fmt_length(it["duration"])}</span></div>',
                     sanitize=False,
@@ -357,6 +369,7 @@ class Page:
                     value=bool(it["chosen"]),
                     on_change=lambda e, path=it["path"]: self.choose_paths([path], e.value),
                 ).props("dense size=xs")
+                rotate_button(lambda path=it["path"]: self.rotate(path))
                 star = "⭐ " if in_set and it["best"] else ""
                 ui.label(f"{star}{datetime.fromisoformat(it['taken_at']).astimezone():%H:%M:%S}").classes("text-xs text-gray-600")
 
@@ -368,6 +381,10 @@ class Page:
     def keep_best(self, members: list[dict]) -> None:
         self.trip.set_chosen([m["path"] for m in members if not m["best"]], False)
         self.trip.set_chosen([m["path"] for m in members if m["best"]], True)
+        self.refresh_all()
+
+    def rotate(self, path: str) -> None:
+        self.trip.rotate(path)
         self.refresh_all()
 
     def choose_paths(self, paths: list[str], chosen: bool) -> None:
@@ -467,11 +484,13 @@ class Page:
                     with ui.row().classes("gap-1"):
                         for name in it["people"]:
                             ui.badge(name).props("outline")
-                ui.checkbox(
-                    "In the video",
-                    value=bool(it["included"]),
-                    on_change=lambda e, path=it["path"]: self.toggle(path, e.value),
-                ).props("dense")
+                with ui.row().classes("items-center justify-between w-full no-wrap"):
+                    ui.checkbox(
+                        "In the video",
+                        value=bool(it["included"]),
+                        on_change=lambda e, path=it["path"]: self.toggle(path, e.value),
+                    ).props("dense")
+                    rotate_button(lambda path=it["path"]: self.rotate(path))
 
     def toggle(self, path: str, included: bool) -> None:
         self.trip.set_included([path], included)

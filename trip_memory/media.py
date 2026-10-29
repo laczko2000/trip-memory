@@ -40,6 +40,7 @@ class MediaItem:
     hdr: bool = False
     lat: float | None = None
     lon: float | None = None
+    rotation: int = 0  # extra clockwise turn you chose (0, 90, 180, 270)
     # Storyboard choices (None = automatic)
     trim_start: float | None = None
     trim_end: float | None = None

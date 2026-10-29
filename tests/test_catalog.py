@@ -167,3 +167,54 @@ def test_storyboard_order_trims_and_day_titles(tmp_path, monkeypatch):
 
     trip.reset_order()
     assert names() == ["0.jpg", "1.jpg", "2.jpg"]
+
+
+def test_rotate_turns_preview_and_video(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    _gps_photo(trip_dir / "a.jpg", "2025:07:03 10:00:00", 38.7223, -9.1393, "red")
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    path = str(trip_dir / "a.jpg")
+
+    trip.rotate(path)
+    item = trip.items()[0]
+    assert item["rotation"] == 90
+    with Image.open(item["thumb"]) as thumb:
+        assert thumb.height > thumb.width
+    assert trip.media_items()[0].rotation == 90
+    for _ in range(3):
+        trip.rotate(path)
+    assert trip.items()[0]["rotation"] == 0
+
+
+class SidewaysFaces:
+    """Finds a clear face only when the top-left corner is red."""
+
+    def __init__(self, _model_dir):
+        pass
+
+    def find(self, rgb):
+        score = 0.9 if rgb[0, 0, 0] > rgb[0, 0, 2] else 0.1
+        return [Face(box=(10, 10, 110, 110), score=score, embedding=np.eye(512, dtype=np.float32)[0])]
+
+
+def test_sideways_photos_with_faces_are_turned_upright(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    monkeypatch.setattr(catalog, "FaceFinder", SidewaysFaces)
+    monkeypatch.setattr(catalog, "SceneTagger", FakeScenes)
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    picture = Image.new("RGB", (400, 300), "blue")
+    picture.paste((255, 0, 0), (0, 150, 200, 300))  # red bottom-left: top-left once turned clockwise
+    exif = Image.Exif()
+    exif[306] = "2025:07:03 10:00:00"
+    picture.save(trip_dir / "a.jpg", exif=exif)
+
+    trip = catalog.Trip(trip_dir)
+    trip.analyse()
+    assert trip.items()[0]["rotation"] == 90
+    assert any("upright" in note for note in trip.progress.notes)

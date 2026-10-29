@@ -17,7 +17,8 @@ Nothing is uploaded anywhere.
 2. **Choose files tab:** files are grouped into **stories** (taken close together in time and place). Shots
    that look nearly the same sit together in a blue box; the app ticks the ⭐ best one (sharpest, best
    exposed) for a new trip. Tick or untick a whole story, keep only the ⭐ of a set, or pick by hand.
-   Hover over a video to play it. **Suggest best shots** re-applies the suggestion. Then click
+   Hover over a video to play it. The ↻ button under a picture turns it 90° clockwise (click again to keep
+   turning); the turn is used everywhere, including the final video. **Suggest best shots** re-applies the suggestion. Then click
    **Analyse the chosen files**. Only those files are analysed and used.
    The analysis works out:
    - **when** each was taken (sorted by day),
@@ -25,6 +26,8 @@ Nothing is uploaded anywhere.
      of a photo taken within 3 hours, or at least the country from the same day (marked "guessed"),
    - **what**: a suggested scene type such as Beach, City, Food or Group photo,
    - **who**: faces grouped by person.
+   - **which way up**: a photo or video that is sideways or upside down but clearly shows faces is turned
+     upright automatically (you'll see a note; use ↻ if it guessed wrong).
 
    The first time, it downloads the free AI models (about 1 GB). Each trip is analysed once and remembered;
    adding new files later only analyses the new ones.
@@ -42,6 +45,7 @@ Everything runs on your Mac. Nothing is uploaded.
 
 ## What's new
 
+- **0.7:** rotate button in Choose files and the Library, automatic upright fix for shots with faces.
 - **0.6:** Choose files grouped into stories and sets of similar shots, best-shot suggestion, hover-to-play.
 - **0.5:** storyboard with your own order, trims, per-cut transitions and day title cards.
 - **0.4.1:** faster video making: uses the Mac's built-in video encoder, prepares several clips at once,

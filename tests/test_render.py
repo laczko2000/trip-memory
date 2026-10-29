@@ -60,3 +60,19 @@ def test_prepared_clips_are_reused(tmp_path):
     # A different photo length needs a new photo clip, but the video clip is reused.
     render(items, RenderSettings(width=640, height=360, photo_seconds=3), tmp_path / "three.mp4", cache_dir=cache)
     assert len(list(cache.glob("*.mp4"))) == 3
+
+
+def test_turned_clips_get_their_own_prepared_clip(tmp_path):
+    trip = tmp_path / "trip"
+    trip.mkdir()
+    make_clip(trip / "a.mp4", "640x360", 2, "2025-07-03T10:00:00Z")
+    Image.new("RGB", (400, 300), "blue").save(trip / "b.jpg")
+    items, _ = scan_folder(trip)
+    cache = tmp_path / "cache"
+    settings = RenderSettings(width=640, height=360, photo_seconds=2)
+    render(items, settings, tmp_path / "one.mp4", cache_dir=cache)
+    for item in items:
+        item.rotation = 90
+    out = render(items, settings, tmp_path / "two.mp4", cache_dir=cache)
+    assert len(list(cache.glob("*.mp4"))) == 4
+    assert abs(float(probe(str(out))["format"]["duration"]) - (4 - settings.transition_seconds)) < 0.3

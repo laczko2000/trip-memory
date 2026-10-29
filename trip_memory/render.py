@@ -123,7 +123,7 @@ def clip_range(item: MediaItem, s: RenderSettings) -> tuple[float, float]:
 def _video_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
     start, end = clip_range(item, s)
     length = end - start
-    pre = _hdr_to_sdr() if item.hdr else ""
+    pre = (_hdr_to_sdr() if item.hdr else "") + rotate_filter(item.rotation)
     graph = f"[0:v]{pre}format=yuv420p[src];" + _fit_with_blur("src", s.width, s.height, "fit")
     graph += f";[fit]fps={FPS},format=yuv420p[v]"
     inputs = ["-ss", f"{start:.3f}", "-t", f"{length:.3f}", "-i", str(item.path)]
@@ -134,6 +134,11 @@ def _video_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
         graph += ";[1:a]anull[a]"
     _encode_segment(inputs, graph, length, out, s)
     return length
+
+
+def rotate_filter(rotation: int) -> str:
+    """FFmpeg filter that turns a video clockwise by 90, 180 or 270 degrees."""
+    return {90: "transpose=1,", 180: "hflip,vflip,", 270: "transpose=2,"}.get(rotation % 360, "")
 
 
 def _font(size: int) -> ImageFont.FreeTypeFont:
@@ -170,7 +175,7 @@ def _photo_segment(item: MediaItem, s: RenderSettings, out: Path, workdir: Path)
     else:
         # Pillow turns the photo the right way up and reads iPhone HEIC files, which FFmpeg may not.
         with Image.open(item.path) as img:
-            img = ImageOps.exif_transpose(img).convert("RGB")
+            img = ImageOps.exif_transpose(img).convert("RGB").rotate(-item.rotation, expand=True)
             img.thumbnail((3840, 3840))
             img.save(still, quality=92)
 
@@ -206,7 +211,7 @@ def _encode_segment(inputs: list[str], graph: str, length: float, out: Path, s: 
 def _segment_key(item: MediaItem, s: RenderSettings) -> str:
     """Name a prepared clip by everything that changes how it looks, so it can be reused safely."""
     stat = item.path.stat()
-    parts = [SEGMENT_VERSION, item.kind, item.path, stat.st_mtime, stat.st_size, s.width, s.height]
+    parts = [SEGMENT_VERSION, item.kind, item.path, stat.st_mtime, stat.st_size, s.width, s.height, item.rotation]
     if item.kind == "photo":
         parts += [s.photo_seconds]
     elif item.kind == "title":

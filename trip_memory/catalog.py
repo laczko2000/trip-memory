@@ -69,6 +69,8 @@ CREATE TABLE IF NOT EXISTS items (
     story INTEGER,
     similar_set INTEGER,
     best INTEGER DEFAULT 0,
+    rotation INTEGER DEFAULT 0,
+    rotation_checked INTEGER DEFAULT 0,
     faces_done INTEGER DEFAULT 0,
     scene_done INTEGER DEFAULT 0
 );
@@ -126,6 +128,7 @@ class Trip:
         for column in (
             "chosen INTEGER DEFAULT 1", "position REAL", "trim_start REAL", "trim_end REAL", "transition TEXT",
             "dhash TEXT", "colours BLOB", "sharpness REAL", "story INTEGER", "similar_set INTEGER", "best INTEGER DEFAULT 0",
+            "rotation INTEGER DEFAULT 0", "rotation_checked INTEGER DEFAULT 0",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
@@ -240,6 +243,7 @@ class Trip:
                     duration=r["duration"],
                     has_audio=bool(r["has_audio"]),
                     hdr=bool(r["hdr"]),
+                    rotation=r["rotation"] or 0,
                     trim_start=r["trim_start"],
                     trim_end=r["trim_end"],
                     transition=r["transition"],
@@ -286,6 +290,26 @@ class Trip:
         with self._lock:
             self.db.executemany("UPDATE items SET position = ? WHERE path = ?", list(enumerate(order)))
             self.db.commit()
+
+    def rotate(self, path: str, degrees: int = 90) -> None:
+        """Turn a photo or video clockwise. Its people and scene are worked out again at the next analysis."""
+        row = self.query("SELECT rotation FROM items WHERE path = ?", (path,))
+        if not row:
+            return
+        self._set_rotation(path, ((row[0]["rotation"] or 0) + degrees) % 360)
+        self._group_stories()
+
+    def _set_rotation(self, path: str, rotation: int) -> None:
+        with self._lock:
+            self.db.execute("DELETE FROM faces WHERE path = ?", (path,))
+            self.db.execute(
+                "UPDATE items SET rotation = ?, rotation_checked = 1, faces_done = 0, scene_done = 0, dhash = NULL "
+                "WHERE path = ?",
+                (rotation, path),
+            )
+            self.db.commit()
+        row = self.query("SELECT path, kind, duration, rotation FROM items WHERE path = ?", (path,))[0]
+        self.execute("UPDATE items SET thumb = ? WHERE path = ?", (str(self._make_thumb(row)), path))
 
     def reset_order(self) -> None:
         self.execute("UPDATE items SET position = NULL")
@@ -357,7 +381,7 @@ class Trip:
         notify()
         self._name_places()
 
-        todo = self.query("SELECT path, kind, duration FROM items WHERE thumb IS NULL ORDER BY taken_at")
+        todo = self.query("SELECT path, kind, duration, rotation FROM items WHERE thumb IS NULL ORDER BY taken_at")
         for i, row in enumerate(todo):
             p.fraction = i / len(todo)
             p.message = f"Making previews: {i + 1} of {len(todo)}"
@@ -419,26 +443,29 @@ class Trip:
             except Exception as exc:
                 traceback.print_exc()
                 p.notes.append(f"Could not analyse {Path(row['path']).name}: {exc}")
+        self._group_stories()  # pictures turned upright get a fresh look-alike fingerprint
 
         p.message = "Grouping faces into people…"
         notify()
         self._group_people()
 
-    def _thumb_path(self, path: str) -> Path:
-        return self.dir / "thumbs" / f"{hashlib.sha1(path.encode()).hexdigest()[:16]}.jpg"
+    def _thumb_path(self, path: str, rotation: int = 0) -> Path:
+        # The rotation is part of the name so the browser shows the turned picture straight away.
+        return self.dir / "thumbs" / f"{hashlib.sha1(path.encode()).hexdigest()[:16]}_{rotation}.jpg"
 
     def _make_thumb(self, row) -> Path:
-        out = self._thumb_path(row["path"])
+        rotation = row["rotation"] or 0
+        out = self._thumb_path(row["path"], rotation)
         if row["kind"] == "photo":
             with Image.open(row["path"]) as img:
                 img.draft("RGB", (960, 960))  # fast for JPEGs
-                img = ImageOps.exif_transpose(img).convert("RGB")
+                img = ImageOps.exif_transpose(img).convert("RGB").rotate(-rotation, expand=True)
                 img.thumbnail((480, 480))
                 img.save(out, quality=85)
         else:
             subprocess.run(
                 [ffmpeg_paths()[0], "-loglevel", "error", "-y", "-ss", f"{(row['duration'] or 0) / 2:.2f}",
-                 "-i", row["path"], "-frames:v", "1", "-vf", "scale=480:-2", "-q:v", "4", str(out)],
+                 "-i", row["path"], "-frames:v", "1", "-vf", rotate_filter(rotation) + "scale=480:-2", "-q:v", "4", str(out)],
                 capture_output=True,
             )
             if not out.exists():
@@ -496,10 +523,18 @@ class Trip:
         path = Path(row["path"])
         key = hashlib.sha1(str(path).encode()).hexdigest()[:16]
         with tempfile.TemporaryDirectory() as tmp:
-            frames = _frames(path, row["kind"], row["duration"], Path(tmp))
+            frames = _frames(path, row["kind"], row["duration"], Path(tmp), row["rotation"] or 0)
             if not frames:
                 raise RuntimeError("no picture could be read")
             updates: dict = {}
+
+            if faces is not None and not row["rotation_checked"]:
+                turn = _upright_rotation(faces, frames[0])
+                updates["rotation_checked"] = 1
+                if turn:
+                    self._set_rotation(str(path), turn)
+                    self.progress.notes.append(f"Turned {path.name} upright ({turn}°). Use the rotate button if it's wrong.")
+                    frames = _frames(path, row["kind"], row["duration"], Path(tmp), turn)
 
             if faces is not None and not row["faces_done"]:
                 found = []
@@ -575,12 +610,32 @@ def _guess_places(rows: list[dict]) -> None:
         row["place_guessed"] = True
 
 
-def _frames(path: Path, kind: str, duration: float, out_dir: Path) -> list[Path]:
+def rotate_filter(rotation: int) -> str:
+    """FFmpeg filter that turns a video clockwise by 90, 180 or 270 degrees."""
+    return {90: "transpose=1,", 180: "hflip,vflip,", 270: "transpose=2,"}.get(rotation % 360, "")
+
+
+def _upright_rotation(faces, frame: Path) -> int:
+    """If a picture has no upright faces but clear faces when turned, it was saved sideways or upside down."""
+    with Image.open(frame) as img:
+        picture = img.convert("RGB")
+    best = max((f.score for f in faces.find(np.array(picture))), default=0.0)
+    if best >= 0.5:
+        return 0
+    turns = {}
+    for turn in (90, 180, 270):
+        found = faces.find(np.array(picture.rotate(-turn, expand=True)))
+        turns[turn] = max((f.score for f in found), default=0.0)
+    turn = max(turns, key=turns.get)
+    return turn if turns[turn] >= 0.8 else 0
+
+
+def _frames(path: Path, kind: str, duration: float, out_dir: Path, rotation: int = 0) -> list[Path]:
     """Pictures to look at: the photo itself, or a few frames spread through a video."""
     if kind == "photo":
-        out = out_dir / "photo.jpg"
+        out = out_dir / f"photo_{rotation}.jpg"
         with Image.open(path) as img:
-            img = ImageOps.exif_transpose(img).convert("RGB")
+            img = ImageOps.exif_transpose(img).convert("RGB").rotate(-rotation, expand=True)
             img.thumbnail((1600, 1600))
             img.save(out, quality=90)
         return [out]
@@ -588,10 +643,10 @@ def _frames(path: Path, kind: str, duration: float, out_dir: Path) -> list[Path]
     times = [duration / 2] if count == 1 else [duration * (0.1 + 0.8 * i / (count - 1)) for i in range(count)]
     frames = []
     for i, t in enumerate(times):
-        out = out_dir / f"frame_{i}.jpg"
+        out = out_dir / f"frame_{i}_{rotation}.jpg"
         subprocess.run(
             [ffmpeg_paths()[0], "-loglevel", "error", "-y", "-ss", f"{t:.2f}", "-i", str(path),
-             "-frames:v", "1", "-vf", "scale='min(1600,iw)':-2", "-q:v", "3", str(out)],
+             "-frames:v", "1", "-vf", rotate_filter(rotation) + "scale='min(1600,iw)':-2", "-q:v", "3", str(out)],
             capture_output=True,
         )
         if out.exists():
