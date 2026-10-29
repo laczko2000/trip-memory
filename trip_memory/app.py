@@ -184,6 +184,7 @@ class Page:
                 story_tab = ui.tab("Storyboard", icon="view_timeline")
                 video_tab = ui.tab("Make video", icon="movie")
             self.library_tab = library_tab
+        self.people_tab = people_tab
             with ui.tab_panels(tabs, value=self.choose_tab).classes("w-full") as self.panels:
                 with ui.tab_panel(self.choose_tab):
                     self.choose_view()
@@ -606,7 +607,7 @@ class Page:
             return
         people = self.trip.people()
         if not people:
-            ui.label("No faces found yet.").classes("text-gray-500")
+            self.no_people_yet()
             return
         names = self.trip.person_names()
         named = [p for p in people if p["status"] == "named"]
@@ -648,6 +649,33 @@ class Page:
                                 ui.image(data_url(person["faces"][0])).classes("w-16 h-16 rounded")
                             ui.label(f"In {person['count']}").classes("text-xs text-gray-500")
                             ui.button("Restore", on_click=lambda pid=person["id"]: self.restore(pid)).props("flat dense size=sm")
+
+    def no_people_yet(self) -> None:
+        """Why the People tab is empty, and what to do about it."""
+        st = self.trip.face_status()
+        if st["error"]:
+            ui.label(f"The face finder could not start: {st['error']}").classes("text-orange-700")
+            ui.label("Check your internet connection (it downloads once, about 290 MB), then click Analyse again.") \
+                .classes("text-sm text-gray-600")
+        elif st["done"] < st["chosen"]:
+            ui.label(f"{st['chosen'] - st['done']} of your {st['chosen']} chosen files haven't been checked for faces yet.") \
+                .classes("text-gray-700")
+            ui.button("Analyse the chosen files", icon="auto_awesome", on_click=self.analyse_chosen)
+        elif st["ungrouped"]:
+            ui.label(f"{st['faces']} faces were found but not sorted into people yet.").classes("text-gray-700")
+            ui.button("Sort them into people", icon="people", on_click=self.analyse_chosen)
+        else:
+            ui.label(f"No faces were found in your {st['chosen']} chosen files.").classes("text-gray-700")
+        if st["done"]:
+            ui.button("Look for faces again", icon="refresh", on_click=self.look_for_faces_again).props("outline")
+
+    async def look_for_faces_again(self) -> None:
+        if self.trip.progress.running:
+            ui.notify("Still working, please wait.", type="warning")
+            return
+        self.trip.look_for_faces_again()
+        await self.analyse_chosen()
+        self.panels.value = self.people_tab
 
     def person_grid(self, people: list[dict], names: list[str]) -> None:
         with ui.grid().classes("w-full gap-3 grid-cols-1 sm:grid-cols-2 md:grid-cols-3"):

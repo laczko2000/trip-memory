@@ -650,6 +650,8 @@ class Trip:
             p.message = "Loading the AI models (the first time this downloads about 1 GB)…"
             notify()
             faces = self._load(lambda: FaceFinder(app_dir() / "models"), "people")
+            if faces is not None:
+                self.execute("DELETE FROM meta WHERE key = 'faces_error'")
             scenes = self._load(lambda: SceneTagger(app_dir() / "models" / "clip"), "scenes")
             if scenes is not None:
                 tagger = self._load(lambda: Tagger(scenes), "tags")
@@ -663,14 +665,22 @@ class Trip:
             except Exception as exc:
                 traceback.print_exc()
                 p.notes.append(f"Could not analyse {Path(row['path']).name}: {exc}")
-        self._find_camera_moves(notify)
-        self._group_stories()  # pictures turned upright get a fresh look-alike fingerprint
-        self._group_look_alike()
-        self._find_subjects(tagger, notify)
-
-        p.message = "Grouping faces into people…"
-        notify()
-        self._group_people()
+        # Faces become people first, so a problem in one of the later steps never leaves the People tab empty.
+        steps = [
+            ("Grouping faces into people…", self._group_people),
+            ("Reading camera moves…", lambda: self._find_camera_moves(notify)),
+            ("Spotting look-alike shots…", self._group_stories),  # pictures turned upright get a fresh fingerprint
+            ("Spotting look-alike shots…", self._group_look_alike),
+            ("Naming the stories…", lambda: self._find_subjects(tagger, notify)),
+        ]
+        for message, step in steps:
+            p.message = message
+            notify()
+            try:
+                step()
+            except Exception as exc:
+                traceback.print_exc()
+                p.notes.append(f"{message.rstrip('…')} stopped: {exc}")
 
     def _find_camera_moves(self, notify: Callable[[], None]) -> None:
         """How the camera moves in each video (pans, zooms, whips...), for videos analysed before this was added."""
@@ -902,7 +912,28 @@ class Trip:
         except Exception as exc:
             traceback.print_exc()
             self.progress.notes.append(f"Could not load the AI model for {what}: {exc}")
+            if what == "people":
+                self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('faces_error', ?)", (str(exc)[:300],))
             return None
+
+    def face_status(self) -> dict:
+        """For the People tab: how far finding faces got among the chosen files."""
+        row = self.query(
+            "SELECT COUNT(*) AS chosen, SUM(faces_done) AS done, "
+            "(SELECT COUNT(*) FROM faces f JOIN items i ON i.path = f.path WHERE i.chosen = 1) AS faces, "
+            "(SELECT COUNT(*) FROM faces f JOIN items i ON i.path = f.path WHERE i.chosen = 1 AND f.person_id IS NULL) "
+            "AS ungrouped FROM items WHERE chosen = 1")[0]
+        error = self.query("SELECT value FROM meta WHERE key = 'faces_error'")
+        return {"chosen": row["chosen"] or 0, "done": row["done"] or 0, "faces": row["faces"] or 0,
+                "ungrouped": row["ungrouped"] or 0, "error": error[0]["value"] if error else None}
+
+    def look_for_faces_again(self) -> None:
+        """Forget the faces found in the chosen files, so the next Analyse looks again (names you gave stay)."""
+        with self._lock:
+            self.db.execute("DELETE FROM faces WHERE path IN (SELECT path FROM items WHERE chosen = 1)")
+            self.db.execute("UPDATE items SET faces_done = 0 WHERE chosen = 1")
+            self.db.execute("DELETE FROM meta WHERE key = 'faces_error'")
+            self.db.commit()
 
     def _store_found(self, found: list[MediaItem]) -> None:
         with self._lock:
