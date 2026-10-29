@@ -184,7 +184,7 @@ class Page:
                 story_tab = ui.tab("Storyboard", icon="view_timeline")
                 video_tab = ui.tab("Make video", icon="movie")
             self.library_tab = library_tab
-        self.people_tab = people_tab
+            self.people_tab = people_tab
             with ui.tab_panels(tabs, value=self.choose_tab).classes("w-full") as self.panels:
                 with ui.tab_panel(self.choose_tab):
                     self.choose_view()

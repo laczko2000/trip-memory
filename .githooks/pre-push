@@ -1,0 +1,6 @@
+#!/bin/bash
+# Never push code that can't start: compile everything, load the screen, run the tests.
+cd "$(git rev-parse --show-toplevel)" || exit 1
+uv run python -m compileall -q trip_memory || { echo "pre-push: code does not compile"; exit 1; }
+uv run python -c "import trip_memory.app" || { echo "pre-push: the app does not load"; exit 1; }
+uv run pytest -q -x || { echo "pre-push: tests failed"; exit 1; }
