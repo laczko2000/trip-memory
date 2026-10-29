@@ -217,7 +217,7 @@ class Trip:
             todo = self.query("SELECT * FROM items WHERE faces_done = 0 OR scene_done = 0 OR thumb IS NULL ORDER BY taken_at")
             faces = scenes = None
             if todo:
-                p.message = "Loading the AI models (the first time this downloads about 650 MB)…"
+                p.message = "Loading the AI models (the first time this downloads about 1 GB)…"
                 notify()
                 faces = self._load(lambda: FaceFinder(app_dir() / "models"), "people")
                 scenes = self._load(lambda: SceneTagger(app_dir() / "models" / "clip"), "scenes")

@@ -19,7 +19,7 @@ Nothing is uploaded anywhere.
    - **what**: a suggested scene type such as Beach, City, Food or Group photo,
    - **who**: faces grouped by person.
 
-   The first time, it downloads the free AI models (about 650 MB). Each trip is analysed once and remembered;
+   The first time, it downloads the free AI models (about 1 GB). Each trip is analysed once and remembered;
    adding new files later only analyses the new ones.
 2. **Library tab:** browse the thumbnails, filter by day, place, scene or person, correct a scene if it's wrong,
    and tick or untick what goes into the video.
