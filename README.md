@@ -58,6 +58,7 @@ Everything runs on your Mac. Nothing is uploaded.
 
 ## What's new
 
+- **0.21.1:** the Storyboard is one long list you scroll through, with no pages.
 - **0.21:** speed effects. Auto-edit plays calm, cinematic moments in calm music in slow motion (0.5× for high-frame-rate videos such as iPhone slo-mo, 0.75× otherwise, so it stays smooth), and speeds slow shots up 1.5× in lively music, with the reason shown. Change any clip's speed in the Storyboard (0.5× to 2×), or switch *Speed effects* off in Auto-edit.
 - **0.20:** *Analyse* now reads how the camera moves in each video: Static camera, Pan left/right, Tilt up/down, Zoom in/out, Whip pan, Turn around, Rolling, Fast camera. They show as tags (filter by them in the Library). Auto-edit uses them: a whip pan or fast camera counts as action, a pan carries on into the next shot with a whip in the same direction, and a zoom in leads into a Zoom punch. Click *Analyse* once so existing videos get read.
 - **0.19:** a *Storyline* choice in Auto-edit. *Teaser, then the stories* (the default) opens with a quick teaser of the most exciting shot from each of the busiest stories. Every story starts with a wide, calm view, look-alike shots never come back to back, and the video ends on a calm shot. Also *Story by story* (no teaser) and *Plain date order*.

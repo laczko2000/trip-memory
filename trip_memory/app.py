@@ -880,13 +880,8 @@ class Page:
             "Use the arrows to change the order. For videos, drag the two ends of the bar to choose which part to keep. "
             "The transition setting is for the cut after that clip."
         ).classes("text-sm text-gray-600")
-        pages = max(1, -(-len(board) // STORY_PAGE_SIZE))
-        self.story_page = min(self.story_page, pages)
-        first = (self.story_page - 1) * STORY_PAGE_SIZE
-        for n, it in enumerate(board[first : first + STORY_PAGE_SIZE], first + 1):
+        for n, it in enumerate(board, 1):  # one long list you scroll through
             self.story_row(n, it, last=n == len(board))
-        if pages > 1:
-            ui.pagination(1, pages, direction_links=True, value=self.story_page, on_change=lambda e: self.go_to_story_page(e.value))
 
     def auto_edit_card(self) -> None:
         music = self.music_path()
