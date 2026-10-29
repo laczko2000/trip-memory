@@ -58,6 +58,7 @@ Everything runs on your Mac. Nothing is uploaded.
 
 ## What's new
 
+- **0.21.3:** fixed finished videos stopping half way when the new quick transitions were used: every transition now starts and ends exactly on a frame.
 - **0.21.2:** if a finished video ever comes out shorter than planned, the app now tries again by itself (on the main processor, then with every clip re-made in one plain format) and saves a report next to the video.
 - **0.21.1:** the Storyboard is one long list you scroll through, with no pages.
 - **0.21:** speed effects. Auto-edit plays calm, cinematic moments in calm music in slow motion (0.5× for high-frame-rate videos such as iPhone slo-mo, 0.75× otherwise, so it stays smooth), and speeds slow shots up 1.5× in lively music, with the reason shown. Change any clip's speed in the Storyboard (0.5× to 2×), or switch *Speed effects* off in Auto-edit.

@@ -141,5 +141,36 @@ def test_a_short_join_is_tried_again_and_reported(tmp_path, monkeypatch):
     monkeypatch.setattr(r, "probe", lambda _p: {"streams": []})
     seg = tmp_path / "a.mp4"
     seg.write_bytes(b"")
-    r._join([seg, seg], [5.0, 5.0], [(None, 0.8)], RenderSettings(), tmp_path / "v.mp4", lambda _f: None)
+    r._join([seg, seg], [5.0, 5.0], [(None, 0.8)], RenderSettings(), tmp_path / "v.mp4", lambda _f, _m="": None)
     assert len(calls) == 2 and (tmp_path / "v.report.txt").exists()
+
+
+def test_quick_transitions_join_to_full_length(tmp_path):
+    """A real 38-clip cut with short effects (0.25 s, 0.35 s: not whole frames) once stopped at 26 of 61 s."""
+    from trip_memory.render import _join_once, _planned_length, _segment_length
+
+    frames = [71, 66, 54, 53, 51, 52, 47, 43, 43, 48, 66, 47, 46, 51, 47, 61, 47, 57, 62, 52, 47, 60, 51, 79, 66, 51,
+              47, 48, 50, 47, 75, 76, 43, 46, 47, 57, 44, 42]
+    sound = [2.346, 2.2, 1.8, 1.749, 1.7, 1.733, 1.557, 1.433, 1.433, 1.6, 2.2, 1.557, 1.533, 1.7, 1.557, 2.033, 1.557,
+             1.9, 2.048, 1.733, 1.557, 2.0, 1.7, 2.633, 2.2, 1.7, 1.557, 1.6, 1.664, 1.557, 2.5, 2.533, 1.433, 1.533,
+             1.557, 1.9, 1.45, 1.4]
+    cut = (None, 1 / 30)
+    styles = [("fadewhite", 0.3), ("hblur", 0.4), ("hblur", 0.4), ("fadewhite", 0.3), ("fadewhite", 0.3),
+              ("fadewhite", 0.3), cut, cut, cut, ("zoomin", 0.35), ("fadewhite", 0.3), cut, ("slideleft", 0.25),
+              ("fadewhite", 0.3), cut, ("slideup", 0.25), cut, cut, ("zoomin", 0.35), ("fadewhite", 0.3), cut,
+              ("slideleft", 0.25), ("fadewhite", 0.3), ("slideup", 0.25), ("zoomin", 0.35), ("fadewhite", 0.3), cut,
+              ("fadewhite", 0.3), ("slideleft", 0.25), cut, ("fadewhite", 0.3), cut, cut, ("slideup", 0.25), cut, cut,
+              cut]
+    ffmpeg = ffmpeg_paths()[0]
+    segments = []
+    for k, (n, audio) in enumerate(zip(frames, sound)):
+        seg = tmp_path / f"{k}.mp4"
+        subprocess.run([ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=96x54:r=30", "-f", "lavfi",
+                        "-i", "sine=sample_rate=48000", "-frames:v", str(n), "-af", f"atrim=0:{audio}",
+                        "-c:v", "libx264", "-video_track_timescale", "15360", "-c:a", "aac", "-ac", "2", str(seg)],
+                       check=True)
+        segments.append(seg)
+    lengths = [_segment_length(s) for s in segments]
+    settings = RenderSettings(width=96, height=54)
+    made = _join_once(segments, lengths, styles, settings, tmp_path / "out.mp4", lambda _f: None)
+    assert abs(made - _planned_length(lengths, styles, settings)) < 0.1

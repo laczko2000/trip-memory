@@ -16,7 +16,7 @@ HARD_CUT = "None (hard cut)"
 @dataclass(frozen=True)
 class Style:
     xfade: str | None  # FFmpeg's name for it; None = a hard cut
-    quick: float | None = None  # a quick effect lasts this long (seconds); None = your transition length
+    quick: float | None = None  # a quick effect lasts this long (seconds, whole frames); None = your transition length
 
 
 # Friendly name -> how FFmpeg draws it.
@@ -33,10 +33,10 @@ STYLES: dict[str, Style] = {
     "Wipe": Style("wipeleft"),
     "Zoom": Style("zoomin"),
     "Flash": Style("fadewhite", quick=0.3),
-    "Whip left": Style("slideleft", quick=0.25),
-    "Whip right": Style("slideright", quick=0.25),
-    "Whip up": Style("slideup", quick=0.25),
-    "Zoom punch": Style("zoomin", quick=0.35),
+    "Whip left": Style("slideleft", quick=8 / 30),
+    "Whip right": Style("slideright", quick=8 / 30),
+    "Whip up": Style("slideup", quick=8 / 30),
+    "Zoom punch": Style("zoomin", quick=10 / 30),
     "Blur": Style("hblur", quick=0.4),
     "Pixelate": Style("pixelize", quick=0.4),
     "Mixed": Style("mixed"),

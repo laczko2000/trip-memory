@@ -345,7 +345,8 @@ def render(
 
         report(prep_share, "Joining everything together")
         styles = [_transition_between(items[k - 1], k, settings) for k in range(1, len(items))]
-        _join(segments, lengths, styles, settings, out_path, lambda f: report(prep_share + (1 - prep_share) * f, "Joining everything together"))
+        _join(segments, lengths, styles, settings, out_path,
+              lambda f, message="Joining everything together": report(prep_share + (1 - prep_share) * f, message))
         report(1.0, "Done")
         return out_path
     finally:
@@ -376,17 +377,23 @@ def _join(
     if made >= total - 1.0:
         return
     tries = [f"First try: {made:.2f} s"]
+    _write_report(out, segments, lengths, styles, total, tries)  # straight away, in case the retries take long
     saved = _hardware["ok"]
     _hardware["ok"] = False
     try:
-        made = _join_once(segments, lengths, styles, s, out, progress)
+        second = "Second try (it came out too short): on the main processor, slower"
+        made = _join_once(segments, lengths, styles, s, out, lambda f: progress(f, second))
         tries.append(f"Main processor: {made:.2f} s")
         if made < total - 1.0:
             plain_dir = Path(tempfile.mkdtemp(prefix="trip-memory-plain-"))
             try:
-                plain = [_plain_copy(seg, plain_dir / f"{k}.mp4") for k, seg in enumerate(segments)]
+                third = "Third try: re-making every clip in a plain format"
+                plain = []
+                for k, seg in enumerate(segments):
+                    progress(k / len(segments) / 2, third)
+                    plain.append(_plain_copy(seg, plain_dir / f"{k}.mp4"))
                 plain_lengths = [_segment_length(p) for p in plain]
-                made = _join_once(plain, plain_lengths, styles, s, out, progress)
+                made = _join_once(plain, plain_lengths, styles, s, out, lambda f: progress(0.5 + f / 2, third))
                 tries.append(f"Plain clips: {made:.2f} s")
             finally:
                 shutil.rmtree(plain_dir, ignore_errors=True)
@@ -399,12 +406,12 @@ def _join(
 
 
 def _planned_length(lengths: list[float], styles: list[tuple[str | None, float]], s: RenderSettings) -> float:
-    total = lengths[0]
+    total = round(lengths[0] * FPS)
     for k in range(1, len(lengths)):
         style, seconds = styles[k - 1]
-        t = min(seconds, lengths[k - 1] * 0.4, lengths[k] * 0.4) if style else 1 / FPS
-        total += lengths[k] - t
-    return total
+        t = max(1, round(min(seconds, lengths[k - 1] * 0.4, lengths[k] * 0.4) * FPS)) if style else 1
+        total += round(lengths[k] * FPS) - t
+    return total / FPS
 
 
 def _plain_copy(seg: Path, out: Path) -> Path:
@@ -459,16 +466,20 @@ def _join_once(
         parts.append(f"[{k}:a]asetpts=PTS-STARTPTS,aresample=48000[sa{k}]")
     # Every cut overlaps the clips by the transition's length; a hard cut is a one-frame fade. (Joining
     # all cuts the same way keeps their timing predictable, e.g. for cutting on the music's beat.)
-    v_prev, a_prev, offset, total = "sv0", "sa0", 0.0, lengths[0]
+    # Everything is counted in whole frames, so every transition starts and ends exactly on a frame.
+    frames = [max(1, round(length * FPS)) for length in lengths]
+    v_prev, a_prev, total_frames = "sv0", "sa0", frames[0]
     for k in range(1, n):
         style, seconds = styles[k - 1]
         # A transition is never longer than ~40% of either clip.
-        t = min(seconds, lengths[k - 1] * 0.4, lengths[k] * 0.4) if style else 1 / FPS
-        offset = total - t
-        parts.append(f"[{v_prev}][sv{k}]xfade=transition={style or 'fade'}:duration={t:.3f}:offset={offset:.3f}[v{k}]")
-        parts.append(f"[{a_prev}][sa{k}]acrossfade=d={t:.3f}[a{k}]")
+        t_frames = max(1, round(min(seconds, lengths[k - 1] * 0.4, lengths[k] * 0.4) * FPS)) if style else 1
+        offset_frames = total_frames - t_frames
+        t, offset = t_frames / FPS, offset_frames / FPS
+        parts.append(f"[{v_prev}][sv{k}]xfade=transition={style or 'fade'}:duration={t:.6f}:offset={offset:.6f}[v{k}]")
+        parts.append(f"[{a_prev}][sa{k}]acrossfade=d={t:.6f}[a{k}]")
         v_prev, a_prev = f"v{k}", f"a{k}"
-        total = offset + lengths[k]
+        total_frames = offset_frames + frames[k]
+    total = total_frames / FPS
 
     # Gentle fade in from black at the start and out at the end.
     edge = min(1.0, total / 4)
