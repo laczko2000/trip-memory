@@ -33,6 +33,8 @@ class Shot:
     why: str | None = None  # why that transition was suggested
     speed: float = 1.0  # 0.5 = slow motion, 1.5 = sped up
     speed_why: str | None = None
+    effects: dict = field(default_factory=dict)  # {"punch": [seconds], "ramp": bool, "push": bool}
+    effects_why: str | None = None
 
 
 @dataclass
@@ -262,6 +264,7 @@ class Limits:
     cut_on: str = "strong"  # which beats the cuts go on: a key of CUT_ON
     storyline: str = "teaser"  # how the shots are arranged: a key of STORYLINES
     speed_effects: bool = True  # slow motion in calm moments, sped-up shots in lively ones
+    camera_effects: bool = True  # zoom transitions, punch-ins on big hits, slow push-ins, speed ramps
 
 
 @dataclass
@@ -440,6 +443,30 @@ def speed_for(row: dict, slot: Slot, seconds: float) -> tuple[float, str | None]
     return 1.0, None
 
 
+def effects_for(row: dict, slot: Slot, seconds: float, speed: float, hits: list[tuple[float, float]], turn: int,
+                shot_start: float | None = None) -> tuple[dict, str | None]:
+    # turn: how many shots since the last one with an effect (punch-ins and ramps are kept apart)
+    """Camera-style moves inside a shot, to suit the music: a punch-in on a big hit or a speed ramp when it's
+    lively, a slow push-in on a still shot when it's calm. Used on some shots only, so they stay special."""
+    if row["kind"] != "video":
+        return {}, None
+    pace, cinematic = pace_of(row)
+    tags = set(row.get("tags_final") or [])
+    if slot.energy >= 0.62:
+        inside = [(t - slot.start, h) for t, h in hits if slot.start + 0.3 < t < slot.end - 0.3 and h >= 0.75]
+        if inside and turn >= 2:
+            t, _ = max(inside, key=lambda x: x[1])
+            t += slot.start - (slot.start if shot_start is None else shot_start)  # from where the shot starts on screen
+            return {"punch": [round(t, 3)]}, "Punch-in on a big hit"
+        room = row.get("usable") or row.get("duration") or 0
+        if speed == 1.0 and seconds >= 2.0 and room >= seconds * 1.4 + 0.1 and turn >= 3:
+            return {"ramp": True}, "Speed ramp: fast through the middle of the shot"
+    if slot.energy < 0.38 and not cinematic and ({"Static camera", "Still", "Calm"} & tags or pace < 0.3) \
+            and seconds >= 2.0:
+        return {"push": True}, "Slow push-in: a still shot made cinematic"
+    return {}, None
+
+
 def fill_slots(slots: list[Slot], candidates: list[dict], limits: Limits) -> list[int]:
     """Choose a shot for every slot, keeping the trip in time order, matching lively shots to lively music.
 
@@ -537,9 +564,14 @@ def plan_to_music(
         for k in range(1, len(slots))
     ]
     chosen = transitions.recommend(cuts, transition_seconds)
+    if not limits.camera_effects:  # no zoom transitions either: a clean cut instead
+        chosen = [(HARD_CUT, "Clean cut on the beat") if name in transitions.ZOOM_INTO else (name, why)
+                  for name, why in chosen]
+    hits = [(float(t), float(a)) for t, a in zip(beats_at, accents)] if len(accents) == len(beats_at) else []
     overlap = [transitions.seconds_of(name, transition_seconds) for name, _ in chosen] + [0.0]  # into the next shot
 
     shots: list[Shot] = []
+    since_fx = 99
     begin = 0  # in video frames, where this shot starts
     for k, (slot, i) in enumerate(zip(slots, picks)):
         c = candidates[i]
@@ -549,15 +581,20 @@ def plan_to_music(
         begin = finish - round(overlap[k] * 30)
         start = 0.0
         speed, speed_why = speed_for(c, slot, seconds) if limits.speed_effects else (1.0, None)
+        effects, effects_why = (effects_for(c, slot, seconds, speed, hits, since_fx, finish / 30 - seconds)
+                                if limits.camera_effects else ({}, None))
+        since_fx = 0 if effects.get("punch") or effects.get("ramp") else since_fx + 1
+        if effects.get("ramp") and not limits.speed_effects:
+            effects, effects_why = {}, None
         if c["kind"] == "video":
             curve = curves.get(c["path"])
-            used = seconds * speed  # of the video itself
+            used = seconds * speed * (1.4 if effects.get("ramp") else 1.0)  # of the video itself
             longest_start = max(0.0, (c["duration"] or used) - used)
             start = best_start(curve, c["duration"], used) if curve is not None else longest_start / 2
             start = min(max(0.0, start), longest_start)
         transition, why = chosen[k] if k < len(chosen) else (None, None)
         shots.append(Shot(path=c["path"], kind=c["kind"], start=round(start, 2), seconds=seconds, transition=transition,
-                          why=why, speed=speed, speed_why=speed_why))
+                          why=why, speed=speed, speed_why=speed_why, effects=effects, effects_why=effects_why))
     used = {s.path for s in shots}
     length = begin / 30
     return Plan(shots=shots, left_out=[r["path"] for r in rows if r["path"] not in used], length=length, beat=song.beat)

@@ -58,6 +58,7 @@ Everything runs on your Mac. Nothing is uploaded.
 
 ## What's new
 
+- **0.23:** camera-style effects. New *Zoom through* (the shot rushes in, the next one lands zoomed and settles) and *Zoom out reveal* transitions, suggested at story changes, where the music lifts and on big hits. Inside shots: punch-in zooms on big hits and speed ramps (fast through the middle) in lively music, a slow push-in on still shots in calm music. Slow motion now blends frames so it no longer stutters. Each effect shows its reason in the Storyboard with a Remove button; switch them all off with *Camera effects* in Auto-edit.
 - **0.22:** smarter shot picking. Every video is scored five times a second for sharpness, steadiness, camera swing, brightness jumps, movement and sound. Auto-edit never uses the moments when the phone is being raised or lowered, blurred moments or wild swings, picks the best steady stretch of each clip, and prefers clips that have one. (The first Auto-edit after updating measures your videos again, which takes a little longer once.)
 - **0.21.4:** previews made before a file was turned are made again when the trip opens, so the Library shows each file the way it plays and goes into the video. Turned files show a small ↻ 90° label.
 - **0.21.3:** fixed finished videos stopping half way when the new quick transitions were used: every transition now starts and ends exactly on a frame.

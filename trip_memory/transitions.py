@@ -39,8 +39,13 @@ STYLES: dict[str, Style] = {
     "Zoom punch": Style("zoomin", quick=10 / 30),
     "Blur": Style("hblur", quick=0.4),
     "Pixelate": Style("pixelize", quick=0.4),
+    "Zoom through": Style(None),  # a hard cut: the first shot rushes in, the next one lands zoomed and settles
+    "Zoom out reveal": Style(None),  # a hard cut: the next shot starts close up and pulls back
     "Mixed": Style("mixed"),
 }
+# Transitions drawn by zooming the shots themselves (around a clean cut), and how each side moves.
+ZOOM_OUT_OF = {"Zoom through": "zoom"}  # the shot before the cut
+ZOOM_INTO = {"Zoom through": "zoom", "Zoom out reveal": "reveal"}  # the shot after it
 MIXED = ["fade", "slideleft", "circleopen", "dissolve", "wipeleft", "fadeblack", "zoomin", "slideup"]
 
 
@@ -53,8 +58,8 @@ def seconds_of(name: str | None, default: float) -> float:
 
 
 # Families to rotate through, so the same effect doesn't come twice in a row.
-STORY_LIVELY = ["Zoom punch", "Flash", "Whip left", "Whip up"]
-STORY_CALM = ["Smooth wipe", "Circle", "Dissolve", "Radial"]
+STORY_LIVELY = ["Zoom through", "Flash", "Whip left", "Zoom punch", "Whip up"]
+STORY_CALM = ["Zoom out reveal", "Smooth wipe", "Circle", "Dissolve", "Radial"]
 WHIPS = ["Whip left", "Whip right"]
 CALM_BLENDS = ["Dissolve", "Fade"]
 LIVELY, CALM = 0.62, 0.38
@@ -95,7 +100,7 @@ def recommend(cuts: list[Cut], soft_seconds: float) -> list[tuple[str, str]]:
             name = take(family, key)
             why = f"Next story: {b['story_name']}" if b.get("story_name") else "Next story"
         elif lift > 0.2:
-            name, why = "Flash", "The music lifts here"
+            name, why = "Zoom through", "The music lifts here: zoom into it"
         elif lift < -0.2:
             name, why = "Blur", "The music calms down"
         elif energy >= LIVELY:
@@ -106,9 +111,9 @@ def recommend(cuts: list[Cut], soft_seconds: float) -> list[tuple[str, str]]:
                 name = "Whip left" if "Pan right" in tags else "Whip right" if "Pan left" in tags else take(WHIPS, "whip")
                 why = "A fast camera move: a whip pan keeps it flowing"
             elif "Zoom in" in tags and since_effect >= 3:
-                name, why = "Zoom punch", "The shot zooms in: punch through into the next one"
+                name, why = "Zoom through", "The shot zooms in: carry the zoom through the cut"
             elif cut.hit >= 0.8 and since_effect >= 4:
-                name, why = "Zoom punch", "A big hit in the music"
+                name, why = "Zoom through", "A big hit in the music"
             else:
                 name, why = HARD_CUT, "Quick cut on the beat"
         elif energy < CALM:

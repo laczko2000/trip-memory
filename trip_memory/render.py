@@ -7,6 +7,7 @@ mixed in, and the result is saved as one MP4.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import os
 import shutil
@@ -23,7 +24,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 from .media import MediaItem
-from .transitions import MIXED, STYLES, seconds_of
+from .transitions import MIXED, STYLES, ZOOM_INTO, ZOOM_OUT_OF, seconds_of
 from .tools import FFmpegError, has_encoder, has_filter, probe, run_ffmpeg
 
 # Friendly name -> FFmpeg xfade transition. None means a hard cut.
@@ -112,24 +113,104 @@ def clip_range(item: MediaItem, s: RenderSettings) -> tuple[float, float]:
     return 0.0, item.duration
 
 
+RAMP_SOURCE = 1.4  # a speed ramp plays the middle 40% of the shot twice as fast, so it uses 40% more video
+RAMP = (0.3, 0.4, 0.3)  # shares of the shot on screen: normal, fast, normal
+
+
+def source_factor(effects: dict | None) -> float:
+    """How much of the video a shot uses for each second on screen (before its speed)."""
+    return RAMP_SOURCE if (effects or {}).get("ramp") else 1.0
+
+
+def _atempo(factor: float) -> str:
+    """Speed sound up or down without changing its pitch (one step only goes from half to double speed)."""
+    steps = []
+    while factor > 2.0:
+        steps.append(2.0)
+        factor /= 2.0
+    while factor < 0.5:
+        steps.append(0.5)
+        factor /= 0.5
+    steps.append(factor)
+    return ",".join(f"atempo={f:.4f}" for f in steps if abs(f - 1) > 1e-4)
+
+
 def _video_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
     start, end = clip_range(item, s)
     speed = min(2.0, max(0.5, item.speed or 1.0))  # the range the sound can follow too
-    length = (end - start) / speed  # on screen
-    pre = (_hdr_to_sdr() if item.hdr else "") + rotate_filter(item.rotation)
-    if abs(speed - 1) > 1e-3:
-        pre = f"setpts=(PTS-STARTPTS)/{speed:.4f}," + pre  # slow motion or sped up
-    graph = f"[0:v]{pre}format=yuv420p[src];" + _fit_with_blur("src", s.width, s.height, "fit")
-    graph += f";[fit]fps={FPS},format=yuv420p[v]"
+    effects = item.effects or {}
+    length = (end - start) / speed / source_factor(effects)  # on screen
+    smooth = f",framerate=fps={FPS}" if speed < 0.95 else ""  # slow motion: blend frames, so it doesn't stutter
+    look = (_hdr_to_sdr() if item.hdr else "") + rotate_filter(item.rotation)
+    graph = ""
+    if effects.get("ramp"):
+        # Normal speed, then twice as fast through the middle, then normal again.
+        a, b = RAMP[0] * length * speed, (RAMP[0] * length + RAMP[1] * length * 2) * speed  # in the video's own time
+        graph += (f"[0:v]setpts=PTS-STARTPTS,split=3[r1][r2][r3];"
+                  f"[r1]trim=0:{a:.4f},setpts=(PTS-STARTPTS)/{speed:.4f}{smooth}[q1];"
+                  f"[r2]trim={a:.4f}:{b:.4f},setpts=(PTS-STARTPTS)/{2 * speed:.4f}[q2];"
+                  f"[r3]trim={b:.4f},setpts=(PTS-STARTPTS)/{speed:.4f}{smooth}[q3];"
+                  f"[q1][q2][q3]concat=n=3:v=1:a=0,{look}format=yuv420p[src];")
+    elif abs(speed - 1) > 1e-3:
+        graph += f"[0:v]setpts=(PTS-STARTPTS)/{speed:.4f}{smooth},{look}format=yuv420p[src];"
+    else:
+        graph += f"[0:v]{look}format=yuv420p[src];"
+    graph += _fit_with_blur("src", s.width, s.height, "fit")
+    graph += f";[fit]fps={FPS}{_zoom_filter(item, length)},format=yuv420p[v]"
     inputs = ["-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", str(item.path)]
     if item.has_audio and item.sound and s.keep_clip_sound:
-        tempo = f"atempo={speed:.4f}," if abs(speed - 1) > 1e-3 else ""  # the sound keeps its pitch
-        graph += f";[0:a]{tempo}aformat=sample_rates=48000:channel_layouts=stereo,volume={item.volume * s.clip_volume:.2f}[a]"
+        level = f"aformat=sample_rates=48000:channel_layouts=stereo,volume={item.volume * s.clip_volume:.2f}"
+        if effects.get("ramp"):
+            parts = [_atempo(speed), _atempo(2 * speed), _atempo(speed)]
+            graph += (f";[0:a]asetpts=PTS-STARTPTS,asplit=3[s1][s2][s3];"
+                      f"[s1]atrim=0:{a:.4f},asetpts=PTS-STARTPTS{',' + parts[0] if parts[0] else ''}[t1];"
+                      f"[s2]atrim={a:.4f}:{b:.4f},asetpts=PTS-STARTPTS{',' + parts[1] if parts[1] else ''}[t2];"
+                      f"[s3]atrim={b:.4f},asetpts=PTS-STARTPTS{',' + parts[2] if parts[2] else ''}[t3];"
+                      f"[t1][t2][t3]concat=n=3:v=0:a=1,{level}[a]")
+        else:
+            tempo = _atempo(speed)  # the sound keeps its pitch
+            graph += f";[0:a]{tempo + ',' if tempo else ''}{level}[a]"
     else:
         inputs += ["-f", "lavfi", "-t", f"{length:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
         graph += ";[1:a]anull[a]"
     _encode_segment(inputs, graph, length, out, s)
     return length
+
+
+ZOOM_FRAMES = 9  # a zoom through a cut takes 0.3 s on each side
+REVEAL_FRAMES = 24  # a zoom-out reveal settles over 0.8 s
+
+
+def _zoom_filter(item: MediaItem, length: float) -> str:
+    """Camera-style zooms on the shot, frame by frame and smoothly (not rounded to whole pixels):
+    rushing in at its end or landing at its start (zoom transitions), short punch-ins on the music's big
+    hits, and a slow push-in for a still, cinematic shot. Empty when the shot has none."""
+    effects = item.effects or {}
+    n = max(1, round(length * FPS))
+    parts = []
+    if effects.get("push"):
+        parts.append(f"0.08*in/{n}")
+    if item.fx_out == "zoom":
+        k = min(ZOOM_FRAMES, n // 3)
+        parts.append(f"if(gte(in,{n - k}),0.5*pow((in-{n - k})/{k},2),0)")
+    if item.fx_in == "zoom":
+        k = min(ZOOM_FRAMES, n // 3)
+        parts.append(f"if(lt(in,{k}),0.5*pow(1-in/{k},2),0)")
+    elif item.fx_in == "reveal":
+        k = min(REVEAL_FRAMES, n // 2)
+        parts.append(f"if(lt(in,{k}),0.45*pow(1-in/{k},3),0)")
+    for t in effects.get("punch") or []:
+        f = round(t * FPS)
+        if 0 < f < n:
+            parts.append(f"if(gte(in,{f}),0.12*exp(-(in-{f})/6),0)")
+    if not parts:
+        return ""
+    z = f"(1+{'+'.join(parts)})"
+    corner = {"l": f"W/2-W/(2*{z})", "r": f"W/2+W/(2*{z})", "t": f"H/2-H/(2*{z})", "b": f"H/2+H/(2*{z})"}
+    expr = lambda v: v.replace(",", "\\,")  # noqa: E731  (commas inside a filter option)
+    return (f",perspective=x0='{expr(corner['l'])}':y0='{expr(corner['t'])}':x1='{expr(corner['r'])}':"
+            f"y1='{expr(corner['t'])}':x2='{expr(corner['l'])}':y2='{expr(corner['b'])}':x3='{expr(corner['r'])}':"
+            f"y3='{expr(corner['b'])}':interpolation=linear:eval=frame")
 
 
 def rotate_filter(rotation: int) -> str:
@@ -273,7 +354,7 @@ def _segment_key(item: MediaItem, s: RenderSettings) -> str:
         parts += [item.title]
     else:
         parts += [clip_range(item, s), item.has_audio and item.sound and s.keep_clip_sound, item.volume * s.clip_volume,
-                  item.speed]
+                  item.speed, sorted((item.effects or {}).items()), item.fx_in, item.fx_out]
     return hashlib.sha1(repr(parts).encode()).hexdigest()[:20]
 
 
@@ -331,6 +412,15 @@ def render(
     workers = max(2, min(6, (os.cpu_count() or 4) // 2))
 
     try:
+        # Zoom transitions are drawn on the shots on either side of the cut.
+        items = [
+            dataclasses.replace(
+                item,
+                fx_in=ZOOM_INTO.get((items[k - 1].transition or settings.transition) if k else "") if item.kind == "video" else None,
+                fx_out=ZOOM_OUT_OF.get(item.transition or settings.transition) if item.kind == "video" and k < len(items) - 1 else None,
+            )
+            for k, item in enumerate(items)
+        ]
         # The same file used twice is prepared once.
         unique = {_segment_key(item, settings): item for item in items}
         ready: dict[str, Path] = {}

@@ -49,6 +49,10 @@ class MediaItem:
     sound: bool = True  # for videos: use the clip's own sound
     volume: float = 1.0  # its loudness (1.0 = as recorded, up to 2.0)
     speed: float = 1.0  # 0.5 = slow motion, 2 = twice as fast
+    # Camera-style effects inside the shot: {"punch": [seconds...], "ramp": bool, "push": bool}
+    effects: dict | None = None
+    fx_in: str | None = None  # set while rendering: "zoom" or "reveal" from the transition into this shot
+    fx_out: str | None = None  # "zoom" from the transition out of it
     title: str | None = None  # for kind "title": the chapter card text, two lines split by "\n"
 
     @property

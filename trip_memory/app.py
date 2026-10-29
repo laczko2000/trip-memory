@@ -24,7 +24,7 @@ from . import taps as song_taps
 from .beats import song_length
 from .autoedit import CUT_ON, STORYLINES
 from .autoedit import Limits as AutoLimits
-from .render import TRANSITIONS, RenderSettings, clip_range, render
+from .render import TRANSITIONS, RenderSettings, clip_range, render, source_factor
 from .scenes import SCENES
 from .tags import ALL_TAGS, EDITABLE_TAGS, TAG_GROUP
 
@@ -929,6 +929,8 @@ class Page:
                 }.get(limits.cut_on, "")).classes("text-sm text-gray-600")
             ui.switch("Speed effects: slow motion in calm, cinematic moments; slow shots sped up in lively music",
                       value=limits.speed_effects, on_change=lambda e: self.set_limit("speed_effects", e.value))
+            ui.switch("Camera effects: zoom transitions, punch-ins on big hits, speed ramps, slow push-ins on still shots",
+                      value=limits.camera_effects, on_change=lambda e: self.set_limit("camera_effects", e.value))
             ui.label({
                 "teaser": "Storyline: opens with a quick teaser of the most exciting shots, then tells each story; every "
                           "story starts with a wide, calm view, look-alike shots never come back to back, and the "
@@ -1094,6 +1096,7 @@ class Page:
                         with ui.row().classes("items-center gap-4"):
                             self.sound_control(it)
                             self.speed_control(it)
+                        self.effects_control(it)
                     else:
                         ui.label(f"Photo · {it['seconds']:.1f} s" if it["seconds"] else "Photo").classes("text-xs text-gray-500")
                 with ui.column().classes("gap-1 w-56"):
@@ -1148,9 +1151,9 @@ class Page:
         label = ui.label().classes("text-xs text-gray-600")
 
         def show(lo: float, hi: float) -> None:
-            speed = it.get("speed") or 1.0
+            speed = (it.get("speed") or 1.0) * source_factor(json.loads(it["effects"]) if it.get("effects") else None)
             label.text = f"Keeping {fmt_length(lo)} to {fmt_length(hi)} ({hi - lo:.1f} s of {fmt_length(it['duration'])})" + (
-                f" · {(hi - lo) / speed:.1f} s on screen at {speed:g}×" if abs(speed - 1) > 1e-3 else "")
+                f" · {(hi - lo) / speed:.1f} s on screen" if abs(speed - 1) > 1e-3 else "")
 
         it["_show_trim"] = lambda: show(*self.kept_part(it))
 
@@ -1168,6 +1171,21 @@ class Page:
             kept.update(min=lo, max=hi)
             if box:
                 ui.run_javascript(f"tmPlayPart('{box}', {lo}, {hi}, {from_})")
+
+    def effects_control(self, it: dict) -> None:
+        """The camera-style effect on a shot, if Auto-edit gave it one, with a button to take it off."""
+        if not it.get("effects"):
+            return
+        with ui.row().classes("items-center gap-2") as row:
+            ui.label(f"✨ {it.get('effects_why') or 'Camera effect'}").classes("text-xs text-purple-700")
+
+            def remove() -> None:
+                self.trip.clear_effects(it["path"])
+                it["effects"] = None
+                row.set_visibility(False)
+                ui.notify("Effect taken off")
+
+            ui.button("Remove", on_click=remove).props("flat dense size=sm no-caps")
 
     def speed_control(self, it: dict) -> None:
         speeds = {0.5: "0.5× slow motion", 0.75: "0.75× slower", 1.0: "1× normal speed", 1.5: "1.5× faster", 2.0: "2× fast"}

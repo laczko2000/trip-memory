@@ -174,3 +174,20 @@ def test_quick_transitions_join_to_full_length(tmp_path):
     settings = RenderSettings(width=96, height=54)
     made = _join_once(segments, lengths, styles, settings, tmp_path / "out.mp4", lambda _f: None)
     assert abs(made - _planned_length(lengths, styles, settings)) < 0.1
+
+
+def test_zooms_punch_ins_and_speed_ramps_keep_the_length(tmp_path):
+    trip = tmp_path / "trip"
+    trip.mkdir()
+    make_clip(trip / "a.mp4", "640x360", 4, "2025-07-03T10:00:00Z")
+    make_clip(trip / "b.mp4", "640x360", 4, "2025-07-03T10:01:00Z")
+    make_clip(trip / "c.mp4", "640x360", 4, "2025-07-03T10:02:00Z")
+    items, _ = scan_folder(trip)
+    a, b, c = items
+    a.transition, a.effects = "Zoom through", {"push": True}
+    b.trim_start, b.trim_end, b.effects, b.sound = 0.0, 2.8, {"ramp": True, "punch": [0.5]}, True  # 2 s on screen
+    b.transition = "Zoom out reveal"
+    c.speed = 0.5  # smooth slow motion
+    c.trim_start, c.trim_end = 0.0, 1.5
+    out = render(items, RenderSettings(width=320, height=180, transition_seconds=0.5), tmp_path / "fx.mp4")
+    assert abs(float(probe(str(out))["format"]["duration"]) - (4 + 2 + 3)) < 0.2

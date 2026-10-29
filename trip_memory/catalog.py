@@ -28,6 +28,7 @@ from . import autoedit, motion, stories
 from .scenes import SceneTagger, mean_vector
 from .tags import TAG_GROUP, Tagger, group_name, look_alike_groups, people_tag, story_subject
 from .tools import ffmpeg_paths, probe
+from .render import RAMP_SOURCE, source_factor
 
 
 def app_dir() -> Path:
@@ -91,7 +92,9 @@ CREATE TABLE IF NOT EXISTS items (
     camera_moves TEXT,
     speed REAL DEFAULT 1.0,
     speed_why TEXT,
-    fps REAL
+    fps REAL,
+    effects TEXT,
+    effects_why TEXT
 );
 CREATE TABLE IF NOT EXISTS story_info (
     key TEXT PRIMARY KEY,  -- the story's first file
@@ -158,6 +161,7 @@ class Trip:
             "look_group INTEGER", "tags_done INTEGER DEFAULT 0", "seconds REAL", "curves TEXT",
             "clip_sound INTEGER DEFAULT 0", "clip_volume REAL DEFAULT 1.0", "cut_out INTEGER DEFAULT 0", "subjects TEXT",
             "transition_why TEXT", "camera_moves TEXT", "speed REAL DEFAULT 1.0", "speed_why TEXT", "fps REAL",
+            "effects TEXT", "effects_why TEXT",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
@@ -307,6 +311,7 @@ class Trip:
                     sound=bool(r["clip_sound"]),  # videos are silent unless you switch their sound on
                     volume=1.0 if r["clip_volume"] is None else r["clip_volume"],
                     speed=r["speed"] or 1.0,
+                    effects=json.loads(r["effects"]) if r["effects"] else None,
                 )
             )
         return result
@@ -417,6 +422,15 @@ class Trip:
         report(1.0, "Done")
         return result
 
+    def clear_effects(self, path: str) -> None:
+        """Take the punch-in, speed ramp or push-in off a shot (the same part of the video stays in use)."""
+        row = self.query("SELECT effects, trim_start, trim_end FROM items WHERE path = ?", (path,))
+        if row and row[0]["effects"] and json.loads(row[0]["effects"]).get("ramp") and row[0]["trim_end"] is not None:
+            # A ramp used 40% more video for the same time on screen: keep the shot just as long.
+            start, end = row[0]["trim_start"], row[0]["trim_end"]
+            self.execute("UPDATE items SET trim_end = ? WHERE path = ?", (start + (end - start) / RAMP_SOURCE, path))
+        self.execute("UPDATE items SET effects = NULL, effects_why = NULL WHERE path = ?", (path,))
+
     def set_speed(self, path: str, speed: float) -> None:
         """Play a video slower or faster; the same part of it is used, so it lasts longer or shorter."""
         self.execute("UPDATE items SET speed = ?, speed_why = NULL WHERE path = ?", (speed, path))
@@ -462,12 +476,15 @@ class Trip:
     def _apply_plan(self, result: autoedit.Plan) -> None:
         with self._lock:
             for shot_no, shot in enumerate(result.shots):
-                trim = (shot.start, shot.start + shot.seconds * shot.speed) if shot.kind == "video" else (None, None)
+                used = shot.seconds * shot.speed * source_factor(shot.effects)  # of the video itself
+                trim = (shot.start, shot.start + used) if shot.kind == "video" else (None, None)
                 self.db.execute(
                     "UPDATE items SET cut_out = 0, position = ?, trim_start = ?, trim_end = ?, transition = ?, "
-                    "transition_why = ?, seconds = ?, speed = ?, speed_why = ? WHERE path = ?",
+                    "transition_why = ?, seconds = ?, speed = ?, speed_why = ?, effects = ?, effects_why = ? "
+                    "WHERE path = ?",
                     (shot_no, *trim, shot.transition, shot.why, shot.seconds if shot.kind == "photo" else None,
-                     shot.speed, shot.speed_why, shot.path),
+                     shot.speed, shot.speed_why, json.dumps(shot.effects) if shot.effects else None, shot.effects_why,
+                     shot.path),
                 )
             # Left out of this cut, but still in your selection, so the next Auto-edit can use it again.
             self.db.executemany("UPDATE items SET cut_out = 1, position = NULL WHERE path = ?", [(p,) for p in result.left_out])

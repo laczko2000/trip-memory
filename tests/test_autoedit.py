@@ -189,3 +189,26 @@ def test_the_shaky_blurred_ends_of_a_clip_are_never_used():
     start = autoedit.best_start(score, 12.0, 3.0)
     assert 1.6 <= start and start + 3.0 <= 9.6
     assert autoedit.quality(score) >= 0  # its best stretch is a clean one
+
+
+def test_camera_effects_suit_the_music():
+    song = _song()
+    beats = song.beat_times()
+    song.accents = [0.9 if k % 8 == 3 else 0.2 for k in range(len(beats))]
+    rows = [_clip(n, action=0.3, camera=0.0) for n in range(20)]
+    rows += [_clip(20 + n, action=20.0, camera=0.5, duration=12.0) for n in range(30)]
+    for r in rows[:20]:
+        r["tags_final"] = ["Static camera", "Still"]
+    limits = autoedit.Limits(max_video=4.0, max_photo=2.0, min_shot=1.0, storyline="date", cut_on="beats")
+    plan = autoedit.plan_to_music(rows, {}, song, limits, None, 0.8, "Fade")
+    kinds = {k for s in plan.shots for k in s.effects}
+    assert {"push", "punch"} <= kinds
+    assert any(s.transition in ("Zoom through", "Zoom out reveal") for s in plan.shots)
+    for s in plan.shots:
+        for t in s.effects.get("punch", []):
+            assert 0 < t < s.seconds
+    plain = autoedit.plan_to_music(rows, {}, song, autoedit.Limits(max_video=4.0, max_photo=2.0, min_shot=1.0,
+                                                                   storyline="date", camera_effects=False),
+                                   None, 0.8, "Fade")
+    assert not any(s.effects for s in plain.shots)
+    assert not any(s.transition in ("Zoom through", "Zoom out reveal") for s in plain.shots)
