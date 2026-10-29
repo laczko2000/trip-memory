@@ -127,8 +127,8 @@ def _video_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
     graph = f"[0:v]{pre}format=yuv420p[src];" + _fit_with_blur("src", s.width, s.height, "fit")
     graph += f";[fit]fps={FPS},format=yuv420p[v]"
     inputs = ["-ss", f"{start:.3f}", "-t", f"{length:.3f}", "-i", str(item.path)]
-    if item.has_audio and s.keep_clip_sound:
-        graph += f";[0:a]aformat=sample_rates=48000:channel_layouts=stereo,volume={s.clip_volume}[a]"
+    if item.has_audio and item.sound and s.keep_clip_sound:
+        graph += f";[0:a]aformat=sample_rates=48000:channel_layouts=stereo,volume={item.volume * s.clip_volume:.2f}[a]"
     else:
         inputs += ["-f", "lavfi", "-t", f"{length:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
         graph += ";[1:a]anull[a]"
@@ -221,7 +221,7 @@ def _segment_key(item: MediaItem, s: RenderSettings) -> str:
     elif item.kind == "title":
         parts += [item.title]
     else:
-        parts += [clip_range(item, s), s.keep_clip_sound, s.clip_volume]
+        parts += [clip_range(item, s), item.has_audio and item.sound and s.keep_clip_sound, item.volume * s.clip_volume]
     return hashlib.sha1(repr(parts).encode()).hexdigest()[:20]
 
 

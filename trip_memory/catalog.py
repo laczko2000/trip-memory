@@ -80,6 +80,8 @@ CREATE TABLE IF NOT EXISTS items (
     look_group INTEGER,
     seconds REAL,
     curves TEXT,
+    clip_sound INTEGER DEFAULT 0,
+    clip_volume REAL DEFAULT 1.0,
     faces_done INTEGER DEFAULT 0,
     scene_done INTEGER DEFAULT 0,
     tags_done INTEGER DEFAULT 0
@@ -141,6 +143,7 @@ class Trip:
             "rotation INTEGER DEFAULT 0", "rotation_checked INTEGER DEFAULT 0",
             "tags TEXT", "tags_user TEXT", "motion_action REAL", "motion_camera REAL", "motion_shake REAL",
             "look_group INTEGER", "tags_done INTEGER DEFAULT 0", "seconds REAL", "curves TEXT",
+            "clip_sound INTEGER DEFAULT 0", "clip_volume REAL DEFAULT 1.0",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
@@ -274,6 +277,8 @@ class Trip:
                     trim_end=r["trim_end"],
                     transition=r["transition"],
                     seconds=r["seconds"],
+                    sound=bool(r["clip_sound"]),  # videos are silent unless you switch their sound on
+                    volume=1.0 if r["clip_volume"] is None else r["clip_volume"],
                 )
             )
         return result
@@ -426,6 +431,13 @@ class Trip:
 
     def set_trim(self, path: str, start: float | None, end: float | None) -> None:
         self.execute("UPDATE items SET trim_start = ?, trim_end = ? WHERE path = ?", (start, end, path))
+
+    def set_clip_sound(self, path: str, on: bool, volume: float | None = None) -> None:
+        """Use a video's own sound in the finished video (off by default, so the music plays alone)."""
+        if volume is None:
+            self.execute("UPDATE items SET clip_sound = ? WHERE path = ?", (int(on), path))
+        else:
+            self.execute("UPDATE items SET clip_sound = ?, clip_volume = ? WHERE path = ?", (int(on), volume, path))
 
     def set_transition(self, path: str, transition: str | None) -> None:
         self.execute("UPDATE items SET transition = ? WHERE path = ?", (transition, path))

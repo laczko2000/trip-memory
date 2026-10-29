@@ -659,7 +659,6 @@ class Page:
             max_clip_seconds=self.clip_len.value,
             transition=self.transition.value,
             transition_seconds=self.t_len.value,
-            keep_clip_sound=self.keep_sound.value,
             music_volume=self.music_vol.value,
         )
 
@@ -854,6 +853,7 @@ class Page:
                     ui.label(f"{icon} {fmt_time(it['taken_at'])}" + (f" · {place}" if place else "")).classes("text-sm")
                     if it["kind"] == "video":
                         self.trim_control(it, box)
+                        self.sound_control(it)
                     else:
                         ui.label(f"Photo · {it['seconds']:.1f} s" if it["seconds"] else "Photo").classes("text-xs text-gray-500")
                 with ui.column().classes("gap-1 w-56"):
@@ -870,6 +870,30 @@ class Page:
         item = MediaItem(path=Path(it["path"]), kind="video", taken_at=datetime.now(), duration=it["duration"],
                          trim_start=it["trim_start"], trim_end=it["trim_end"])
         return clip_range(item, self.settings_now())
+
+    def sound_control(self, it: dict) -> None:
+        """The clip's own sound: off by default (the music plays alone), with a loudness of 0-200%."""
+        if not it["has_audio"]:
+            ui.label("🔇 This clip has no sound").classes("text-xs text-gray-400")
+            return
+        with ui.row().classes("items-center gap-3 w-full no-wrap"):
+            volume = round(100 * (1.0 if it["clip_volume"] is None else it["clip_volume"]))
+
+            def switch(on: bool) -> None:
+                self.trip.set_clip_sound(it["path"], on)
+                it["clip_sound"] = int(on)
+                loudness.set_visibility(on)
+
+            def set_volume(value: int) -> None:
+                self.trip.set_clip_sound(it["path"], True, value / 100)
+                percent.text = f"{value}%"
+
+            ui.checkbox("Clip sound", value=bool(it["clip_sound"]), on_change=lambda e: switch(e.value)).props("dense")
+            with ui.row().classes("items-center gap-2 no-wrap") as loudness:
+                ui.label("Volume").classes("text-xs text-gray-500")
+                ui.slider(min=0, max=200, step=5, value=volume, on_change=lambda e: set_volume(int(e.value))).classes("w-40")
+                percent = ui.label(f"{volume}%").classes("text-xs text-gray-600 w-10")
+            loudness.set_visibility(bool(it["clip_sound"]))
 
     def trim_control(self, it: dict, box: str | None) -> None:
         start, end = self.kept_part(it)
@@ -928,7 +952,6 @@ class Page:
                 with ui.column():
                     ui.label("Longest part of each video (seconds, 0 = whole video)").classes("text-sm text-gray-500")
                     self.clip_len = ui.slider(min=0, max=60, step=1, value=10).props("label-always").classes("mt-8")
-                self.keep_sound = ui.switch("Keep the sound from the videos", value=True)
             with ui.row().classes("w-full items-center"):
                 self.music_input = ui.input(
                     "Music (optional)", placeholder="/Users/you/Music/song.mp3",
@@ -1096,7 +1119,6 @@ class Page:
             max_clip_seconds=self.clip_len.value,
             transition=self.transition.value,
             transition_seconds=self.t_len.value,
-            keep_clip_sound=self.keep_sound.value,
             music_path=str(Path(music).expanduser()) if music else None,
             music_volume=self.music_vol.value,
         )

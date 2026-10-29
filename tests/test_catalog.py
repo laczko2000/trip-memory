@@ -230,3 +230,18 @@ def test_sideways_photos_with_faces_are_turned_upright(tmp_path, monkeypatch):
     trip.analyse()
     assert trip.items()[0]["rotation"] == 90
     assert any("upright" in note for note in trip.progress.notes)
+
+
+def test_video_sound_is_off_until_you_switch_it_on(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    _gps_photo(trip_dir / "a.jpg", "2025:07:03 10:00:00", 38.7223, -9.1393, "red")
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    path = str(trip_dir / "a.jpg")
+    assert trip.media_items()[0].sound is False
+    trip.set_clip_sound(path, True, 1.5)
+    item = trip.media_items()[0]
+    assert item.sound is True and item.volume == 1.5

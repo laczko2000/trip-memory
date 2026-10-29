@@ -58,6 +58,7 @@ Everything runs on your Mac. Nothing is uploaded.
 
 ## What's new
 
+- **0.13:** videos are silent by default so the music plays alone; tick *Clip sound* on a clip in the Storyboard to bring its sound back, with a volume from 0 to 200%.
 - **0.12.1:** no more automatic day title cards (titles may come back later, placed where you choose).
 - **0.12:** music-led Auto-edit: song first with a music map, your limits for clip, photo and shot length, quick cuts in lively parts and long ones in calm parts, action clips matched to lively music. New *Cinematic* tag.
 - **0.11.3:** after you download a ccMixter song on its page, the app finds it in Downloads and selects it by itself.

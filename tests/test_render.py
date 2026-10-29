@@ -76,3 +76,24 @@ def test_turned_clips_get_their_own_prepared_clip(tmp_path):
     out = render(items, settings, tmp_path / "two.mp4", cache_dir=cache)
     assert len(list(cache.glob("*.mp4"))) == 4
     assert abs(float(probe(str(out))["format"]["duration"]) - (4 - settings.transition_seconds)) < 0.3
+
+
+def _loudness(path):
+    out = subprocess.run([ffmpeg_paths()[0], "-hide_banner", "-i", str(path), "-af", "volumedetect", "-f", "null", "-"],
+                         capture_output=True, text=True).stderr
+    return float(out.split("mean_volume:")[1].split("dB")[0])
+
+
+def test_clip_sound_can_be_switched_off_and_made_louder(tmp_path):
+    trip = tmp_path / "trip"
+    trip.mkdir()
+    make_clip(trip / "a.mp4", "640x360", 2, "2025-07-03T10:00:00Z")
+    items, _ = scan_folder(trip)
+    settings = RenderSettings(width=320, height=180)
+    items[0].sound = False
+    silent = _loudness(render(items, settings, tmp_path / "silent.mp4"))
+    items[0].sound, items[0].volume = True, 1.0
+    normal = _loudness(render(items, settings, tmp_path / "normal.mp4"))
+    items[0].volume = 2.0
+    louder = _loudness(render(items, settings, tmp_path / "louder.mp4"))
+    assert silent < -80 and normal > -40 and louder > normal + 4
