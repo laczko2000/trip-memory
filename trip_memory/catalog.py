@@ -24,6 +24,7 @@ from PIL import Image, ImageOps
 
 from .faces import FaceFinder, group_faces
 from .media import MediaItem, scan_folder
+from . import stories
 from .scenes import SceneTagger
 from .tools import ffmpeg_paths
 
@@ -62,8 +63,18 @@ CREATE TABLE IF NOT EXISTS items (
     trim_start REAL,
     trim_end REAL,
     transition TEXT,
+    dhash TEXT,
+    colours BLOB,
+    sharpness REAL,
+    story INTEGER,
+    similar_set INTEGER,
+    best INTEGER DEFAULT 0,
     faces_done INTEGER DEFAULT 0,
     scene_done INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
 );
 CREATE TABLE IF NOT EXISTS people (
     id INTEGER PRIMARY KEY,
@@ -112,7 +123,10 @@ class Trip:
         self.db = sqlite3.connect(self.dir / "catalog.db", check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
-        for column in ("chosen INTEGER DEFAULT 1", "position REAL", "trim_start REAL", "trim_end REAL", "transition TEXT"):
+        for column in (
+            "chosen INTEGER DEFAULT 1", "position REAL", "trim_start REAL", "trim_end REAL", "transition TEXT",
+            "dhash TEXT", "colours BLOB", "sharpness REAL", "story INTEGER", "similar_set INTEGER", "best INTEGER DEFAULT 0",
+        ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
             except sqlite3.OperationalError:
@@ -147,6 +161,7 @@ class Trip:
             row["day"] = row["taken_at"][:10]
             row["place_guessed"] = False
             row.pop("clip", None)
+            row.pop("colours", None)
         _guess_places(rows)
         return rows
 
@@ -352,6 +367,37 @@ class Trip:
                 self.execute("UPDATE items SET thumb = ? WHERE path = ?", (str(self._make_thumb(row)), row["path"]))
             except Exception as exc:
                 p.notes.append(f"No preview for {Path(row['path']).name}: {exc}")
+
+        p.message = "Grouping into stories and spotting similar shots…"
+        notify()
+        self._group_stories()
+        if not self.query("SELECT 1 FROM meta WHERE key = 'suggested'") and not self.query(
+            "SELECT 1 FROM items WHERE faces_done = 1 OR scene_done = 1 LIMIT 1"
+        ):
+            self.suggest_selection()  # a new trip starts with the best shot of each similar set ticked
+
+    def _group_stories(self) -> None:
+        for row in self.query("SELECT path, thumb FROM items WHERE thumb IS NOT NULL AND dhash IS NULL"):
+            try:
+                dhash, colours, sharp = stories.fingerprint(row["thumb"])
+            except OSError:
+                continue
+            self.execute("UPDATE items SET dhash = ?, colours = ?, sharpness = ? WHERE path = ?", (dhash, colours, sharp, row["path"]))
+        rows = [dict(r) for r in self.query("SELECT path, kind, taken_at, duration, lat, lon, dhash, colours, sharpness FROM items")]
+        groups = stories.group(rows)
+        with self._lock:
+            self.db.executemany(
+                "UPDATE items SET story = ?, similar_set = ?, best = ? WHERE path = ?",
+                [(st, sim, int(best), path) for path, (st, sim, best) in groups.items()],
+            )
+            self.db.commit()
+
+    def suggest_selection(self) -> None:
+        """Tick only the best shot of each set of similar shots (single shots stay ticked)."""
+        with self._lock:
+            self.db.execute("UPDATE items SET chosen = best")
+            self.db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('suggested', '1')")
+            self.db.commit()
 
     def _analyse(self, notify: Callable[[], None]) -> None:
         self._prepare(notify)

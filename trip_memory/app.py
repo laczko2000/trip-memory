@@ -9,6 +9,7 @@ import time
 import traceback
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 
 from nicegui import app, run, ui
 
@@ -20,7 +21,7 @@ from .scenes import SCENES
 OUTPUT_DIR = Path.home() / "Movies" / "Trip Memory"
 RESOLUTIONS = {"Full HD (1080p)": (1920, 1080), "HD (720p, faster)": (1280, 720)}
 PAGE_SIZE = 48
-CHOOSE_PAGE_SIZE = 60
+STORIES_PER_PAGE = 8
 STORY_PAGE_SIZE = 25
 DEFAULT_TRANSITION = "Default (from Make video)"
 ALL = "All"
@@ -80,6 +81,7 @@ class Page:
         self.choose_filters = {"day": ALL, "kind": ALL}
         self.choose_page = 1
         self.story_page = 1
+        self.media_route: str | None = None
         self.chapters = bool(load_settings().get("chapters", True))
         self.dirty = False
         self.last_refresh = 0.0
@@ -192,6 +194,7 @@ class Page:
             ui.notify("Still working, please wait.", type="warning")
             return
         self.trip = Trip(folder)
+        self.media_route = serve_trip_folder(self.trip)
         save_settings(folder=str(self.trip.folder))
         self.filters = {k: ALL for k in self.filters}
         self.choose_filters = {k: ALL for k in self.choose_filters}
@@ -279,9 +282,12 @@ class Page:
             ui.button(
                 f"Analyse the {chosen} chosen files", icon="auto_awesome", on_click=self.analyse_chosen
             ).props("" if chosen else "disable")
+            ui.button("Suggest best shots", icon="star", on_click=self.suggest).props("outline").tooltip(
+                "Tick only the best shot of each set of similar shots"
+            )
         ui.label(
-            "Untick anything you don't want. Only chosen files are analysed and can go into the video. "
-            "Tip: use 'Untick all shown', then tick the few you want."
+            "Files are grouped into stories (same time and place). Similar shots sit together in a box, and the ⭐ one "
+            "is the app's suggestion. Hover over a video to play it."
         ).classes("text-sm text-gray-600")
         with ui.row().classes("w-full items-end gap-3"):
             ui.select(day_opts, value=self.choose_filters["day"], label="Day",
@@ -291,29 +297,88 @@ class Page:
                       on_change=lambda e: self.set_choose_filter("kind", e.value)).classes("min-w-40")
             ui.button("Tick all shown", icon="check_box", on_click=lambda: self.choose_shown_files(True)).props("flat dense")
             ui.button("Untick all shown", icon="check_box_outline_blank", on_click=lambda: self.choose_shown_files(False)).props("flat dense")
-        pages = max(1, -(-len(shown) // CHOOSE_PAGE_SIZE))
+
+        story_ids = sorted({it["story"] or 0 for it in shown})
+        pages = max(1, -(-len(story_ids) // STORIES_PER_PAGE))
         self.choose_page = min(self.choose_page, pages)
-        with ui.grid().classes("w-full gap-2 grid-cols-3 sm:grid-cols-4 md:grid-cols-6"):
-            for it in shown[(self.choose_page - 1) * CHOOSE_PAGE_SIZE : self.choose_page * CHOOSE_PAGE_SIZE]:
-                with ui.card().tight().classes("w-full" + ("" if it["chosen"] else " opacity-40")):
-                    if it["thumb"]:
-                        ui.image(data_url(it["thumb"])).classes("w-full h-24 object-cover")
-                    with ui.column().classes("p-1 gap-0 w-full"):
-                        icon = "🎬 " + fmt_length(it["duration"]) if it["kind"] == "video" else "📷"
-                        ui.label(f"{icon} {fmt_time(it['taken_at'])}").classes("text-xs text-gray-600")
-                        ui.checkbox(
-                            Path(it["path"]).name[:22],
-                            value=bool(it["chosen"]),
-                            on_change=lambda e, path=it["path"]: self.choose_one(path, e.value),
-                        ).props("dense size=xs").classes("text-xs")
+        for number in story_ids[(self.choose_page - 1) * STORIES_PER_PAGE : self.choose_page * STORIES_PER_PAGE]:
+            self.story_block(number, [it for it in shown if (it["story"] or 0) == number])
         if pages > 1:
             ui.pagination(1, pages, direction_links=True, value=self.choose_page,
                           on_change=lambda e: self.go_to_choose_page(e.value))
+
+    def story_block(self, number: int, items: list[dict]) -> None:
+        first, last = datetime.fromisoformat(items[0]["taken_at"]).astimezone(), datetime.fromisoformat(items[-1]["taken_at"]).astimezone()
+        places = [it["place"] or it["country"] for it in items if it["place"] or it["country"]]
+        place = max(set(places), key=places.count) if places else "Unknown place"
+        picked = sum(it["chosen"] for it in items)
+        with ui.card().classes("w-full p-3 mt-2"):
+            with ui.row().classes("w-full items-center gap-2"):
+                ui.label(f"Story {number + 1} · {first:%a %d %b, %H:%M}–{last:%H:%M} · {place}").classes("font-semibold")
+                ui.label(f"{picked} of {len(items)} chosen").classes("text-sm text-gray-500")
+                paths = [it["path"] for it in items]
+                ui.button("Tick story", on_click=lambda p=paths: self.choose_paths(p, True)).props("flat dense size=sm")
+                ui.button("Untick story", on_click=lambda p=paths: self.choose_paths(p, False)).props("flat dense size=sm")
+            sets: dict[int, list[dict]] = {}
+            for it in items:
+                sets.setdefault(it["similar_set"] or 0, []).append(it)
+            with ui.row().classes("w-full gap-2 items-start"):
+                for members in sets.values():
+                    if len(members) == 1:
+                        self.choose_tile(members[0], in_set=False)
+                        continue
+                    with ui.card().tight().classes("p-1 bg-blue-50 border border-blue-200"):
+                        with ui.row().classes("items-center gap-1 px-1"):
+                            ui.label(f"{len(members)} similar shots").classes("text-xs text-blue-800")
+                            ui.button("keep ⭐ only", on_click=lambda m=members: self.keep_best(m)).props("flat dense size=xs")
+                        with ui.row().classes("gap-1"):
+                            for it in members:
+                                self.choose_tile(it, in_set=True)
+
+    def choose_tile(self, it: dict, in_set: bool) -> None:
+        with ui.column().classes("w-36 gap-0" + ("" if it["chosen"] else " opacity-40")):
+            thumb = data_url(it["thumb"])
+            if it["kind"] == "video" and self.media_route:
+                start = (it["duration"] or 0) * 0.3
+                src = f"{self.media_route}/{quote(str(Path(it['path']).relative_to(self.trip.folder)))}#t={start:.1f}"
+                ui.html(
+                    f'<div class="tm-hover" style="position:relative;width:144px;height:96px">'
+                    f'<img src="{thumb}" style="width:144px;height:96px;object-fit:cover;border-radius:4px">'
+                    f'<video data-src="{src}" muted loop playsinline preload="none" '
+                    f'style="display:none;position:absolute;inset:0;width:144px;height:96px;object-fit:cover;border-radius:4px"></video>'
+                    f'<span style="position:absolute;left:4px;bottom:2px;color:white;font-size:11px;text-shadow:0 0 3px black">'
+                    f'▶ {fmt_length(it["duration"])}</span></div>',
+                    sanitize=False,
+                )
+            elif thumb:
+                ui.image(thumb).classes("w-36 h-24 object-cover rounded")
+            with ui.row().classes("items-center gap-0 no-wrap"):
+                ui.checkbox(
+                    value=bool(it["chosen"]),
+                    on_change=lambda e, path=it["path"]: self.choose_paths([path], e.value),
+                ).props("dense size=xs")
+                star = "⭐ " if in_set and it["best"] else ""
+                ui.label(f"{star}{datetime.fromisoformat(it['taken_at']).astimezone():%H:%M:%S}").classes("text-xs text-gray-600")
+
+    def suggest(self) -> None:
+        self.trip.suggest_selection()
+        ui.notify("Ticked the best shot of each set of similar shots.")
+        self.refresh_all()
+
+    def keep_best(self, members: list[dict]) -> None:
+        self.trip.set_chosen([m["path"] for m in members if not m["best"]], False)
+        self.trip.set_chosen([m["path"] for m in members if m["best"]], True)
+        self.refresh_all()
+
+    def choose_paths(self, paths: list[str], chosen: bool) -> None:
+        self.trip.set_chosen(paths, chosen)
+        self.refresh_all()
 
     def set_choose_filter(self, key: str, value: str) -> None:
         self.choose_filters[key] = value
         self.choose_page = 1
         self.story_page = 1
+        self.media_route: str | None = None
         self.chapters = bool(load_settings().get("chapters", True))
         self.choose_view.refresh()
 
@@ -323,10 +388,6 @@ class Page:
 
     def choose_shown_files(self, chosen: bool) -> None:
         self.trip.set_chosen([it["path"] for it in self.choose_shown()], chosen)
-        self.refresh_all()
-
-    def choose_one(self, path: str, chosen: bool) -> None:
-        self.trip.set_chosen([path], chosen)
         self.refresh_all()
 
     # ---------- Library ----------
@@ -714,6 +775,39 @@ class Page:
             self.make_button.enable()
 
 
+_served: dict[str, str] = {}
+
+# Plays a video preview while the mouse is over it, and stops it when the mouse leaves.
+HOVER_SCRIPT = """
+<script>
+document.addEventListener('mouseenter', (e) => {
+  const box = e.target.closest && e.target.closest('.tm-hover');
+  if (!box || e.target !== box) return;
+  const v = box.querySelector('video');
+  if (!v.src) v.src = v.dataset.src;
+  v.style.display = 'block';
+  v.play().catch(() => {});
+}, true);
+document.addEventListener('mouseleave', (e) => {
+  const box = e.target.closest && e.target.closest('.tm-hover');
+  if (!box || e.target !== box) return;
+  const v = box.querySelector('video');
+  v.pause();
+  v.style.display = 'none';
+}, true);
+</script>
+"""
+
+
+def serve_trip_folder(trip: Trip) -> str:
+    """Let the page stream the trip's own videos (for hover previews). Only on this computer."""
+    key = trip.dir.name
+    if key not in _served:
+        _served[key] = f"/trip/{key}"
+        app.add_media_files(_served[key], trip.folder)
+    return _served[key]
+
+
 def reveal(path: Path | None) -> None:
     if path and sys.platform == "darwin":
         subprocess.run(["open", "-R", str(path)])
@@ -723,6 +817,7 @@ def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     app.add_media_files("/videos", OUTPUT_DIR)
     app.add_static_files("/data", app_dir())
+    ui.add_body_html(HOVER_SCRIPT, shared=True)
     ui.page("/")(lambda: Page().build())
     print("\nTrip Memory is running. Your browser should open by itself.")
     print("If it does not, open http://localhost:8765 . Close this window to stop the app.\n")

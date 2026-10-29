@@ -14,8 +14,11 @@ Nothing is uploaded anywhere.
 ## Use it
 
 1. **Choose your trip folder** with *Browse…*. The app takes a quick first look (dates, places, small previews).
-2. **Choose files tab:** untick what you don't want, filter by day or type, or untick everything and tick just
-   the few you want. Then click **Analyse the chosen files**. Only those files are analysed and used.
+2. **Choose files tab:** files are grouped into **stories** (taken close together in time and place). Shots
+   that look nearly the same sit together in a blue box; the app ticks the ⭐ best one (sharpest, best
+   exposed) for a new trip. Tick or untick a whole story, keep only the ⭐ of a set, or pick by hand.
+   Hover over a video to play it. **Suggest best shots** re-applies the suggestion. Then click
+   **Analyse the chosen files**. Only those files are analysed and used.
    The analysis works out:
    - **when** each was taken (sorted by day),
    - **where**: the place name from the phone's GPS, looked up offline. Photos without GPS borrow the place
@@ -39,6 +42,7 @@ Everything runs on your Mac. Nothing is uploaded.
 
 ## What's new
 
+- **0.6:** Choose files grouped into stories and sets of similar shots, best-shot suggestion, hover-to-play.
 - **0.5:** storyboard with your own order, trims, per-cut transitions and day title cards.
 - **0.4.1:** faster video making: uses the Mac's built-in video encoder, prepares several clips at once,
   and remembers prepared clips so making the video again after a change is much quicker.
