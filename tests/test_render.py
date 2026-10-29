@@ -97,3 +97,20 @@ def test_clip_sound_can_be_switched_off_and_made_louder(tmp_path):
     items[0].volume = 2.0
     louder = _loudness(render(items, settings, tmp_path / "louder.mp4"))
     assert silent < -80 and normal > -40 and louder > normal + 4
+
+
+def test_joining_survives_clips_that_start_late_or_use_another_clock(tmp_path):
+    """Clips from the Mac's video chip can start slightly after 0 or use another clock; joining must not stop."""
+    from trip_memory.render import _join, _segment_length
+
+    ffmpeg = ffmpeg_paths()[0]
+    base = [ffmpeg, "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=3",
+            "-f", "lavfi", "-i", "sine=d=3", "-c:v", "libx264", "-c:a", "aac", "-ar", "48000", "-ac", "2"]
+    subprocess.run([*base, str(tmp_path / "a.mp4")], check=True)
+    subprocess.run([*base, "-video_track_timescale", "30", str(tmp_path / "b.mp4")], check=True)
+    subprocess.run([*base, "-output_ts_offset", "2", str(tmp_path / "c.mp4")], check=True)
+    segments = [tmp_path / n for n in ("a.mp4", "b.mp4", "c.mp4", "a.mp4")]
+    out = tmp_path / "out.mp4"
+    settings = RenderSettings(width=320, height=180, transition_seconds=0.8)
+    _join(segments, [_segment_length(s) for s in segments], [None, "fade", None], settings, out, lambda _f: None)
+    assert abs(float(probe(str(out))["format"]["duration"]) - (12 - 0.8 - 2 / 30)) < 0.3

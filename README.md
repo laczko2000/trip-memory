@@ -58,6 +58,7 @@ Everything runs on your Mac. Nothing is uploaded.
 
 ## What's new
 
+- **0.13.2:** fixed the finished video stopping after the first clip on the Mac.
 - **0.13.1:** Auto-edit uses every file you ticked (it used to keep only one of each set of look-alike shots, which could leave very few), and stretches the shots further when there are few.
 - **0.13:** videos are silent by default so the music plays alone; tick *Clip sound* on a clip in the Storyboard to bring its sound back, with a volume from 0 to 200%.
 - **0.12.1:** no more automatic day title cards (titles may come back later, placed where you choose).

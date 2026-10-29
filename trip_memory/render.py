@@ -320,16 +320,21 @@ def _join(
         inputs += ["-i", str(seg)]
 
     parts: list[str] = []
+    # Every clip starts at time 0 with the same clock and frame rate. (Clips from the Mac's video chip can
+    # start a little after 0, which made joining stop after the first clip.)
+    for k in range(n):
+        parts.append(f"[{k}:v]settb=AVTB,setpts=PTS-STARTPTS,fps={FPS},format=yuv420p[sv{k}]")
+        parts.append(f"[{k}:a]asetpts=PTS-STARTPTS,aresample=48000[sa{k}]")
     # Every cut overlaps the clips by the transition's length; a hard cut is a one-frame fade. (Joining
     # all cuts the same way keeps their timing predictable, e.g. for cutting on the music's beat.)
-    v_prev, a_prev, offset, total = "0:v", "0:a", 0.0, lengths[0]
+    v_prev, a_prev, offset, total = "sv0", "sa0", 0.0, lengths[0]
     for k in range(1, n):
         style = styles[k - 1]
         # A transition is never longer than ~40% of either clip.
         t = min(s.transition_seconds, lengths[k - 1] * 0.4, lengths[k] * 0.4) if style else 1 / FPS
         offset = total - t
-        parts.append(f"[{v_prev}][{k}:v]xfade=transition={style or 'fade'}:duration={t:.3f}:offset={offset:.3f}[v{k}]")
-        parts.append(f"[{a_prev}][{k}:a]acrossfade=d={t:.3f}[a{k}]")
+        parts.append(f"[{v_prev}][sv{k}]xfade=transition={style or 'fade'}:duration={t:.3f}:offset={offset:.3f}[v{k}]")
+        parts.append(f"[{a_prev}][sa{k}]acrossfade=d={t:.3f}[a{k}]")
         v_prev, a_prev = f"v{k}", f"a{k}"
         total = offset + lengths[k]
 
@@ -366,3 +371,6 @@ def _join(
         total_seconds=total,
         on_progress=progress,
     )
+    made = _segment_length(out)
+    if made < total - 1.0:  # never hand over a video that silently stops early
+        raise FFmpegError(f"The finished video is only {made:.1f} s long instead of {total:.1f} s. Please report this.")
