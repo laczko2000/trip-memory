@@ -23,8 +23,9 @@ Nothing is uploaded anywhere.
    adding new files later only analyses the new ones.
 2. **Library tab:** browse the thumbnails, filter by day, place, scene or person, correct a scene if it's wrong,
    and tick or untick what goes into the video.
-3. **People tab:** type a name under each face group and press Enter. Give two groups the same name to merge
-   them; use the crossed-out eye to hide a group.
+3. **People tab:** for each face group, pick a name you already used from the drop-down, or type a new one
+   and press Enter. Picking an existing name joins the groups. **Unknown** hides strangers. Faces seen only
+   once or twice are listed separately so you can check them, then **Mark all of these as Unknown**.
 4. **Make video tab:** choose transition, photo length, music, then **Make my video**. The file is saved in
    *Movies → Trip Memory*.
 
@@ -32,6 +33,7 @@ Everything runs on your Mac. Nothing is uploaded.
 
 ## What's new
 
+- **0.3.1:** name drop-down, one-click Unknown, review list for faces seen only once or twice.
 - **0.3 (milestone 3):** trip catalogue with places, scene suggestions, people, filters and picking.
 - **0.2 (milestone 2):** basic stitcher: date order, blurred background for vertical shots, slow zoom on photos,
   HDR fix, transitions, music.

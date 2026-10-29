@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS items (
 CREATE TABLE IF NOT EXISTS people (
     id INTEGER PRIMARY KEY,
     name TEXT,
-    hidden INTEGER DEFAULT 0
+    hidden INTEGER DEFAULT 0  -- marked "Unknown" by you
 );
 CREATE TABLE IF NOT EXISTS faces (
     id INTEGER PRIMARY KEY,
@@ -76,6 +76,10 @@ CREATE TABLE IF NOT EXISTS faces (
 CREATE INDEX IF NOT EXISTS faces_path ON faces(path);
 CREATE INDEX IF NOT EXISTS faces_person ON faces(person_id);
 """
+
+
+# Unnamed people seen in fewer photos/videos than this are listed separately for review (often strangers).
+MIN_APPEARANCES = 3
 
 
 @dataclass
@@ -114,44 +118,61 @@ class Trip:
             self.db.commit()
 
     def items(self) -> list[dict]:
-        """All items in date order, with their people's names."""
+        """All items in date order, with the names of the (known) people in them."""
         rows = [dict(r) for r in self.query("SELECT * FROM items ORDER BY taken_at, path")]
-        names = self.person_names()
+        people = self._people_status()
         by_path: dict[str, set[int]] = {}
         for f in self.query("SELECT path, person_id FROM faces WHERE person_id IS NOT NULL"):
-            by_path.setdefault(f["path"], set()).add(f["person_id"])
-        hidden = {r["id"] for r in self.query("SELECT id FROM people WHERE hidden = 1")}
+            if people.get(f["person_id"], {}).get("status") not in (None, "unknown"):
+                by_path.setdefault(f["path"], set()).add(f["person_id"])
         for row in rows:
-            ids = sorted(by_path.get(row["path"], set()) - hidden)
+            ids = sorted(by_path.get(row["path"], set()))
             row["person_ids"] = ids
-            row["people"] = [names[i] for i in ids]
+            row["people"] = [people[i]["label"] for i in ids]
             row["scene_final"] = row["scene_user"] or row["scene"]
             row["day"] = row["taken_at"][:10]
             row.pop("clip", None)
         return rows
 
-    def person_names(self) -> dict[int, str]:
-        return {r["id"]: r["name"] or f"Person {r['id']}" for r in self.query("SELECT id, name FROM people")}
+    def _people_status(self) -> dict[int, dict]:
+        """For every person: label, how many photos/videos they are in, and their status.
+
+        Status is "named" (you named them), "new" (not named yet), "rare" (not named, seen only once
+        or twice: often a stranger, sometimes someone the app did not recognise) or "unknown" (you marked them).
+        """
+        counts = {
+            r["person_id"]: r["n"]
+            for r in self.query("SELECT person_id, COUNT(DISTINCT path) AS n FROM faces GROUP BY person_id")
+        }
+        result = {}
+        for p in self.query("SELECT * FROM people"):
+            count = counts.get(p["id"], 0)
+            if p["hidden"]:
+                status = "unknown"
+            elif p["name"]:
+                status = "named"
+            elif count < MIN_APPEARANCES:
+                status = "rare"
+            else:
+                status = "new"
+            result[p["id"]] = {"label": p["name"] or f"Person {p['id']}", "count": count, "status": status}
+        return result
+
+    def person_names(self) -> list[str]:
+        """Names you have already given, for the drop-down."""
+        return sorted({r["name"] for r in self.query("SELECT name FROM people WHERE name IS NOT NULL AND hidden = 0")})
 
     def people(self) -> list[dict]:
-        """People with how often they appear and a few example face pictures."""
+        """People with their status, how often they appear and a few example face pictures."""
         result = []
-        for p in self.query("SELECT * FROM people WHERE hidden = 0"):
-            faces = self.query(
-                "SELECT crop, path FROM faces WHERE person_id = ? ORDER BY score DESC", (p["id"],)
-            )
-            if not faces:
+        for pid, info in self._people_status().items():
+            if not info["count"]:
                 continue
-            result.append(
-                {
-                    "id": p["id"],
-                    "name": p["name"] or "",
-                    "label": p["name"] or f"Person {p['id']}",
-                    "faces": [f["crop"] for f in faces[:6]],
-                    "count": len({f["path"] for f in faces}),
-                }
-            )
-        result.sort(key=lambda p: (not p["name"], -p["count"]))
+            faces = self.query("SELECT crop FROM faces WHERE person_id = ? ORDER BY score DESC LIMIT 6", (pid,))
+            name = info["label"] if info["status"] == "named" else ""
+            result.append({"id": pid, "name": name, **info, "faces": [f["crop"] for f in faces]})
+        order = {"named": 0, "new": 1, "rare": 2, "unknown": 3}
+        result.sort(key=lambda p: (order[p["status"]], -p["count"], p["label"]))
         return result
 
     def media_items(self, only_included: bool = True) -> list[MediaItem]:
@@ -179,8 +200,8 @@ class Trip:
         self.execute("UPDATE items SET scene_user = ? WHERE path = ?", (scene, path))
 
     def name_person(self, person_id: int, name: str) -> None:
-        """Name a person. Using a name that already exists merges the two."""
-        name = name.strip()
+        """Name a person. Picking a name that already exists merges the two."""
+        name = (name or "").strip()
         if not name:
             self.execute("UPDATE people SET name = NULL WHERE id = ?", (person_id,))
             return
@@ -189,12 +210,19 @@ class Trip:
             if same:
                 self.db.execute("UPDATE faces SET person_id = ? WHERE person_id = ?", (same[0]["id"], person_id))
                 self.db.execute("DELETE FROM people WHERE id = ?", (person_id,))
+                self.db.execute("UPDATE people SET hidden = 0 WHERE id = ?", (same[0]["id"],))
             else:
-                self.db.execute("UPDATE people SET name = ? WHERE id = ?", (name, person_id))
+                self.db.execute("UPDATE people SET name = ?, hidden = 0 WHERE id = ?", (name, person_id))
             self.db.commit()
 
-    def hide_person(self, person_id: int) -> None:
-        self.execute("UPDATE people SET hidden = 1 WHERE id = ?", (person_id,))
+    def mark_unknown(self, person_ids: list[int]) -> None:
+        with self._lock:
+            self.db.executemany("UPDATE people SET hidden = 1, name = NULL WHERE id = ?", [(i,) for i in person_ids])
+            self.db.commit()
+
+    def restore_person(self, person_id: int) -> None:
+        """Bring someone back from "Unknown" so you can name them."""
+        self.execute("UPDATE people SET hidden = 0 WHERE id = ?", (person_id,))
 
     # ---------- analysis ----------
 

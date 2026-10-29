@@ -312,9 +312,48 @@ class Page:
         if not people:
             ui.label("No faces found yet.").classes("text-gray-500")
             return
+        names = self.trip.person_names()
+        named = [p for p in people if p["status"] == "named"]
+        new = [p for p in people if p["status"] == "new"]
+        rare = [p for p in people if p["status"] == "rare"]
+        unknown = [p for p in people if p["status"] == "unknown"]
+
         ui.label(
-            "Type a name and press Enter. If the same person shows up twice, give both the same name and they are merged."
+            "Pick a name from the list or type a new one. Picking a name you already used joins the two groups. "
+            "Click Unknown for strangers; they disappear from the Library labels and filters."
         ).classes("text-sm text-gray-600")
+
+        if new:
+            ui.label(f"Who is this? ({len(new)})").classes("text-lg font-semibold mt-2")
+            self.person_grid(new, names)
+        if named:
+            ui.label(f"Named ({len(named)})").classes("text-lg font-semibold mt-2")
+            self.person_grid(named, names)
+        if rare:
+            with ui.row().classes("w-full items-center mt-2"):
+                ui.label(f"Seen only once or twice ({len(rare)})").classes("text-lg font-semibold")
+                ui.button(
+                    "Mark all of these as Unknown",
+                    icon="visibility_off",
+                    on_click=lambda ids=[p["id"] for p in rare]: self.mark_unknown(ids),
+                ).props("outline dense")
+            ui.label(
+                "Often people in the background. Check for anyone you know (including yourself) "
+                "before marking the rest as Unknown."
+            ).classes("text-sm text-gray-500")
+            self.person_grid(rare, names)
+        if unknown:
+            with ui.expansion(f"Unknown and strangers ({len(unknown)})", icon="visibility_off").classes("w-full mt-2"):
+                ui.label("They are left out of the Library labels and filters. Restore anyone you know.").classes("text-sm text-gray-500")
+                with ui.grid().classes("w-full gap-2 grid-cols-2 sm:grid-cols-4 md:grid-cols-6"):
+                    for person in unknown:
+                        with ui.card().tight().classes("w-full p-2 items-center"):
+                            if person["faces"]:
+                                ui.image(data_url(person["faces"][0])).classes("w-16 h-16 rounded")
+                            ui.label(f"In {person['count']}").classes("text-xs text-gray-500")
+                            ui.button("Restore", on_click=lambda pid=person["id"]: self.restore(pid)).props("flat dense size=sm")
+
+    def person_grid(self, people: list[dict], names: list[str]) -> None:
         with ui.grid().classes("w-full gap-3 grid-cols-1 sm:grid-cols-2 md:grid-cols-3"):
             for person in people:
                 with ui.card().classes("w-full"):
@@ -323,20 +362,29 @@ class Page:
                             ui.image(data_url(crop)).classes("w-14 h-14 rounded")
                     ui.label(f"In {person['count']} photos and videos").classes("text-xs text-gray-500")
                     with ui.row().classes("w-full items-center no-wrap"):
-                        name = ui.input("Name", value=person["name"], placeholder=person["label"]).classes("flex-grow")
-                        name.on("keydown.enter", lambda _e, field=name: field.run_method("blur"))
-                        name.on("blur", lambda _e, pid=person["id"], field=name, old=person["name"]: self.rename(pid, field.value, old))
-                        ui.button(icon="visibility_off", on_click=lambda pid=person["id"]: self.hide(pid)).props("flat dense").tooltip("Not a person, or someone to ignore")
+                        ui.select(
+                            names,
+                            value=person["name"] or None,
+                            label="Who is this?",
+                            with_input=True,
+                            new_value_mode="add-unique",
+                            on_change=lambda e, pid=person["id"], old=person["name"]: self.rename(pid, e.value, old),
+                        ).props("input-debounce=0").classes("flex-grow")
+                        ui.button("Unknown", icon="visibility_off", on_click=lambda pid=person["id"]: self.mark_unknown([pid])).props("flat dense")
 
-    def rename(self, person_id: int, name: str, old: str) -> None:
+    def rename(self, person_id: int, name: str | None, old: str) -> None:
         if (name or "").strip() == (old or ""):
             return
-        self.trip.name_person(person_id, name)
-        ui.notify(f"Saved: {name}" if name.strip() else "Name removed")
+        self.trip.name_person(person_id, name or "")
+        ui.notify(f"Saved: {name}" if (name or "").strip() else "Name removed")
         self.refresh_all()
 
-    def hide(self, person_id: int) -> None:
-        self.trip.hide_person(person_id)
+    def mark_unknown(self, person_ids: list[int]) -> None:
+        self.trip.mark_unknown(person_ids)
+        self.refresh_all()
+
+    def restore(self, person_id: int) -> None:
+        self.trip.restore_person(person_id)
         self.refresh_all()
 
     # ---------- Make video ----------

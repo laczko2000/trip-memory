@@ -48,6 +48,7 @@ def test_catalogue(tmp_path, monkeypatch):
     monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
     monkeypatch.setattr(catalog, "FaceFinder", FakeFaces)
     monkeypatch.setattr(catalog, "SceneTagger", FakeScenes)
+    monkeypatch.setattr(catalog, "MIN_APPEARANCES", 2)
     (tmp_path / "app").mkdir()
     trip_dir = tmp_path / "trip"
     trip_dir.mkdir()
@@ -65,12 +66,18 @@ def test_catalogue(tmp_path, monkeypatch):
     assert items[0]["people"] == items[2]["people"] != items[1]["people"]
 
     people = trip.people()
-    assert sorted(p["count"] for p in people) == [1, 2]
-    anna = next(p for p in people if p["count"] == 2)
+    # Seen twice: worth naming. Seen once: listed separately for review.
+    assert [(p["count"], p["status"]) for p in people] == [(2, "new"), (1, "rare")]
+    anna, single = people
     trip.name_person(anna["id"], "Anna")
-    ben = next(p for p in people if p["count"] == 1)
-    trip.name_person(ben["id"], "Anna")  # same name merges the two
-    assert [p["label"] for p in trip.people()] == ["Anna"]
+    assert trip.person_names() == ["Anna"]
+
+    trip.mark_unknown([single["id"]])
+    assert trip.people()[1]["status"] == "unknown"
+    assert trip.items()[1]["people"] == []  # strangers vanish from the Library
+    trip.restore_person(single["id"])
+    trip.name_person(single["id"], "Anna")  # picking an existing name joins the two
+    assert [(p["label"], p["count"]) for p in trip.people()] == [("Anna", 3)]
 
     trip.set_scene(items[0]["path"], "City")
     trip.set_included([items[1]["path"]], False)
