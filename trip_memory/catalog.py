@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS items (
     curves TEXT,
     clip_sound INTEGER DEFAULT 0,
     clip_volume REAL DEFAULT 1.0,
+    cut_out INTEGER DEFAULT 0,
     faces_done INTEGER DEFAULT 0,
     scene_done INTEGER DEFAULT 0,
     tags_done INTEGER DEFAULT 0
@@ -143,7 +144,7 @@ class Trip:
             "rotation INTEGER DEFAULT 0", "rotation_checked INTEGER DEFAULT 0",
             "tags TEXT", "tags_user TEXT", "motion_action REAL", "motion_camera REAL", "motion_shake REAL",
             "look_group INTEGER", "tags_done INTEGER DEFAULT 0", "seconds REAL", "curves TEXT",
-            "clip_sound INTEGER DEFAULT 0", "clip_volume REAL DEFAULT 1.0",
+            "clip_sound INTEGER DEFAULT 0", "clip_volume REAL DEFAULT 1.0", "cut_out INTEGER DEFAULT 0",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
@@ -250,7 +251,7 @@ class Trip:
 
         Files you moved keep their place; anything not placed yet follows in date order.
         """
-        rows = [it for it in self.items() if it["chosen"] and it["included"]]
+        rows = [it for it in self.items() if it["chosen"] and it["included"] and not it["cut_out"]]
         placed = sorted((r for r in rows if r["position"] is not None), key=lambda r: r["position"])
         return placed + [r for r in rows if r["position"] is None]
 
@@ -302,7 +303,8 @@ class Trip:
 
     def set_included(self, paths: list[str], included: bool) -> None:
         with self._lock:
-            self.db.executemany("UPDATE items SET included = ? WHERE path = ?", [(int(included), p) for p in paths])
+            # Your own choice also overrides an earlier Auto-edit leaving the file out.
+            self.db.executemany("UPDATE items SET included = ?, cut_out = 0 WHERE path = ?", [(int(included), p) for p in paths])
             self.db.commit()
 
     def set_chosen(self, paths: list[str], chosen: bool) -> None:
@@ -350,6 +352,10 @@ class Trip:
     def reset_order(self) -> None:
         self.execute("UPDATE items SET position = NULL")
 
+    def auto_edit_pool(self) -> list[dict]:
+        """What Auto-edit picks from: your selection (ticked in Choose files and "In the video" in the Library)."""
+        return [r for r in self.items() if r["chosen"] and r["included"]]
+
     def auto_edit_to_music(
         self,
         song_path: str,
@@ -363,7 +369,7 @@ class Trip:
         from . import songmap
 
         report = on_progress or (lambda _f, _m: None)
-        rows = [r for r in self.items() if r["chosen"]]
+        rows = self.auto_edit_pool()
         scores = self._video_scores(rows, report)
         report(0.95, "Listening to the music")
         song = songmap.analyse(song_path, app_dir() / "music-maps")
@@ -400,11 +406,12 @@ class Trip:
             for shot_no, shot in enumerate(result.shots):
                 trim = (shot.start, shot.start + shot.seconds) if shot.kind == "video" else (None, None)
                 self.db.execute(
-                    "UPDATE items SET included = 1, position = ?, trim_start = ?, trim_end = ?, transition = ?, "
+                    "UPDATE items SET cut_out = 0, position = ?, trim_start = ?, trim_end = ?, transition = ?, "
                     "seconds = ? WHERE path = ?",
                     (shot_no, *trim, shot.transition, shot.seconds if shot.kind == "photo" else None, shot.path),
                 )
-            self.db.executemany("UPDATE items SET included = 0, position = NULL WHERE path = ?", [(p,) for p in result.left_out])
+            # Left out of this cut, but still in your selection, so the next Auto-edit can use it again.
+            self.db.executemany("UPDATE items SET cut_out = 1, position = NULL WHERE path = ?", [(p,) for p in result.left_out])
             self.db.commit()
 
     def auto_edit_steady(
@@ -419,7 +426,7 @@ class Trip:
         from .songmap import Section, SongMap
 
         report = on_progress or (lambda _f, _m: None)
-        rows = [r for r in self.items() if r["chosen"]]
+        rows = self.auto_edit_pool()
         scores = self._video_scores(rows, report)
         length = target or 3600.0  # "use everything": it stops when the shots run out
         steady = SongMap(duration=length, bpm=120, period=0.5, first_beat=0.0, clear_beat=False, downbeat=0,

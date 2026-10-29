@@ -245,3 +245,27 @@ def test_video_sound_is_off_until_you_switch_it_on(tmp_path, monkeypatch):
     trip.set_clip_sound(path, True, 1.5)
     item = trip.media_items()[0]
     assert item.sound is True and item.volume == 1.5
+
+
+def test_auto_edit_uses_only_your_selection_and_keeps_it(tmp_path, monkeypatch):
+    from trip_memory import autoedit
+
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    for n in range(12):
+        _gps_photo(trip_dir / f"p{n:02d}.jpg", f"2025:07:03 10:{n:02d}:00", 38.7, -9.1, (n * 20, 80, 160))
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    paths = [r["path"] for r in trip.items()]
+    trip.set_chosen(paths, True)
+    trip.set_included(paths[4:], False)  # you selected only the first four
+    limits = autoedit.Limits(max_video=4, max_photo=2, min_shot=1)
+    trip.auto_edit_steady(limits, 4.0, 0.8, "Fade")  # room for two of them
+    board = [r["path"] for r in trip.storyboard()]
+    assert set(board) <= set(paths[:4]) and 1 <= len(board) < 4
+    # The ones that didn't fit stay selected, so a longer Auto-edit uses them again.
+    assert [r["path"] for r in trip.auto_edit_pool()] == paths[:4]
+    trip.auto_edit_steady(limits, 60.0, 0.8, "Fade")
+    assert [r["path"] for r in trip.storyboard()] == paths[:4]

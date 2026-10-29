@@ -503,6 +503,8 @@ class Page:
             with ui.column().classes("p-2 gap-1 w-full"):
                 icon = "🎬 " + fmt_length(it["duration"]) if it["kind"] == "video" else "📷"
                 ui.label(f"{icon} · {fmt_time(it['taken_at'])}").classes("text-xs text-gray-600")
+                if it["included"] and it["cut_out"]:
+                    ui.label("✂ Selected, but not in the current Auto-edit cut").classes("text-xs text-orange-700")
                 place = ", ".join(x for x in (it["place"], it["country"]) if x) or "Unknown place"
                 if it["place_guessed"]:
                     ui.label(f"📍 {place} (guessed from photos taken around then)").classes("text-xs text-gray-500")
@@ -829,11 +831,14 @@ class Page:
         on_beat = f", cuts on the beat ({beat.bpm:.0f} BPM)" if music and beat and beat.clear else ""
         song = self.song_maps.get(music) if music else None
         wanted = song.duration if song and target == "song" else (float(target) if target not in ("song", "all") else None)
-        ticked = [it for it in self.trip.items() if it["chosen"]]
-        photos = sum(it["kind"] == "photo" for it in ticked)
-        short = (f" There weren't enough shots for {fmt_length(wanted)}: it used the {len(ticked)} files ticked in "
-                 f"Choose files ({len(ticked) - photos} videos, {photos} photos). Tick more there, or allow longer "
-                 "clips and photos." if wanted and result.length < wanted - 3 else "")
+        pool = self.trip.auto_edit_pool()
+        photos = sum(it["kind"] == "photo" for it in pool)
+        short = (f" There weren't enough shots for {fmt_length(wanted)}: your selection has {len(pool) - photos} "
+                 f"videos and {photos} photos. Select more, or allow longer clips and photos."
+                 if wanted and result.length < wanted - 3 else "")
+        unused = len(result.left_out)
+        short += (f" {unused} of your selected files didn't fit this length; they stay selected for next time."
+                  if unused and not short else "")
         ui.notify(f"First cut ready: {len(result.shots)} shots, {fmt_length(result.length)}{on_beat}. "
                   f"Fine-tune it below, then make the video.{short}", type="positive", multi_line=True, timeout=10000)
         self.story_page = 1
@@ -981,7 +986,7 @@ class Page:
         if not self.items:
             ui.label("Open a trip first, then pick what goes in the video in the Library.").classes("text-gray-500")
             return
-        chosen = [it for it in self.items if it["included"]]
+        chosen = [it for it in self.items if it["included"] and not it["cut_out"]]
         videos = sum(it["kind"] == "video" for it in chosen)
         ui.label(
             f"The video will use {len(chosen)} items ({videos} videos, {len(chosen) - videos} photos) in the Storyboard order. "
