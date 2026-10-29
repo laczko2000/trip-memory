@@ -16,6 +16,7 @@ from nicegui import app, run, ui
 
 from .catalog import Trip, app_dir
 from .media import MediaItem
+from . import music as free_music
 from .beats import song_length
 from .render import TITLE_SECONDS, TRANSITIONS, RenderSettings, clip_range, render
 from .scenes import SCENES
@@ -711,6 +712,9 @@ class Page:
             ).classes("text-sm text-gray-600")
 
     def music_changed(self) -> None:
+        if hasattr(self, "music_credit"):
+            credit = free_music.credit_for(self.music_input.value) if self.music_input.value else None
+            self.music_credit.text = f"Free song: {credit}. A credits file is saved next to your video." if credit else ""
         self.auto_length = None  # back to the default: as long as the song, if there is one
         self.storyboard_view.refresh()
 
@@ -864,6 +868,8 @@ class Page:
                 ).classes("flex-grow")
                 if sys.platform == "darwin":
                     ui.button("Browse…", on_click=self.browse_music).props("outline")
+                ui.button("Find free music", icon="library_music", on_click=self.find_music).props("outline")
+            self.music_credit = ui.label("").classes("text-xs text-gray-500")
             with ui.column().classes("w-full"):
                 ui.label("Music volume").classes("text-sm text-gray-500")
                 self.music_vol = ui.slider(min=0.1, max=1.0, step=0.05, value=0.5).props("label-always").classes("mt-8")
@@ -887,6 +893,81 @@ class Page:
             f"The video will use {len(chosen)} items ({videos} videos, {len(chosen) - videos} photos) in the Storyboard order. "
             "Change the selection in the Library and the order in the Storyboard."
         ).classes("text-gray-700")
+
+    def find_music(self) -> None:
+        """Search free, openly licensed songs online and use one."""
+        state = {"words": "happy summer", "songs": [], "busy": False, "error": ""}
+
+        with ui.dialog().props("maximized=false") as dialog, ui.card().classes("w-full max-w-3xl"):
+            ui.label("Find free music").classes("text-lg font-semibold")
+            ui.label(
+                "Creative Commons songs from Jamendo, ccMixter and others (found with Openverse). Only songs you may "
+                "use in your own video are shown. Most ask you to credit the artist: the app saves a credits file next "
+                "to your video."
+            ).classes("text-sm text-gray-600")
+            with ui.row().classes("w-full items-center no-wrap"):
+                words = ui.input("Search (mood, style, instrument…)", value=state["words"]).classes("flex-grow")
+                ui.button("Search", icon="search", on_click=lambda: search(words.value))
+            with ui.row().classes("gap-1"):
+                for mood in free_music.MOODS:
+                    ui.button(mood, on_click=lambda m=mood: pick(m)).props("outline dense rounded size=sm no-caps")
+
+            @ui.refreshable
+            def results() -> None:
+                if state["busy"]:
+                    ui.spinner(size="lg")
+                    return
+                if state["error"]:
+                    ui.label(state["error"]).classes("text-red-600")
+                    return
+                if not state["songs"]:
+                    ui.label("No songs found yet. Try other words.").classes("text-gray-500")
+                    return
+                with ui.scroll_area().classes("w-full h-96"):
+                    for song in state["songs"]:
+                        with ui.row().classes("w-full items-center no-wrap gap-2 py-1 border-b"):
+                            with ui.column().classes("gap-0 flex-grow"):
+                                ui.label(f"{song.title} · {song.artist}").classes("text-sm font-medium")
+                                ui.label(f"{fmt_length(song.seconds)} · {song.licence} · {song.source}").classes(
+                                    "text-xs text-gray-500")
+                            ui.audio(song.url, autoplay=False).props("preload=none").classes("w-56")
+                            ui.button("Use this", on_click=lambda sg=song: use(sg)).props("dense")
+
+            results()
+
+            async def search(text: str) -> None:
+                state.update(words=text, busy=True, error="")
+                results.refresh()
+                try:
+                    state["songs"] = await run.io_bound(free_music.search, text)
+                except Exception as exc:
+                    traceback.print_exc()
+                    state["error"] = f"Could not search for music (is the internet connected?): {exc}"
+                state["busy"] = False
+                results.refresh()
+
+            async def pick(mood: str) -> None:
+                words.value = mood
+                await search(mood)
+
+            async def use(song) -> None:
+                note = ui.notification(f"Downloading {song.title}…", spinner=True, timeout=None)
+                try:
+                    path = await run.io_bound(free_music.download, song, app_dir() / "music")
+                except Exception as exc:
+                    traceback.print_exc()
+                    note.dismiss()
+                    ui.notify(f"Could not download it: {exc}", type="negative", multi_line=True)
+                    return
+                note.dismiss()
+                self.music_input.value = str(path)
+                dialog.close()
+                ui.notify(f"Using {song.title} by {song.artist}.", type="positive")
+
+            with ui.row().classes("w-full justify-end"):
+                ui.button("Close", on_click=dialog.close).props("flat")
+        dialog.open()
+        ui.timer(0.1, lambda: search(state["words"]), once=True)
 
     async def browse_music(self) -> None:
         path = await run.io_bound(choose_with_finder, "music")
@@ -931,6 +1012,11 @@ class Page:
         try:
             result = await run.io_bound(render, items, settings, out, on_progress, app_dir() / "clip-cache")
             self.render_status.text = f"Saved to {result}"
+            credit = free_music.credit_for(settings.music_path) if settings.music_path else None
+            if credit:
+                credits = result.with_name(result.stem + " - music credits.txt")
+                credits.write_text(f"Music: {credit}\n")
+                self.render_status.text += f" (music credit saved in {credits.name})"
             with self.result_box:
                 ui.video(f"/videos/{result.name}").classes("w-full")
                 ui.button("Show in Finder", icon="folder", on_click=lambda: reveal(result)).props("outline")
