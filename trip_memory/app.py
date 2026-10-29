@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import subprocess
@@ -952,6 +953,33 @@ class Page:
                 words.value = mood
                 await search(mood)
 
+            def get_from_page(song) -> None:
+                name = free_music.remember_credit(song, app_dir() / "music")
+                since = time.time()
+                ui.navigate.to(song.page, new_tab=True)
+                waiting = ui.notification(
+                    f"{song.source or 'This site'} only allows downloading on its own page, now open in a new tab. "
+                    "Click its download button there; the app picks the song up from your Downloads folder by itself.",
+                    spinner=True, timeout=None, multi_line=True, close_button=True,
+                )
+
+                async def check() -> None:
+                    found = free_music.find_download(name, since)
+                    if found is None:
+                        if time.time() - since > 15 * 60:
+                            watcher.cancel()
+                            waiting.dismiss()
+                        return
+                    watcher.cancel()
+                    await asyncio.sleep(1.5)  # let the browser finish writing it
+                    path = await run.io_bound(free_music.adopt, found, song, app_dir() / "music")
+                    waiting.dismiss()
+                    self.music_input.value = str(path)
+                    dialog.close()
+                    ui.notify(f"Got it: using {song.title} by {song.artist}.", type="positive")
+
+                watcher = ui.timer(2.0, check)
+
             async def use(song) -> None:
                 note = ui.notification(f"Downloading {song.title}…", spinner=True, timeout=None)
                 try:
@@ -960,15 +988,9 @@ class Page:
                     traceback.print_exc()
                     note.dismiss()
                     if "403" in str(exc) and song.page:
-                        # Some sites (like ccMixter) only allow downloads from their own web page.
-                        name = free_music.remember_credit(song, app_dir() / "music")
-                        ui.navigate.to(song.page, new_tab=True)
-                        ui.notify(
-                            f"{song.source or 'This site'} only allows downloading from its own page, which is now open "
-                            f"in a new tab. Download the song there, then pick {name} with Browse. "
-                            "The app still remembers its credit.",
-                            type="warning", multi_line=True, timeout=20000, close_button=True,
-                        )
+                        # Some sites (like ccMixter) only allow downloads from their own web page: open it, and
+                        # pick the song up from Downloads as soon as it arrives.
+                        get_from_page(song)
                     else:
                         ui.notify(f"Could not download it: {exc}", type="negative", multi_line=True)
                     return

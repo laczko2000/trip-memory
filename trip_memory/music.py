@@ -153,14 +153,13 @@ def parse(data: dict) -> list[Song]:
     return songs
 
 
+AUDIO_SUFFIXES = (".mp3", ".ogg", ".wav", ".flac", ".m4a", ".aac", ".opus")
+
+
 def download(song: Song, folder: Path) -> Path:
     """Save the song in the app's music folder (once) and remember its credit."""
-    folder.mkdir(parents=True, exist_ok=True)
     suffix = Path(song.url.split("?")[0]).suffix.lower()
-    if suffix not in (".mp3", ".ogg", ".wav", ".flac", ".m4a", ".aac", ".opus"):
-        suffix = ".mp3"
-    safe = "".join(c for c in f"{song.artist} - {song.title}" if c.isalnum() or c in " -_").strip()[:80]
-    path = folder / f"{safe or 'song'} [{hashlib.sha1(song.id.encode()).hexdigest()[:6]}]{suffix}"
+    path = _song_path(song, folder, suffix if suffix in AUDIO_SUFFIXES else ".mp3")
     if not path.exists():
         part = path.with_suffix(path.suffix + ".part")
         with httpx.stream("GET", song.url, headers=HEADERS, timeout=httpx.Timeout(60, connect=15),
@@ -170,10 +169,45 @@ def download(song: Song, folder: Path) -> Path:
                 for chunk in response.iter_bytes():
                     f.write(chunk)
         part.rename(path)
-    credits = _load_credits(folder)
-    credits[path.name] = asdict(song) | {"credit": song.credit}
-    (folder / "credits.json").write_text(json.dumps(credits, indent=1))
+    _save_credit(song, path)
     return path
+
+
+def find_download(name: str, since: float, folder: Path | None = None) -> Path | None:
+    """Look in Downloads for a song you just downloaded yourself on its website: its usual file name
+    (browsers add " (1)" etc. to repeats), else any finished audio file that arrived after `since`."""
+    folder = folder or Path.home() / "Downloads"
+    stem, suffix = Path(name).stem, Path(name).suffix.lower()
+    try:
+        files = [f for f in folder.iterdir() if f.is_file() and f.suffix.lower() in AUDIO_SUFFIXES]
+        fresh = [f for f in files if f.stat().st_mtime >= since - 2]
+    except OSError:
+        return None
+    named = [f for f in fresh if f.stem.startswith(stem) and f.suffix.lower() == suffix]
+    pick = named or fresh
+    return max(pick, key=lambda f: f.stat().st_mtime) if pick else None
+
+
+def adopt(file: Path, song: Song, folder: Path) -> Path:
+    """Copy a song you downloaded yourself into the app's music folder, with its credit."""
+    import shutil
+
+    path = _song_path(song, folder, file.suffix.lower())
+    shutil.copyfile(file, path)
+    _save_credit(song, path)
+    return path
+
+
+def _song_path(song: Song, folder: Path, suffix: str) -> Path:
+    folder.mkdir(parents=True, exist_ok=True)
+    safe = "".join(c for c in f"{song.artist} - {song.title}" if c.isalnum() or c in " -_").strip()[:80]
+    return folder / f"{safe or 'song'} [{hashlib.sha1(song.id.encode()).hexdigest()[:6]}]{suffix}"
+
+
+def _save_credit(song: Song, path: Path) -> None:
+    credits = _load_credits(path.parent)
+    credits[path.name] = asdict(song) | {"credit": song.credit}
+    (path.parent / "credits.json").write_text(json.dumps(credits, indent=1))
 
 
 def remember_credit(song: Song, folder: Path) -> str:

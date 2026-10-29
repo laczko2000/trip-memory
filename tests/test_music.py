@@ -72,3 +72,23 @@ def test_credit_remembered_for_songs_you_download_yourself(tmp_path):
     name = music.remember_credit(song, tmp_path / "music")
     assert name == "road.mp3"
     assert music.credit_for(tmp_path / "Downloads" / "road.mp3", tmp_path / "music") == song.credit
+
+
+def test_song_downloaded_yourself_is_found_and_adopted(tmp_path):
+    import os
+    import time
+
+    song = music.parse_ccmixter(CCMIXTER)[0]
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    old = downloads / "old.mp3"
+    old.write_bytes(b"old")
+    os.utime(old, (time.time() - 3600, time.time() - 3600))
+    since = time.time()
+    assert music.find_download("road.mp3", since, downloads) is None
+    (downloads / "road (1).mp3").write_bytes(b"new song")
+    found = music.find_download("road.mp3", since, downloads)
+    assert found.name == "road (1).mp3"
+    path = music.adopt(found, song, tmp_path / "music")
+    assert path.read_bytes() == b"new song"
+    assert music.credit_for(path) == song.credit
