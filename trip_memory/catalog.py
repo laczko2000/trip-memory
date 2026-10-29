@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS items (
     scene_user TEXT,
     clip BLOB,
     included INTEGER DEFAULT 1,
+    chosen INTEGER DEFAULT 1,
     faces_done INTEGER DEFAULT 0,
     scene_done INTEGER DEFAULT 0
 );
@@ -107,6 +108,10 @@ class Trip:
         self.db = sqlite3.connect(self.dir / "catalog.db", check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
+        try:  # catalogues made before version 0.4 lack this column
+            self.db.execute("ALTER TABLE items ADD COLUMN chosen INTEGER DEFAULT 1")
+        except sqlite3.OperationalError:
+            pass
         (self.dir / "folder.txt").write_text(str(self.folder))
         self.progress = Progress()
 
@@ -148,7 +153,10 @@ class Trip:
         """
         counts = {
             r["person_id"]: r["n"]
-            for r in self.query("SELECT person_id, COUNT(DISTINCT path) AS n FROM faces GROUP BY person_id")
+            for r in self.query(
+                "SELECT f.person_id, COUNT(DISTINCT f.path) AS n FROM faces f "
+                "JOIN items i ON i.path = f.path WHERE i.chosen = 1 GROUP BY f.person_id"
+            )
         }
         result = {}
         for p in self.query("SELECT * FROM people"):
@@ -174,7 +182,11 @@ class Trip:
         for pid, info in self._people_status().items():
             if not info["count"]:
                 continue
-            faces = self.query("SELECT crop FROM faces WHERE person_id = ? ORDER BY score DESC LIMIT 6", (pid,))
+            faces = self.query(
+                "SELECT f.crop FROM faces f JOIN items i ON i.path = f.path "
+                "WHERE f.person_id = ? AND i.chosen = 1 ORDER BY f.score DESC LIMIT 6",
+                (pid,),
+            )
             name = info["label"] if info["status"] == "named" else ""
             result.append({"id": pid, "name": name, **info, "faces": [f["crop"] for f in faces]})
         order = {"named": 0, "new": 1, "rare": 2, "unknown": 3}
@@ -182,7 +194,7 @@ class Trip:
         return result
 
     def media_items(self, only_included: bool = True) -> list[MediaItem]:
-        sql = "SELECT * FROM items" + (" WHERE included = 1" if only_included else "") + " ORDER BY taken_at, path"
+        sql = "SELECT * FROM items WHERE chosen = 1" + (" AND included = 1" if only_included else "") + " ORDER BY taken_at, path"
         return [
             MediaItem(
                 path=Path(r["path"]),
@@ -200,6 +212,12 @@ class Trip:
     def set_included(self, paths: list[str], included: bool) -> None:
         with self._lock:
             self.db.executemany("UPDATE items SET included = ? WHERE path = ?", [(int(included), p) for p in paths])
+            self.db.commit()
+
+    def set_chosen(self, paths: list[str], chosen: bool) -> None:
+        """Choose which files of the folder belong to this trip (only those are analysed and used)."""
+        with self._lock:
+            self.db.executemany("UPDATE items SET chosen = ? WHERE path = ?", [(int(chosen), p) for p in paths])
             self.db.commit()
 
     def set_scene(self, path: str, scene: str | None) -> None:
@@ -232,47 +250,93 @@ class Trip:
 
     # ---------- analysis ----------
 
+    def prepare(self, on_change: Callable[[], None] | None = None) -> None:
+        """The quick first look: find the files, their dates and places, and make small previews."""
+        self._run(self._prepare, on_change)
+
     def analyse(self, on_change: Callable[[], None] | None = None) -> None:
-        """Scan the folder and work out places, scenes and people for anything new. Safe to re-run."""
+        """Work out scenes and people for the chosen files not analysed yet. Safe to re-run."""
+        self._run(self._analyse, on_change)
+
+    def _run(self, step, on_change) -> None:
         p = self.progress
         p.running, p.notes, p.fraction = True, [], 0.0
         notify = on_change or (lambda: None)
         try:
-            p.message = "Looking through the folder…"
-            notify()
-            found, problems = scan_folder(self.folder)
-            p.notes.extend(problems)
-            self._store_found(found)
-
-            p.message = "Finding place names…"
-            notify()
-            self._name_places()
-
-            todo = self.query("SELECT * FROM items WHERE faces_done = 0 OR scene_done = 0 OR thumb IS NULL ORDER BY taken_at")
-            faces = scenes = None
-            if todo:
-                p.message = "Loading the AI models (the first time this downloads about 1 GB)…"
-                notify()
-                faces = self._load(lambda: FaceFinder(app_dir() / "models"), "people")
-                scenes = self._load(lambda: SceneTagger(app_dir() / "models" / "clip"), "scenes")
-
-            for i, row in enumerate(todo):
-                p.fraction = i / len(todo)
-                p.message = f"Looking at {i + 1} of {len(todo)}: {Path(row['path']).name}"
-                notify()
-                try:
-                    self._analyse_item(row, faces, scenes)
-                except Exception as exc:
-                    traceback.print_exc()
-                    p.notes.append(f"Could not analyse {Path(row['path']).name}: {exc}")
-
-            p.message = "Grouping faces into people…"
-            notify()
-            self._group_people()
+            step(notify)
             p.fraction, p.message = 1.0, "Done"
         finally:
             p.running = False
             notify()
+
+    def _prepare(self, notify: Callable[[], None]) -> None:
+        p = self.progress
+        p.message = "Looking through the folder…"
+        notify()
+        found, problems = scan_folder(self.folder)
+        p.notes.extend(problems)
+        self._store_found(found)
+
+        p.message = "Finding place names…"
+        notify()
+        self._name_places()
+
+        todo = self.query("SELECT path, kind, duration FROM items WHERE thumb IS NULL ORDER BY taken_at")
+        for i, row in enumerate(todo):
+            p.fraction = i / len(todo)
+            p.message = f"Making previews: {i + 1} of {len(todo)}"
+            if i % 10 == 0:
+                notify()
+            try:
+                self.execute("UPDATE items SET thumb = ? WHERE path = ?", (str(self._make_thumb(row)), row["path"]))
+            except Exception as exc:
+                p.notes.append(f"No preview for {Path(row['path']).name}: {exc}")
+
+    def _analyse(self, notify: Callable[[], None]) -> None:
+        self._prepare(notify)
+        p = self.progress
+        todo = self.query("SELECT * FROM items WHERE chosen = 1 AND (faces_done = 0 OR scene_done = 0) ORDER BY taken_at")
+        faces = scenes = None
+        if todo:
+            p.message = "Loading the AI models (the first time this downloads about 1 GB)…"
+            notify()
+            faces = self._load(lambda: FaceFinder(app_dir() / "models"), "people")
+            scenes = self._load(lambda: SceneTagger(app_dir() / "models" / "clip"), "scenes")
+
+        for i, row in enumerate(todo):
+            p.fraction = i / len(todo)
+            p.message = f"Analysing {i + 1} of {len(todo)}: {Path(row['path']).name}"
+            notify()
+            try:
+                self._analyse_item(row, faces, scenes)
+            except Exception as exc:
+                traceback.print_exc()
+                p.notes.append(f"Could not analyse {Path(row['path']).name}: {exc}")
+
+        p.message = "Grouping faces into people…"
+        notify()
+        self._group_people()
+
+    def _thumb_path(self, path: str) -> Path:
+        return self.dir / "thumbs" / f"{hashlib.sha1(path.encode()).hexdigest()[:16]}.jpg"
+
+    def _make_thumb(self, row) -> Path:
+        out = self._thumb_path(row["path"])
+        if row["kind"] == "photo":
+            with Image.open(row["path"]) as img:
+                img.draft("RGB", (960, 960))  # fast for JPEGs
+                img = ImageOps.exif_transpose(img).convert("RGB")
+                img.thumbnail((480, 480))
+                img.save(out, quality=85)
+        else:
+            subprocess.run(
+                [ffmpeg_paths()[0], "-loglevel", "error", "-y", "-ss", f"{(row['duration'] or 0) / 2:.2f}",
+                 "-i", row["path"], "-frames:v", "1", "-vf", "scale=480:-2", "-q:v", "4", str(out)],
+                capture_output=True,
+            )
+            if not out.exists():
+                raise RuntimeError("could not read a frame")
+        return out
 
     def _load(self, make, what: str):
         try:
@@ -328,11 +392,7 @@ class Trip:
             frames = _frames(path, row["kind"], row["duration"], Path(tmp))
             if not frames:
                 raise RuntimeError("no picture could be read")
-            thumb = self.dir / "thumbs" / f"{key}.jpg"
-            with Image.open(frames[len(frames) // 2]) as img:
-                img.thumbnail((480, 480))
-                img.save(thumb, quality=85)
-            updates = {"thumb": str(thumb)}
+            updates: dict = {}
 
             if faces is not None and not row["faces_done"]:
                 found = []
@@ -359,6 +419,8 @@ class Trip:
                 top = scenes.classify(vector)
                 updates.update(scene=top[0][0], scene_top=json.dumps(top), clip=vector.tobytes(), scene_done=1)
 
+        if not updates:
+            return
         sets = ", ".join(f"{k} = ?" for k in updates)
         self.execute(f"UPDATE items SET {sets} WHERE path = ?", (*updates.values(), str(path)))
 

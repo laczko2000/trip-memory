@@ -13,7 +13,10 @@ Nothing is uploaded anywhere.
 
 ## Use it
 
-1. **Choose your trip folder** with *Browse…*. The app looks through every video and photo and works out:
+1. **Choose your trip folder** with *Browse…*. The app takes a quick first look (dates, places, small previews).
+2. **Choose files tab:** untick what you don't want, filter by day or type, or untick everything and tick just
+   the few you want. Then click **Analyse the chosen files**. Only those files are analysed and used.
+   The analysis works out:
    - **when** each was taken (sorted by day),
    - **where**: the place name from the phone's GPS, looked up offline. Photos without GPS borrow the place
      of a photo taken within 3 hours, or at least the country from the same day (marked "guessed"),
@@ -22,18 +25,19 @@ Nothing is uploaded anywhere.
 
    The first time, it downloads the free AI models (about 1 GB). Each trip is analysed once and remembered;
    adding new files later only analyses the new ones.
-2. **Library tab:** browse the thumbnails, filter by day, place, scene or person, correct a scene if it's wrong,
+3. **Library tab:** browse the thumbnails, filter by day, place, scene or person, correct a scene if it's wrong,
    and tick or untick what goes into the video.
-3. **People tab:** for each face group, pick a name you already used from the drop-down, or type a new one
+4. **People tab:** for each face group, pick a name you already used from the drop-down, or type a new one
    and press Enter. Picking an existing name joins the groups. **Unknown** hides strangers. Faces seen only
    once or twice are listed separately so you can check them, then **Mark all of these as Unknown**.
-4. **Make video tab:** choose transition, photo length, music, then **Make my video**. The file is saved in
+5. **Make video tab:** choose transition, photo length, music, then **Make my video**. The file is saved in
    *Movies → Trip Memory*.
 
 Everything runs on your Mac. Nothing is uploaded.
 
 ## What's new
 
+- **0.4:** choose which files of a folder to analyse and use.
 - **0.3.2:** missing places are guessed from photos taken around the same time.
 - **0.3.1:** name drop-down, one-click Unknown, review list for faces seen only once or twice.
 - **0.3 (milestone 3):** trip catalogue with places, scene suggestions, people, filters and picking.

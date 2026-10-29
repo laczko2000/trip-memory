@@ -19,6 +19,7 @@ from .scenes import SCENES
 OUTPUT_DIR = Path.home() / "Movies" / "Trip Memory"
 RESOLUTIONS = {"Full HD (1080p)": (1920, 1080), "HD (720p, faster)": (1280, 720)}
 PAGE_SIZE = 48
+CHOOSE_PAGE_SIZE = 60
 ALL = "All"
 SETTINGS = app_dir() / "settings.json"
 
@@ -71,7 +72,10 @@ class Page:
 
     def __init__(self) -> None:
         self.trip: Trip | None = None
-        self.items: list[dict] = []
+        self.all_items: list[dict] = []  # every file in the folder
+        self.items: list[dict] = []  # the files you chose for this trip
+        self.choose_filters = {"day": ALL, "kind": ALL}
+        self.choose_page = 1
         self.dirty = False
         self.last_refresh = 0.0
         self.filters = {"day": ALL, "place": ALL, "scene": ALL, "person": ALL, "show": ALL}
@@ -81,7 +85,8 @@ class Page:
     # ---------- data ----------
 
     def reload(self) -> None:
-        self.items = self.trip.items() if self.trip else []
+        self.all_items = self.trip.items() if self.trip else []
+        self.items = [it for it in self.all_items if it["chosen"]]
         self.dirty = False
         self.last_refresh = time.time()
 
@@ -129,10 +134,14 @@ class Page:
             ui.label("Trip Memory").classes("text-3xl font-bold")
             self.build_folder_row()
             with ui.tabs().classes("w-full") as tabs:
+                self.choose_tab = ui.tab("Choose files", icon="checklist")
                 library_tab = ui.tab("Library", icon="photo_library")
                 people_tab = ui.tab("People", icon="people")
                 video_tab = ui.tab("Make video", icon="movie")
-            with ui.tab_panels(tabs, value=library_tab).classes("w-full"):
+            self.library_tab = library_tab
+            with ui.tab_panels(tabs, value=self.choose_tab).classes("w-full") as self.panels:
+                with ui.tab_panel(self.choose_tab):
+                    self.choose_view()
                 with ui.tab_panel(library_tab):
                     self.build_library()
                 with ui.tab_panel(people_tab):
@@ -143,7 +152,7 @@ class Page:
         last = load_settings().get("folder")
         if last and Path(last).is_dir():
             self.folder_input.value = last
-            ui.timer(0.1, lambda: self.open_trip(analyse=False), once=True)
+            ui.timer(0.1, self.open_trip, once=True)
 
     def build_folder_row(self) -> None:
         with ui.card().classes("w-full"):
@@ -151,9 +160,11 @@ class Page:
                 self.folder_input = ui.input("Trip folder", placeholder="/Users/you/Pictures/Lisbon 2025").classes("flex-grow")
                 if sys.platform == "darwin":
                     ui.button("Browse…", on_click=self.browse_folder).props("outline")
-                self.analyse_button = ui.button("Open and analyse", icon="auto_awesome", on_click=lambda: self.open_trip(True))
+                self.open_button = ui.button("Open folder", icon="folder_open", on_click=self.open_trip)
             self.progress_bar = ui.linear_progress(value=0, show_value=False).classes("w-full")
-            self.progress_label = ui.label("Choose a trip folder. The app finds places, scenes and people for you.").classes("text-gray-600")
+            self.progress_label = ui.label(
+                "Choose a trip folder, then pick the files you want. The app finds places, scenes and people in them."
+            ).classes("text-gray-600")
             self.notes_label = ui.label("").classes("text-orange-600 text-sm whitespace-pre-line")
             self.progress_bar.set_visibility(False)
 
@@ -161,31 +172,46 @@ class Page:
         path = await run.io_bound(choose_with_finder, "folder")
         if path:
             self.folder_input.value = path
-            await self.open_trip(True)
+            await self.open_trip()
 
-    async def open_trip(self, analyse: bool = True) -> None:
+    async def open_trip(self) -> None:
+        """Open a folder and take the quick first look (dates, places, previews)."""
         folder = (self.folder_input.value or "").strip().strip("'\"")
         if not folder or not Path(folder).expanduser().is_dir():
             ui.notify("Please choose a folder that exists.", type="warning")
             return
         if self.trip and self.trip.progress.running:
-            ui.notify("Still analysing, please wait.", type="warning")
+            ui.notify("Still working, please wait.", type="warning")
             return
         self.trip = Trip(folder)
         save_settings(folder=str(self.trip.folder))
         self.filters = {k: ALL for k in self.filters}
+        self.choose_filters = {k: ALL for k in self.choose_filters}
         self.refresh_all()
-        if analyse or not self.items:
-            self.analyse_button.disable()
-            self.progress_bar.set_visibility(True)
-            try:
-                await run.io_bound(self.trip.analyse, self.mark_dirty)
-            except Exception as exc:
-                traceback.print_exc()
-                ui.notify(f"Analysis stopped: {exc}", type="negative")
-            finally:
-                self.analyse_button.enable()
-            self.refresh_all()
+        await self.run_step(self.trip.prepare)
+        analysed = any(it["faces_done"] or it["scene_done"] for it in self.items)
+        self.panels.value = self.library_tab if analysed else self.choose_tab
+
+    async def run_step(self, step) -> None:
+        self.open_button.disable()
+        self.progress_bar.set_visibility(True)
+        try:
+            await run.io_bound(step, self.mark_dirty)
+        except Exception as exc:
+            traceback.print_exc()
+            ui.notify(f"Stopped: {exc}", type="negative")
+        finally:
+            self.open_button.enable()
+        self.refresh_all()
+
+    async def analyse_chosen(self) -> None:
+        if not self.trip or self.trip.progress.running:
+            return
+        if not self.items:
+            ui.notify("Choose at least one file first.", type="warning")
+            return
+        await self.run_step(self.trip.analyse)
+        self.panels.value = self.library_tab
 
     def mark_dirty(self) -> None:
         self.dirty = True
@@ -201,7 +227,9 @@ class Page:
                     self.refresh_all()
             else:
                 self.progress_bar.set_visibility(False)
-                self.progress_label.text = f"{self.trip.folder.name}: {len(self.items)} videos and photos."
+                self.progress_label.text = (
+                    f"{self.trip.folder.name}: {len(self.all_items)} files in the folder, {len(self.items)} chosen."
+                )
             self.notes_label.text = "\n".join(p.notes[:8])
         r = self.rendering
         if r["busy"]:
@@ -210,10 +238,85 @@ class Page:
 
     def refresh_all(self) -> None:
         self.reload()
+        self.choose_view.refresh()
         self.filters_view.refresh()
         self.gallery.refresh()
         self.people_view.refresh()
         self.video_summary.refresh()
+
+    # ---------- Choose files ----------
+
+    def choose_shown(self) -> list[dict]:
+        f = self.choose_filters
+        return [
+            it
+            for it in self.all_items
+            if (f["day"] == ALL or it["day"] == f["day"]) and (f["kind"] == ALL or it["kind"] == f["kind"])
+        ]
+
+    @ui.refreshable
+    def choose_view(self) -> None:
+        if not self.all_items:
+            ui.label("Open a trip folder to see its files here.").classes("text-gray-500")
+            return
+        days = sorted({it["day"] for it in self.all_items})
+        day_opts = {ALL: "All days", **{d: f"Day {n} · {datetime.fromisoformat(d):%a %d %b}" for n, d in enumerate(days, 1)}}
+        if self.choose_filters["day"] not in day_opts:
+            self.choose_filters["day"] = ALL
+        shown = self.choose_shown()
+        chosen = len(self.items)
+        with ui.row().classes("w-full items-center gap-3"):
+            ui.label(f"{chosen} of {len(self.all_items)} files chosen").classes("text-lg font-semibold")
+            ui.button(
+                f"Analyse the {chosen} chosen files", icon="auto_awesome", on_click=self.analyse_chosen
+            ).props("" if chosen else "disable")
+        ui.label(
+            "Untick anything you don't want. Only chosen files are analysed and can go into the video. "
+            "Tip: use 'Untick all shown', then tick the few you want."
+        ).classes("text-sm text-gray-600")
+        with ui.row().classes("w-full items-end gap-3"):
+            ui.select(day_opts, value=self.choose_filters["day"], label="Day",
+                      on_change=lambda e: self.set_choose_filter("day", e.value)).classes("min-w-48")
+            ui.select({ALL: "Photos and videos", "photo": "Only photos", "video": "Only videos"},
+                      value=self.choose_filters["kind"], label="Type",
+                      on_change=lambda e: self.set_choose_filter("kind", e.value)).classes("min-w-40")
+            ui.button("Tick all shown", icon="check_box", on_click=lambda: self.choose_shown_files(True)).props("flat dense")
+            ui.button("Untick all shown", icon="check_box_outline_blank", on_click=lambda: self.choose_shown_files(False)).props("flat dense")
+        pages = max(1, -(-len(shown) // CHOOSE_PAGE_SIZE))
+        self.choose_page = min(self.choose_page, pages)
+        with ui.grid().classes("w-full gap-2 grid-cols-3 sm:grid-cols-4 md:grid-cols-6"):
+            for it in shown[(self.choose_page - 1) * CHOOSE_PAGE_SIZE : self.choose_page * CHOOSE_PAGE_SIZE]:
+                with ui.card().tight().classes("w-full" + ("" if it["chosen"] else " opacity-40")):
+                    if it["thumb"]:
+                        ui.image(data_url(it["thumb"])).classes("w-full h-24 object-cover")
+                    with ui.column().classes("p-1 gap-0 w-full"):
+                        icon = "🎬 " + fmt_length(it["duration"]) if it["kind"] == "video" else "📷"
+                        ui.label(f"{icon} {fmt_time(it['taken_at'])}").classes("text-xs text-gray-600")
+                        ui.checkbox(
+                            Path(it["path"]).name[:22],
+                            value=bool(it["chosen"]),
+                            on_change=lambda e, path=it["path"]: self.choose_one(path, e.value),
+                        ).props("dense size=xs").classes("text-xs")
+        if pages > 1:
+            ui.pagination(1, pages, direction_links=True, value=self.choose_page,
+                          on_change=lambda e: self.go_to_choose_page(e.value))
+
+    def set_choose_filter(self, key: str, value: str) -> None:
+        self.choose_filters[key] = value
+        self.choose_page = 1
+        self.choose_view.refresh()
+
+    def go_to_choose_page(self, page: int) -> None:
+        self.choose_page = page
+        self.choose_view.refresh()
+
+    def choose_shown_files(self, chosen: bool) -> None:
+        self.trip.set_chosen([it["path"] for it in self.choose_shown()], chosen)
+        self.refresh_all()
+
+    def choose_one(self, path: str, chosen: bool) -> None:
+        self.trip.set_chosen([path], chosen)
+        self.refresh_all()
 
     # ---------- Library ----------
 
