@@ -386,13 +386,14 @@ class Trip:
         on_progress: Callable[[float, str], None] | None = None,
     ) -> autoedit.Plan:
         """The music-driven first cut: the song's beats, bars and energy decide the cuts; shots are matched to it."""
-        from . import songmap
+        from . import songmap, taps
 
         report = on_progress or (lambda _f, _m: None)
         rows = self.auto_edit_pool()
         scores = self._video_scores(rows, report)
         report(0.95, "Listening to the music")
         song = songmap.analyse(song_path, app_dir() / "music-maps")
+        song.taps = taps.final_taps(song_path, app_dir() / "music-taps")  # your own cuts, if you tapped this song
         result = autoedit.plan_to_music(rows, scores, song, limits, target, transition_seconds, soft_transition)
         self._apply_plan(result)
         report(1.0, "Done")

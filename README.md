@@ -58,6 +58,7 @@ Everything runs on your Mac. Nothing is uploaded.
 
 ## What's new
 
+- **0.17:** a new *Music* tab: play your song and tap the right Shift key wherever you want a cut. Play it back to hear a click at every pin, drag pins to move them, click one and press delete to remove it. *Snap to the music* moves each pin onto the exact hit, *These are final* makes Auto-edit cut exactly there (Cut on: My taps). After your last pin the app cuts the rest by itself.
 - **0.16:** photos glide smoothly instead of flickering, and move more: each one zooms in, zooms out or pans sideways (tall photos only zoom), so a row of photos feels varied.
 - **0.15:** the app now hears which beats hit hardest (drums, bass, cymbals), shown as red marks over the song. A new *Cut on* choice in Auto-edit: *Strong beats* (the default), *Bass hits*, *Big moments only* (few, long shots) or *Every few beats* (the old steady count).
 - **0.14:** a new *Stories* tab. Each story is named by what it shows, where and when (for example "Fish & aquarium · Lisbon · Sat 5 Jul, morning"); rename it, move it up or down, or switch it off. Auto-edit and the Storyboard tell the stories in that order. Click *Analyse* once more so existing trips get the new names.

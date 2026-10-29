@@ -115,3 +115,14 @@ def test_cuts_go_on_the_strong_beats():
     assert all(round(s.start / 0.5) % 8 == 0 for s in every)  # the steady count: every bar pair
     few = autoedit.music_slots(song, autoedit.Limits(max_video=6.0, max_photo=6.0, min_shot=1.0, cut_on="changes"), end=16.0)
     assert len(few) <= len(slots)
+
+
+def test_cuts_follow_your_taps_then_the_music():
+    song = _song()
+    song.taps = [1.5, 2.75, 5.0, 9.0]
+    limits = autoedit.Limits(max_video=6.0, max_photo=6.0, min_shot=1.0, cut_on="taps")
+    slots = autoedit.music_slots(song, limits, end=40.0)
+    assert [s.start for s in slots[:5]] == [0.0, 1.5, 2.75, 5.0, 9.0]
+    assert all(s.seconds <= 6.0 * 1.03 for s in slots)
+    assert abs(slots[-1].end - 40.0) < 1e-6
+    assert any(abs(s.start - 16) < 1e-6 for s in slots)  # after your last tap, the music's own changes again

@@ -139,6 +139,7 @@ BEATS_FOR = {"Lively": 2, "Medium": 4, "Calm": 8}
 
 # Where the cuts go. Every one of them still lands on a beat, and every change in the music is a cut.
 CUT_ON = {
+    "taps": "My taps (Music tab)",  # the cuts you tapped along to the song yourself
     "strong": "Strong beats",  # the hardest hits, keeping roughly the pace the music asks for
     "bass": "Bass hits",  # the kick drum and bass notes
     "changes": "Big moments only",  # few cuts, held as long as allowed, on the biggest hits
@@ -151,22 +152,28 @@ def music_slots(song, limits: Limits, end: float, longest: float | None = None) 
     """Cut the music into shot-sized pieces: every cut on a beat, every change in the music a cut."""
     longest = longest or max(limits.max_video, limits.max_photo)
     beats = song.beat_times()
-    slots: list[Slot] = []
+    taps = getattr(song, "taps", None) if limits.cut_on == "taps" else None
+    # Your taps decide the cuts up to your last tap; any part of the song after it is cut automatically.
+    tapped = min(end, max(taps)) if taps else 0.0
+    slots: list[Slot] = _tap_slots(song, taps, tapped) if taps else []
     for section in song.sections:
         if section.start >= end:
             break
+        begin = max(section.start, tapped)
+        if section.end <= begin + 1e-3:
+            continue
         n = BEATS_FOR.get(section.level, 4)
         while n > 1 and n * song.period > longest * 1.03:  # a hair over the limit is fine (tempo isn't exact)
             n //= 2
         while n * song.period < limits.min_shot - 1e-6:
             n *= 2
         stop = min(section.end, end)
-        cuts = _cuts_on_hits(song, limits, section.start, stop, n, longest)
+        cuts = _cuts_on_hits(song, limits, begin, stop, n, longest)
         if cuts is None:
             # Cuts every n beats, counted from the bar lines, so they line up with the music's bars.
-            cuts = [section.start]
+            cuts = [begin]
             for k, b in enumerate(beats):
-                if section.start + 1e-3 < b < stop - 1e-3 and (k - song.downbeat) % n == 0 and b - cuts[-1] >= limits.min_shot - 1e-6:
+                if begin + 1e-3 < b < stop - 1e-3 and (k - song.downbeat) % n == 0 and b - cuts[-1] >= limits.min_shot - 1e-6:
                     cuts.append(float(b))
             cuts.append(stop)
         # Too short a piece at the end joins the one before it, when the joined piece is allowed.
@@ -191,10 +198,21 @@ def music_slots(song, limits: Limits, end: float, longest: float | None = None) 
     return result
 
 
+def _tap_slots(song, taps: list[float], end: float) -> list[Slot]:
+    """Your own cuts: exactly where you tapped (very short pieces from a double tap are joined)."""
+    cuts = [0.0]
+    for t in sorted(taps):
+        if 0.25 <= t - cuts[-1] and t < end - 0.25:
+            cuts.append(float(t))
+    cuts.append(end)
+    return [Slot(a, b, song.energy_at((a + b) / 2)) for a, b in zip(cuts, cuts[1:])]
+
+
 def _cuts_on_hits(song, limits: Limits, start: float, stop: float, n: int, longest: float) -> list[float] | None:
     """Cuts on the music's hits: the best set of beats to cut on, trading how hard each one hits against
     keeping close to the pace (n beats a shot) and within your limits. None = cut on a steady count instead."""
-    mode = limits.cut_on if limits.cut_on in CUT_STRENGTH else None
+    mode = "strong" if limits.cut_on == "taps" else limits.cut_on  # no taps for this song: its strong beats
+    mode = mode if mode in CUT_STRENGTH else None
     strength = getattr(song, "bass" if mode == "bass" else "accents", None)
     beats = song.beat_times()
     if mode is None or not strength or len(strength) != len(beats):

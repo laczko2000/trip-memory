@@ -20,6 +20,8 @@ from .catalog import Trip, app_dir
 from .media import MediaItem
 from . import music as free_music
 from . import songmap
+from . import taps as song_taps
+from .beats import song_length
 from .autoedit import CUT_ON
 from .autoedit import Limits as AutoLimits
 from .render import TRANSITIONS, RenderSettings, clip_range, render
@@ -173,6 +175,7 @@ class Page:
                 self.choose_tab = ui.tab("Choose files", icon="checklist")
                 library_tab = ui.tab("Library", icon="photo_library")
                 people_tab = ui.tab("People", icon="people")
+                music_tab = ui.tab("Music", icon="graphic_eq")
                 stories_tab = ui.tab("Stories", icon="auto_stories")
                 story_tab = ui.tab("Storyboard", icon="view_timeline")
                 video_tab = ui.tab("Make video", icon="movie")
@@ -184,6 +187,8 @@ class Page:
                     self.build_library()
                 with ui.tab_panel(people_tab):
                     self.people_view()
+                with ui.tab_panel(music_tab):
+                    self.music_tab_view()
                 with ui.tab_panel(stories_tab):
                     self.stories_view()
                 with ui.tab_panel(story_tab):
@@ -670,6 +675,111 @@ class Page:
             music_volume=self.music_vol.value,
         )
 
+    # ---------- Music: tap your own cuts ----------
+
+    @ui.refreshable
+    def music_tab_view(self) -> None:
+        music = self.music_path()
+        with ui.row().classes("w-full items-center gap-3"):
+            ui.label("Song:").classes("font-medium")
+            ui.label(Path(music).name if music else "none chosen yet").classes("text-gray-700")
+            if sys.platform == "darwin":
+                ui.button("Choose song…", icon="music_note", on_click=self.browse_music).props("outline dense")
+            else:
+                ui.input("Song file", on_change=lambda e: setattr(self.music_input, "value", e.value)).classes("w-96")
+        if not music:
+            ui.label("Choose a song first. Then play it and tap the right Shift key wherever you want a cut.") \
+                .classes("text-gray-500")
+            return
+        saved = song_taps.load(music, app_dir() / "music-taps")
+        ui.label(
+            "Press Play and tap the RIGHT Shift key wherever you want the video to cut. Each tap puts a pin on the "
+            "line below. Play it back to check: every pin makes a click as it passes. Drag a pin to move it, click it "
+            "and press Delete to remove it. Then let the app snap the pins onto the exact hits, and mark them final."
+        ).classes("text-sm text-gray-600")
+        ui.html(f'<audio id="tm-song" preload="auto" src="{serve_song(music)}" onloadedmetadata="tmTapDraw()" '
+                f'onplay="tmTapOnPlay()" onpause="tmTapDraw()"></audio>', sanitize=False)
+        with ui.row().classes("w-full items-center gap-2"):
+            ui.button("Play / pause", icon="play_arrow", on_click=lambda: ui.run_javascript("tmTapPlay()"))
+            ui.button("5 s back", icon="replay_5", on_click=lambda: ui.run_javascript("tmTapSeek(-5)")).props("outline")
+            ui.button("From the start", icon="skip_previous", on_click=lambda: ui.run_javascript("tmTapStart()")).props("outline")
+            ui.select({0: "Whole song", 30: "30 seconds", 10: "10 seconds"}, value=0, label="Show",
+                      on_change=lambda e: ui.run_javascript(f"tmTapZoom({e.value})")).classes("w-36")
+            ui.button("Delete selected pin", icon="delete", on_click=lambda: ui.run_javascript("tmTapDelete()")).props("flat")
+            ui.button("Clear all", icon="clear_all", on_click=self.clear_taps).props("flat")
+        ui.html('<div id="tm-tl" style="position:relative;width:100%;height:96px;background:#f1f5f9;border-radius:8px;'
+                'touch-action:none;user-select:none;cursor:pointer;overflow:hidden"></div>', sanitize=False).classes("w-full")
+        ui.html('<div id="tm-tap-info" style="font-size:13px;color:#475569"></div>', sanitize=False)
+        with ui.row().classes("w-full items-center gap-3"):
+            ui.button("Snap to the music", icon="center_focus_strong", on_click=self.snap_taps).props("outline")
+            ui.button("Save for later", icon="save", on_click=lambda: self.save_taps(final=False)).props("outline")
+            ui.button("These are final", icon="check_circle", on_click=lambda: self.save_taps(final=True))
+            state = ("✓ Final: Auto-edit cuts here" if saved["final"] else "Saved, not final yet") if saved["taps"] else ""
+            ui.label(state).classes("text-sm " + ("text-green-700" if saved["final"] else "text-gray-500"))
+        if saved["taps"]:
+            self.tap_lengths(music, saved["taps"])
+        ui.timer(0.2, lambda: ui.run_javascript(f"tmTapInit({json.dumps(saved['taps'])}, 0)"), once=True)
+
+    def tap_lengths(self, music: str, taps: list[float]) -> None:
+        """The shots your cuts make, checked against your limits."""
+        song = self.song_maps.get(music)
+        try:
+            duration = song.duration if song else song_length(music)
+        except Exception:
+            duration = max(taps) + 1
+        lengths = song_taps.shot_lengths(taps, max(taps))  # up to your last pin; after it the app cuts by itself
+        limits = self.auto_limits
+        longest = max(limits.max_video, limits.max_photo)
+        with ui.row().classes("w-full gap-1"):
+            for n, length in enumerate(lengths, 1):
+                colour = "orange" if length > longest * 1.03 else "red" if length < limits.min_shot else "blue-grey"
+                ui.chip(f"{n}: {length:.1f} s", color=colour, text_color="white").props("dense square")
+        too_long = sum(length > longest * 1.03 for length in lengths)
+        too_short = sum(length < limits.min_shot for length in lengths)
+        rest = duration - max(taps)
+        notes = [f"After your last pin ({fmt_length(max(taps))}) the app cuts the remaining {fmt_length(rest)} by itself."
+                 if rest > longest else ""]
+        if too_long:
+            notes.append(f"{too_long} orange shot(s) are longer than your longest clip ({longest:g} s); Auto-edit splits "
+                         "them on the beat. Raise the limit in the Storyboard to keep them whole.")
+        if too_short:
+            notes.append(f"{too_short} red shot(s) are shorter than your shortest shot ({limits.min_shot:g} s); they're "
+                         "kept, since you placed them.")
+        for note in filter(None, notes):
+            ui.label(note).classes("text-xs text-gray-600")
+
+    async def snap_taps(self) -> None:
+        music = self.music_path()
+        pins = await ui.run_javascript("tmTapGet()", timeout=5)
+        if not music or not pins:
+            ui.notify("Place some pins first: play the song and tap the right Shift key.")
+            return
+        snapped = await run.io_bound(song_taps.snap_song, music, [float(p) for p in pins])
+        moved = [abs(a - b) for a, b in zip(sorted(pins), snapped) if abs(a - b) > 0.005]
+        ui.run_javascript(f"tmTapSet({json.dumps(snapped)})")
+        ui.notify(f"Snapped {len(moved)} of {len(pins)} pins onto the hits" +
+                  (f" (moved {1000 * sum(moved) / len(moved):.0f} ms on average)" if moved else "") +
+                  ". Play it back to check.", type="positive")
+
+    async def save_taps(self, final: bool) -> None:
+        music = self.music_path()
+        pins = await ui.run_javascript("tmTapGet()", timeout=5)
+        if not music:
+            return
+        song_taps.save(music, app_dir() / "music-taps", [float(p) for p in pins or []], final)
+        if final and pins:
+            self.set_limit("cut_on", "taps")
+            ui.notify(f"{len(pins)} cuts saved. Auto-edit (in the Storyboard) now cuts exactly there.", type="positive")
+        else:
+            ui.notify("Saved." if pins else "Saved: no pins.")
+        self.music_tab_view.refresh()
+        self.storyboard_view.refresh()
+
+    async def clear_taps(self) -> None:
+        ui.run_javascript("tmTapClear()")
+
+    # ---------- Stories ----------
+
     @ui.refreshable
     def stories_view(self) -> None:
         if not self.trip:
@@ -885,6 +995,7 @@ class Page:
             self.music_credit.text = f"Free song: {credit}. A credits file is saved next to your video." if credit else ""
         self.auto_length = None  # back to the default: as long as the song, if there is one
         self.storyboard_view.refresh()
+        self.music_tab_view.refresh()
 
     def music_path(self) -> str | None:
         music = (self.music_input.value or "").strip().strip("'\"") if hasattr(self, "music_input") else ""
@@ -1322,6 +1433,155 @@ document.addEventListener('mouseleave', (e) => {
 """
 
 
+TAP_SCRIPT = """
+<script>
+// The Music tab: play the song, press the RIGHT Shift key wherever you want a cut. Pins can be dragged,
+// selected and deleted; on playback every pin you pass makes a click so you hear where it is.
+window.tm = window.tm || {};
+tm.tap = {pins: [], sel: -1, view: 0, span: 0, last: 0, placed: -1, ctx: null, raf: 0, drag: -1};
+
+function tmTapAudio() { return document.getElementById('tm-song'); }
+function tmTapVisible() { const tl = document.getElementById('tm-tl'); return tl && tl.offsetParent !== null; }
+
+// The Music tab's panel is only on the page while it is open, so nothing here assumes it exists.
+function tmTapInit(pins, span) {
+  const T = tm.tap;
+  T.pins = (pins || []).slice().sort((a, b) => a - b);
+  T.sel = -1; T.view = 0; T.span = span || 0; T.placed = -1;
+  tmTapDraw();
+}
+function tmTapOnPlay() {
+  const T = tm.tap, a = tmTapAudio();
+  tmTapCtx(); T.last = a.currentTime; cancelAnimationFrame(T.raf); tmTapLoop(); tmTapDraw();
+}
+// Listen on the whole page: the line itself is rebuilt whenever the screen refreshes or the tab opens.
+document.addEventListener('pointerdown', ev => { if (ev.target.closest && ev.target.closest('#tm-tl')) tmTapPointerDown(ev); });
+window.addEventListener('pointermove', ev => tmTapPointerMove(ev));
+window.addEventListener('pointerup', () => { if (tm.tap.drag >= 0) { tm.tap.drag = -1; tm.tap.pins.sort((a, b) => a - b); tmTapDraw(); } });
+// When the Music tab opens, draw the pins.
+setInterval(() => { const tl = document.getElementById('tm-tl'); if (tl && !tl.childElementCount) tmTapDraw(); }, 300);
+
+function tmTapCtx() {
+  if (!tm.tap.ctx) tm.tap.ctx = new (window.AudioContext || window.webkitAudioContext)();
+  if (tm.tap.ctx.state === 'suspended') tm.tap.ctx.resume();
+}
+
+// A short, bright "tick", easy to tell apart from the music.
+function tmTapClick(high) {
+  const ctx = tm.tap.ctx; if (!ctx) return;
+  const o = ctx.createOscillator(), g = ctx.createGain();
+  o.type = 'square'; o.frequency.value = high ? 2200 : 1500;
+  g.gain.setValueAtTime(0.25, ctx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.06);
+  o.connect(g); g.connect(ctx.destination); o.start(); o.stop(ctx.currentTime + 0.07);
+}
+
+function tmTapLoop() {
+  const T = tm.tap, a = tmTapAudio();
+  if (!a || a.paused) return;
+  const now = a.currentTime;
+  if (now > T.last && now - T.last < 0.5) {
+    T.pins.forEach((p, i) => { if (p > T.last && p <= now && i !== T.placed) tmTapClick(false); });
+  }
+  T.last = now;
+  if (T.span && (now < T.view || now > T.view + T.span * 0.9)) T.view = Math.max(0, now - T.span * 0.1);
+  tmTapDraw();
+  T.raf = requestAnimationFrame(tmTapLoop);
+}
+
+function tmTapLength() { const a = tmTapAudio(); return a && isFinite(a.duration) ? a.duration : 0; }
+function tmTapWindow() {
+  const d = tmTapLength(), T = tm.tap;
+  return T.span && T.span < d ? [T.view, T.span] : [0, d || 1];
+}
+
+function tmTapDraw() {
+  const tl = document.getElementById('tm-tl'); if (!tl) return;
+  const T = tm.tap, a = tmTapAudio(), [v0, span] = tmTapWindow();
+  const x = t => ((t - v0) / span * 100).toFixed(3) + '%';
+  let html = '';
+  // Second marks along the bottom.
+  const stepS = span > 120 ? 30 : span > 40 ? 10 : span > 15 ? 5 : 1;
+  for (let s = Math.ceil(v0 / stepS) * stepS; s <= v0 + span; s += stepS) {
+    const m = Math.floor(s / 60), sec = String(Math.round(s % 60)).padStart(2, '0');
+    html += `<div style="position:absolute;left:${x(s)};bottom:0;height:10px;border-left:1px solid #94a3b8"></div>` +
+            `<div style="position:absolute;left:${x(s)};bottom:10px;font-size:10px;color:#64748b;transform:translateX(-50%)">${m}:${sec}</div>`;
+  }
+  T.pins.forEach((p, i) => {
+    if (p < v0 || p > v0 + span) return;
+    const c = i === T.sel ? '#dc2626' : '#2563eb';
+    html += `<div data-pin="${i}" title="${p.toFixed(2)} s" style="position:absolute;left:${x(p)};top:0;bottom:24px;width:14px;` +
+            `margin-left:-7px;cursor:ew-resize;display:flex;justify-content:center"><div style="width:3px;background:${c};height:100%"></div>` +
+            `<div style="position:absolute;top:-2px;width:12px;height:12px;border-radius:6px;background:${c}"></div></div>`;
+  });
+  if (a) html += `<div style="position:absolute;left:${x(a.currentTime)};top:0;bottom:0;width:2px;background:#f97316;pointer-events:none"></div>`;
+  tl.innerHTML = html;
+  const info = document.getElementById('tm-tap-info');
+  if (info) {
+    const d = tmTapLength(), n = T.pins.length;
+    const t = a ? a.currentTime : 0;
+    info.textContent = `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')} · ${n} cut${n === 1 ? '' : 's'}` +
+      (d && n ? ` → ${n + 1} shots, about ${(d / (n + 1)).toFixed(1)} s each` : '') +
+      (T.sel >= 0 ? ` · selected cut at ${T.pins[T.sel].toFixed(2)} s (Delete key removes it)` : '');
+  }
+}
+
+function tmTapTimeAt(ev) {
+  const tl = document.getElementById('tm-tl'), r = tl.getBoundingClientRect(), [v0, span] = tmTapWindow();
+  return Math.max(0, Math.min(tmTapLength(), v0 + (ev.clientX - r.left) / r.width * span));
+}
+
+function tmTapPointerDown(ev) {
+  const T = tm.tap, pin = ev.target.closest('[data-pin]');
+  if (pin) { T.sel = T.drag = parseInt(pin.dataset.pin); ev.preventDefault(); }
+  else { T.sel = -1; const a = tmTapAudio(); if (a) { a.currentTime = tmTapTimeAt(ev); T.last = a.currentTime; } }
+  tmTapDraw();
+}
+
+function tmTapPointerMove(ev) {
+  const T = tm.tap;
+  if (T.drag < 0) return;
+  T.pins[T.drag] = tmTapTimeAt(ev);
+  tmTapDraw();
+}
+
+document.addEventListener('keydown', ev => {
+  if (!tmTapVisible()) return;
+  const T = tm.tap, a = tmTapAudio();
+  if (ev.code === 'ShiftRight' && a && !ev.repeat) {
+    const t = a.currentTime;
+    T.pins.push(t); T.pins.sort((x, y) => x - y);
+    T.placed = T.pins.indexOf(t);
+    tmTapClick(true);
+    tmTapDraw();
+    ev.preventDefault();
+  } else if ((ev.key === 'Delete' || ev.key === 'Backspace') && T.sel >= 0 && !['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
+    T.pins.splice(T.sel, 1); T.sel = -1; T.placed = -1; tmTapDraw(); ev.preventDefault();
+  }
+});
+
+function tmTapPlay() { const a = tmTapAudio(); if (!a) return; tmTapCtx(); if (a.paused) a.play(); else a.pause(); }
+function tmTapSeek(by) { const a = tmTapAudio(); if (!a) return; a.currentTime = Math.max(0, a.currentTime + by); tm.tap.last = a.currentTime; tmTapDraw(); }
+function tmTapStart() { const a = tmTapAudio(); if (!a) return; a.currentTime = 0; tm.tap.last = 0; tm.tap.view = 0; tmTapDraw(); }
+function tmTapDelete() { const T = tm.tap; if (T.sel >= 0) { T.pins.splice(T.sel, 1); T.sel = -1; tmTapDraw(); } }
+function tmTapClear() { tm.tap.pins = []; tm.tap.sel = -1; tmTapDraw(); }
+function tmTapZoom(span) { const a = tmTapAudio(); tm.tap.span = span; tm.tap.view = a ? Math.max(0, a.currentTime - span * 0.1) : 0; tmTapDraw(); }
+function tmTapGet() { return tm.tap.pins.slice().sort((a, b) => a - b); }
+function tmTapSet(pins) { tm.tap.pins = pins.slice().sort((a, b) => a - b); tm.tap.sel = -1; tm.tap.placed = -1; tmTapDraw(); }
+</script>
+"""
+
+
+def serve_song(path: str) -> str:
+    """Let the page play a song from anywhere on this computer (for the Music tab)."""
+    stat = Path(path).stat()
+    key = hashlib.sha1(f"{path}|{stat.st_mtime}".encode()).hexdigest()[:12]
+    if key not in _served:
+        _served[key] = f"/song/{key}{Path(path).suffix.lower()}"
+        app.add_media_file(local_file=path, url_path=_served[key])
+    return _served[key]
+
+
 def serve_trip_folder(trip: Trip) -> str:
     """Let the page stream the trip's own videos (for hover previews). Only on this computer."""
     key = trip.dir.name
@@ -1341,6 +1601,7 @@ def main() -> None:
     app.add_media_files("/videos", OUTPUT_DIR)
     app.add_static_files("/data", app_dir())
     ui.add_body_html(HOVER_SCRIPT, shared=True)
+    ui.add_body_html(TAP_SCRIPT, shared=True)
     ui.page("/")(lambda: Page().build())
     print("\nTrip Memory is running. Your browser should open by itself.")
     print("If it does not, open http://localhost:8765 . Close this window to stop the app.\n")
