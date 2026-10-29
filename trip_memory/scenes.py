@@ -50,7 +50,7 @@ class SceneTagger:
 
         cache_dir.mkdir(parents=True, exist_ok=True)
         self.image_model = ImageEmbedding(IMAGE_MODEL, cache_dir=str(cache_dir))
-        text_model = TextEmbedding(TEXT_MODEL, cache_dir=str(cache_dir))
+        text_model = self.text_model = TextEmbedding(TEXT_MODEL, cache_dir=str(cache_dir))
         rows = []
         for descriptions in CATEGORIES.values():
             vectors = np.array(list(text_model.embed([f"a holiday photo of {d}" for d in descriptions])))
@@ -58,11 +58,17 @@ class SceneTagger:
             rows.append(mean / np.linalg.norm(mean))
         self.category_vectors = np.array(rows)
 
+    def embed_each(self, image_paths: list[Path]) -> np.ndarray:
+        """A meaning vector for each picture (each frame of a video)."""
+        return _unit(np.array(list(self.image_model.embed([str(p) for p in image_paths])))).astype(np.float32)
+
     def embed(self, image_paths: list[Path]) -> np.ndarray:
         """One meaning vector for a photo, or for a video from several of its frames."""
-        vectors = _unit(np.array(list(self.image_model.embed([str(p) for p in image_paths]))))
-        mean = vectors.mean(axis=0)
-        return (mean / np.linalg.norm(mean)).astype(np.float32)
+        return mean_vector(self.embed_each(image_paths))
+
+    def describe(self, sentences: list[str]) -> np.ndarray:
+        """Meaning vectors for sentences."""
+        return _unit(np.array(list(self.text_model.embed(sentences)))).astype(np.float32)
 
     def classify(self, vector: np.ndarray) -> list[tuple[str, float]]:
         """The three most likely scene types with a confidence between 0 and 1."""
@@ -75,6 +81,11 @@ def classify(vector: np.ndarray, category_vectors: np.ndarray) -> list[tuple[str
     probs /= probs.sum()
     top = np.argsort(probs)[::-1][:3]
     return [(SCENES[i], float(probs[i])) for i in top]
+
+
+def mean_vector(vectors: np.ndarray) -> np.ndarray:
+    mean = vectors.mean(axis=0)
+    return (mean / np.linalg.norm(mean)).astype(np.float32)
 
 
 def _unit(vectors: np.ndarray) -> np.ndarray:

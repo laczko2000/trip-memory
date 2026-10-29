@@ -40,6 +40,13 @@ class FakeScenes:
     def embed(self, _frames):
         return np.ones(4, dtype=np.float32)
 
+    def embed_each(self, frames):
+        return np.tile(np.float32([1, 0, 0, 0]), (len(frames), 1))
+
+    def describe(self, sentences):
+        # Anything about a beach matches the pictures; everything else points elsewhere.
+        return np.array([[1, 0, 0, 0] if "sandy beach" in s else [0, 1, 0, 0] for s in sentences], dtype=np.float32)
+
     def classify(self, _vector):
         return [("Beach", 0.8), ("Sea & boats", 0.1), ("Sunset", 0.05)]
 
@@ -64,6 +71,11 @@ def test_catalogue(tmp_path, monkeypatch):
         ("Lisbon", "Portugal"), ("Budapest", "Hungary"), ("Budapest", "Hungary")]
     assert {i["scene_final"] for i in items} == {"Beach"}
     assert items[0]["people"] == items[2]["people"] != items[1]["people"]
+    assert all("Beach" in i["tags_final"] for i in items)
+    assert {i["people_tag"] for i in items} == {"Solo"}
+    assert {i["look_name"] for i in items} == {"Beach (3) · group 1"}  # they all look alike
+    trip.set_tags(items[0]["path"], ["Sunset & sunrise"])
+    assert trip.items()[0]["tags_final"] == ["Sunset & sunrise"]
 
     people = trip.people()
     # Seen twice: worth naming. Seen once: listed separately for review.

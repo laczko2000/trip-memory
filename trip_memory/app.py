@@ -18,6 +18,7 @@ from .catalog import Trip, app_dir
 from .media import MediaItem
 from .render import TRANSITIONS, RenderSettings, clip_range, render
 from .scenes import SCENES
+from .tags import ALL_TAGS, EDITABLE_TAGS, TAG_GROUP
 
 OUTPUT_DIR = Path.home() / "Movies" / "Trip Memory"
 RESOLUTIONS = {"Full HD (1080p)": (1920, 1080), "HD (720p, faster)": (1280, 720)}
@@ -96,7 +97,7 @@ class Page:
         self.chapters = bool(load_settings().get("chapters", True))
         self.dirty = False
         self.last_refresh = 0.0
-        self.filters = {"day": ALL, "place": ALL, "scene": ALL, "person": ALL, "show": ALL}
+        self.filters = {"day": ALL, "place": ALL, "scene": ALL, "tag": ALL, "look": ALL, "person": ALL, "show": ALL}
         self.page = 1
         self.rendering = {"busy": False, "progress": 0.0, "message": "", "result": None}
 
@@ -118,6 +119,10 @@ class Page:
                 continue
             if f["scene"] != ALL and (it["scene_final"] or "Not sorted yet") != f["scene"]:
                 continue
+            if f["tag"] != ALL and f["tag"] not in it["tags_final"] and f["tag"] != it["people_tag"]:
+                continue
+            if f["look"] != ALL and it["look_name"] != f["look"]:
+                continue
             if f["person"] != ALL and f["person"] not in it["people"]:
                 continue
             if f["show"] == "In the video" and not it["included"]:
@@ -135,10 +140,15 @@ class Page:
         places = sorted({it["place"] or "Unknown place" for it in self.items})
         scenes = sorted({it["scene_final"] or "Not sorted yet" for it in self.items})
         people = sorted({p for it in self.items for p in it["people"]})
+        present = {t for it in self.items for t in [*it["tags_final"], it["people_tag"]] if t}
+        tags = {t: f"{TAG_GROUP[t]}: {t}" for t in ALL_TAGS if t in present}
+        looks = sorted({it["look_name"] for it in self.items if it["look_name"]}, key=lambda n: int(n.rsplit(" ", 1)[1]))
         return {
             "day": day_opts,
             "place": {ALL: "All places", **{p: p for p in places}},
             "scene": {ALL: "All scenes", **{s: s for s in scenes}},
+            "tag": {ALL: "All tags", **tags},
+            "look": {ALL: "All", **{n: n for n in looks}},
             "person": {ALL: "Everyone", **{p: p for p in people}},
             "show": {ALL: "In and out of the video", "In the video": "Only in the video", "Left out": "Only left out"},
         }
@@ -435,7 +445,8 @@ class Page:
             return
         opts = self.options()
         with ui.row().classes("w-full items-end gap-3"):
-            for key, label in (("day", "Day"), ("place", "Place"), ("scene", "Scene"), ("person", "Person"), ("show", "Show")):
+            for key, label in (("day", "Day"), ("place", "Place"), ("scene", "Scene"), ("tag", "Tag"),
+                               ("look", "Look-alike group"), ("person", "Person"), ("show", "Show")):
                 if self.filters[key] not in opts[key]:
                     self.filters[key] = ALL
                 ui.select(opts[key], value=self.filters[key], label=label, on_change=lambda e, k=key: self.set_filter(k, e.value)).classes("min-w-36")
@@ -496,6 +507,21 @@ class Page:
                     label="Scene",
                     on_change=lambda e, path=it["path"]: self.trip.set_scene(path, e.value),
                 ).props("dense options-dense").classes("w-full text-xs")
+                ui.select(
+                    EDITABLE_TAGS,
+                    value=[t for t in it["tags_final"] if t in EDITABLE_TAGS],
+                    multiple=True,
+                    label="Tags",
+                    on_change=lambda e, path=it["path"]: self.set_tags(path, e.value),
+                ).props("dense options-dense use-chips").classes("w-full text-xs")
+                with ui.row().classes("items-center gap-1"):
+                    if it["people_tag"]:
+                        ui.label(f"👥 {it['people_tag']}").classes("text-xs text-gray-600")
+                    if it["look_name"]:
+                        ui.button(
+                            f"🔗 {it['look_name'].split(' · group')[0]}",
+                            on_click=lambda name=it["look_name"]: self.show_look_alike(name),
+                        ).props("flat dense no-caps size=sm").tooltip("Show everything that looks like this")
                 if it["people"]:
                     with ui.row().classes("gap-1"):
                         for name in it["people"]:
@@ -508,6 +534,18 @@ class Page:
                     ).props("dense")
                     with ui.row().classes("gap-0 no-wrap"):
                         rotate_buttons(lambda degrees, path=it["path"]: self.rotate(path, degrees))
+
+    def set_tags(self, path: str, tags: list[str]) -> None:
+        self.trip.set_tags(path, tags)
+        for it in self.items:
+            if it["path"] == path:
+                it["tags_final"] = tags
+
+    def show_look_alike(self, name: str) -> None:
+        self.filters["look"] = name
+        self.page = 1
+        self.filters_view.refresh()
+        self.gallery.refresh()
 
     def toggle(self, path: str, included: bool) -> None:
         self.trip.set_included([path], included)

@@ -25,13 +25,19 @@ Nothing is uploaded anywhere.
    - **where**: the place name from the phone's GPS, looked up offline. Photos without GPS borrow the place
      of a photo taken within 3 hours, or at least the country from the same day (marked "guessed"),
    - **what**: a suggested scene type such as Beach, City, Food or Group photo,
-   - **who**: faces grouped by person.
+   - **who**: faces grouped by person, and how many people (solo, couple, group).
+   - **how it moves** (videos): *Still*, *Calm*, *Lively* or *Fast action*, plus *Camera moving* and *Shaky*.
+   - **tags**: several per file, for the kind of place (beach, old town, underwater…), the activity (walking,
+     snorkelling, eating & drinking…) and the light (daylight, sunset, night). Videos are checked every few
+     seconds, so a clip that starts on the beach and ends in the water gets both.
+   - **look-alike groups**: everything that looks alike across the whole trip, e.g. all the snorkelling.
    - **which way up**: a photo or video that is sideways or upside down but clearly shows faces is turned
      upright automatically (you'll see a note; use ↻ if it guessed wrong).
 
    The first time, it downloads the free AI models (about 1 GB). Each trip is analysed once and remembered;
    adding new files later only analyses the new ones.
-3. **Library tab:** browse the thumbnails, filter by day, place, scene or person, correct a scene if it's wrong,
+3. **Library tab:** browse the thumbnails, filter by day, place, scene, tag, look-alike group or person, correct a
+   scene or the tags if they're wrong, click 🔗 to see everything that looks alike,
    and tick or untick what goes into the video.
 4. **People tab:** for each face group, pick a name you already used from the drop-down, or type a new one
    and press Enter. Picking an existing name joins the groups. **Unknown** hides strangers. Faces seen only
@@ -46,6 +52,7 @@ Everything runs on your Mac. Nothing is uploaded.
 
 ## What's new
 
+- **0.9:** movement tags for videos, many tags per file (place, activity, light, people), look-alike groups. Click **Analyse** again on a trip you already did to add them; people are not redone.
 - **0.8.1:** fixed hover-to-play for videos you have turned.
 - **0.8:** hover-to-play in the Library and Storyboard too. In the Storyboard the preview plays only the part you keep, and moving the trim bar plays the new part straight away.
 - **0.7.1:** turn buttons both ways, the whole picture is shown in previews, and a message confirms each turn.
@@ -65,7 +72,7 @@ Everything runs on your Mac. Nothing is uploaded.
 
 - Python engine in `trip_memory/`: `media.py` finds and dates files, `catalog.py` keeps the per-trip SQLite
   catalogue (in ~/Library/Application Support/TripMemory), `faces.py` (InsightFace buffalo_l via onnxruntime),
-  `scenes.py` (CLIP via fastembed), `render.py` builds the video with FFmpeg, `app.py` is the NiceGUI screen.
+  `scenes.py` (CLIP via fastembed), `tags.py` (CLIP tag groups, look-alike groups), `motion.py` (optical-flow movement), `render.py` builds the video with FFmpeg, `app.py` is the NiceGUI screen.
 - Face models are InsightFace's, licensed for non-commercial use only.
 - Run with `uv run trip-memory`. Tests: `uv run pytest`.
 - FFmpeg comes from the system if installed, otherwise the `static-ffmpeg` package downloads a free build once.

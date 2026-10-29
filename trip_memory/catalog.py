@@ -24,8 +24,9 @@ from PIL import Image, ImageOps
 
 from .faces import FaceFinder, group_faces
 from .media import MediaItem, scan_folder
-from . import stories
-from .scenes import SceneTagger
+from . import motion, stories
+from .scenes import SceneTagger, mean_vector
+from .tags import Tagger, group_name, look_alike_groups, people_tag
 from .tools import ffmpeg_paths
 
 
@@ -71,8 +72,15 @@ CREATE TABLE IF NOT EXISTS items (
     best INTEGER DEFAULT 0,
     rotation INTEGER DEFAULT 0,
     rotation_checked INTEGER DEFAULT 0,
+    tags TEXT,
+    tags_user TEXT,
+    motion_action REAL,
+    motion_camera REAL,
+    motion_shake REAL,
+    look_group INTEGER,
     faces_done INTEGER DEFAULT 0,
-    scene_done INTEGER DEFAULT 0
+    scene_done INTEGER DEFAULT 0,
+    tags_done INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
@@ -129,6 +137,8 @@ class Trip:
             "chosen INTEGER DEFAULT 1", "position REAL", "trim_start REAL", "trim_end REAL", "transition TEXT",
             "dhash TEXT", "colours BLOB", "sharpness REAL", "story INTEGER", "similar_set INTEGER", "best INTEGER DEFAULT 0",
             "rotation INTEGER DEFAULT 0", "rotation_checked INTEGER DEFAULT 0",
+            "tags TEXT", "tags_user TEXT", "motion_action REAL", "motion_camera REAL", "motion_shake REAL",
+            "look_group INTEGER", "tags_done INTEGER DEFAULT 0",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
@@ -156,16 +166,30 @@ class Trip:
         for f in self.query("SELECT path, person_id FROM faces WHERE person_id IS NOT NULL"):
             if people.get(f["person_id"], {}).get("status") not in (None, "unknown"):
                 by_path.setdefault(f["path"], set()).add(f["person_id"])
+        face_counts = {r["path"]: r["n"] for r in self.query("SELECT path, COUNT(*) AS n FROM faces GROUP BY path")}
         for row in rows:
             ids = sorted(by_path.get(row["path"], set()))
             row["person_ids"] = ids
             row["people"] = [people[i]["label"] for i in ids]
             row["scene_final"] = row["scene_user"] or row["scene"]
+            row["tags_auto"] = json.loads(row["tags"] or "[]")
+            row["tags_final"] = json.loads(row["tags_user"]) if row["tags_user"] is not None else row["tags_auto"]
+            row["people_tag"] = people_tag(face_counts.get(row["path"], 0)) if row["faces_done"] else None
             row["day"] = row["taken_at"][:10]
             row["place_guessed"] = False
             row.pop("clip", None)
             row.pop("colours", None)
         _guess_places(rows)
+        groups: dict[int, list[dict]] = {}
+        for row in rows:
+            if row["look_group"] is not None:
+                groups.setdefault(row["look_group"], []).append(row)
+        for number, members in groups.items():
+            name = f"{group_name([m['tags_final'] for m in members])} ({len(members)}) · group {number}"
+            for m in members:
+                m["look_name"] = name
+        for row in rows:
+            row.setdefault("look_name", None)
         return rows
 
     def _people_status(self) -> dict[int, dict]:
@@ -291,6 +315,10 @@ class Trip:
             self.db.executemany("UPDATE items SET position = ? WHERE path = ?", list(enumerate(order)))
             self.db.commit()
 
+    def set_tags(self, path: str, tags: list[str] | None) -> None:
+        """Your own tags for a file (None goes back to the app's suggestion)."""
+        self.execute("UPDATE items SET tags_user = ? WHERE path = ?", (None if tags is None else json.dumps(tags), path))
+
     def rotate(self, path: str, degrees: int = 90) -> None:
         """Turn a photo or video clockwise. Its people and scene are worked out again at the next analysis."""
         row = self.query("SELECT rotation FROM items WHERE path = ?", (path,))
@@ -303,7 +331,7 @@ class Trip:
         with self._lock:
             self.db.execute("DELETE FROM faces WHERE path = ?", (path,))
             self.db.execute(
-                "UPDATE items SET rotation = ?, rotation_checked = 1, faces_done = 0, scene_done = 0, dhash = NULL "
+                "UPDATE items SET rotation = ?, rotation_checked = 1, faces_done = 0, scene_done = 0, tags_done = 0, dhash = NULL "
                 "WHERE path = ?",
                 (rotation, path),
             )
@@ -426,24 +454,29 @@ class Trip:
     def _analyse(self, notify: Callable[[], None]) -> None:
         self._prepare(notify)
         p = self.progress
-        todo = self.query("SELECT * FROM items WHERE chosen = 1 AND (faces_done = 0 OR scene_done = 0) ORDER BY taken_at")
-        faces = scenes = None
+        todo = self.query(
+            "SELECT * FROM items WHERE chosen = 1 AND (faces_done = 0 OR scene_done = 0 OR tags_done = 0) ORDER BY taken_at"
+        )
+        faces = scenes = tagger = None
         if todo:
             p.message = "Loading the AI models (the first time this downloads about 1 GB)…"
             notify()
             faces = self._load(lambda: FaceFinder(app_dir() / "models"), "people")
             scenes = self._load(lambda: SceneTagger(app_dir() / "models" / "clip"), "scenes")
+            if scenes is not None:
+                tagger = self._load(lambda: Tagger(scenes), "tags")
 
         for i, row in enumerate(todo):
             p.fraction = i / len(todo)
             p.message = f"Analysing {i + 1} of {len(todo)}: {Path(row['path']).name}"
             notify()
             try:
-                self._analyse_item(row, faces, scenes)
+                self._analyse_item(row, faces, scenes, tagger)
             except Exception as exc:
                 traceback.print_exc()
                 p.notes.append(f"Could not analyse {Path(row['path']).name}: {exc}")
         self._group_stories()  # pictures turned upright get a fresh look-alike fingerprint
+        self._group_look_alike()
 
         p.message = "Grouping faces into people…"
         notify()
@@ -519,7 +552,7 @@ class Trip:
                 )
             self.db.commit()
 
-    def _analyse_item(self, row: sqlite3.Row, faces, scenes) -> None:
+    def _analyse_item(self, row: sqlite3.Row, faces, scenes, tagger=None) -> None:
         path = Path(row["path"])
         key = hashlib.sha1(str(path).encode()).hexdigest()[:16]
         with tempfile.TemporaryDirectory() as tmp:
@@ -556,15 +589,44 @@ class Trip:
                     self.db.commit()
                 updates["faces_done"] = 1
 
-            if scenes is not None and not row["scene_done"]:
-                vector = scenes.embed(frames)
-                top = scenes.classify(vector)
-                updates.update(scene=top[0][0], scene_top=json.dumps(top), clip=vector.tobytes(), scene_done=1)
+            if row["kind"] == "video" and row["motion_action"] is None:
+                moved = motion.measure(str(path))
+                if moved:
+                    updates.update(motion_action=moved.action, motion_camera=moved.camera, motion_shake=moved.shake)
+
+            if scenes is not None and not (row["scene_done"] and row["tags_done"]):
+                each = scenes.embed_each(frames)
+                vector = mean_vector(each)
+                if not row["scene_done"]:
+                    top = scenes.classify(vector)
+                    updates.update(scene=top[0][0], scene_top=json.dumps(top), clip=vector.tobytes(), scene_done=1)
+                if tagger is not None:
+                    found_tags = tagger.tag(each)
+                    action = updates.get("motion_action", row["motion_action"])
+                    if action is not None:
+                        found_tags = motion.Motion(
+                            action, updates.get("motion_camera", row["motion_camera"]),
+                            updates.get("motion_shake", row["motion_shake"]),
+                        ).tags() + found_tags
+                    updates.update(tags=json.dumps(found_tags), tags_done=1)
+
+            if "tags" not in updates and "motion_action" in updates:  # no AI tags this time, but movement is known
+                moved_tags = motion.Motion(updates["motion_action"], updates["motion_camera"], updates["motion_shake"]).tags()
+                updates["tags"] = json.dumps(moved_tags)
 
         if not updates:
             return
         sets = ", ".join(f"{k} = ?" for k in updates)
         self.execute(f"UPDATE items SET {sets} WHERE path = ?", (*updates.values(), str(path)))
+
+    def _group_look_alike(self) -> None:
+        """Group files that look alike across the whole trip (all the snorkelling, all the sunsets...)."""
+        rows = self.query("SELECT path, clip FROM items WHERE chosen = 1 AND clip IS NOT NULL ORDER BY taken_at")
+        groups = look_alike_groups({r["path"]: np.frombuffer(r["clip"], dtype=np.float32) for r in rows})
+        with self._lock:
+            self.db.execute("UPDATE items SET look_group = NULL")
+            self.db.executemany("UPDATE items SET look_group = ? WHERE path = ?", [(g, p) for p, g in groups.items()])
+            self.db.commit()
 
     def _group_people(self) -> None:
         with self._lock:
