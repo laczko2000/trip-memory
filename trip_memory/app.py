@@ -358,11 +358,11 @@ class Page:
                 star = "⭐ " if in_set and it["best"] else ""
                 ui.label(f"{star}{datetime.fromisoformat(it['taken_at']).astimezone():%H:%M:%S}").classes("text-xs text-gray-600")
 
-    def preview(self, it: dict, size: str, start: float = 0, end: float | None = None) -> str:
+    def preview(self, it: dict, size: str, start: float = 0, end: float | None = None, view: str = "") -> str:
         """A preview picture; for a video, hovering plays it (only the part from start to end).
 
         Returns the element id so the storyboard can change the part being played."""
-        box = f"tm-{hashlib.sha1(it['path'].encode()).hexdigest()[:12]}"
+        box = f"tm-{view}-{hashlib.sha1(it['path'].encode()).hexdigest()[:12]}"
         thumb = data_url(it["thumb"])
         if it["kind"] != "video" or not self.media_route:
             if thumb:
@@ -379,7 +379,7 @@ class Page:
             f'<span style="position:absolute;left:4px;bottom:2px;color:white;font-size:11px;text-shadow:0 0 3px black">'
             f'▶ {fmt_length(it["duration"])}</span></div>',
             sanitize=False,
-        )
+        ).style("width:100%" if "100%" in size else "")  # else a tall picture squeezes a full-width frame
         return box
 
     def suggest(self) -> None:
@@ -657,7 +657,7 @@ class Page:
                 box = None
                 if it["thumb"]:
                     start, end = self.kept_part(it) if it["kind"] == "video" else (0, None)
-                    box = self.preview(it, "width:160px;height:100px;flex:none", start, end)
+                    box = self.preview(it, "width:160px;height:100px;flex:none", start, end, view="story")
                 with ui.column().classes("flex-grow gap-1"):
                     place = ", ".join(x for x in (it["place"], it["country"]) if x)
                     icon = "🎬" if it["kind"] == "video" else "📷"
@@ -845,7 +845,8 @@ function tmVideo(box) {
   const rot = parseInt(box.dataset.rot || '0');
   if (rot === 90 || rot === 270) {  // turned sideways: swap the frame's width and height
     const w = box.clientWidth, h = box.clientHeight;
-    Object.assign(v.style, {width: h + 'px', height: w + 'px', left: (w - h) / 2 + 'px', top: (h - w) / 2 + 'px', inset: 'auto'});
+    // (set inset first: it is shorthand for top/left/right/bottom and would undo them)
+    Object.assign(v.style, {inset: 'auto', width: h + 'px', height: w + 'px', left: (w - h) / 2 + 'px', top: (h - w) / 2 + 'px'});
   }
   v.style.transform = rot ? `rotate(${rot}deg)` : '';
   v.style.display = 'block';

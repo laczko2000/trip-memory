@@ -46,6 +46,7 @@ Everything runs on your Mac. Nothing is uploaded.
 
 ## What's new
 
+- **0.8.1:** fixed hover-to-play for videos you have turned.
 - **0.8:** hover-to-play in the Library and Storyboard too. In the Storyboard the preview plays only the part you keep, and moving the trim bar plays the new part straight away.
 - **0.7.1:** turn buttons both ways, the whole picture is shown in previews, and a message confirms each turn.
 - **0.7:** rotate button in Choose files and the Library, automatic upright fix for shots with faces.
