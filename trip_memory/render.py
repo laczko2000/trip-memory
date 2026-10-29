@@ -18,6 +18,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
+import cv2
+import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 from .media import MediaItem
@@ -43,7 +45,7 @@ AUDIO = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
 ProgressFn = Callable[[float, str], None]
 
 # Bump when the way clips are prepared changes, so old remembered clips are not reused.
-SEGMENT_VERSION = 4
+SEGMENT_VERSION = 5
 TITLE_SECONDS = 3.0
 FONTS = [
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
@@ -179,19 +181,73 @@ def _photo_segment(item: MediaItem, s: RenderSettings, out: Path, workdir: Path)
             img.thumbnail((3840, 3840))
             img.save(still, quality=92)
 
-    frames = round(seconds * FPS)
-    w2, h2 = s.width * 2, s.height * 2  # work at double size so the slow zoom stays smooth
-    graph = (
-        _fit_with_blur("0:v", w2, h2, "fit")
-        + f";[fit]zoompan=z='1+0.08*on/{frames}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
-        f":d={frames}:s={s.width}x{s.height}:fps={FPS},format=yuv420p[v];[1:a]anull[a]"
-    )
-    inputs = ["-i", str(still), "-f", "lavfi", "-t", f"{seconds:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
-    _encode_segment(inputs, graph, seconds, out, s)
+    with Image.open(still) as img:
+        canvas = _photo_canvas(img.convert("RGB"), s.width, s.height)
+    move = "in" if item.kind == "title" else _pick_move(item.path, canvas_is_tall=_is_tall(still))
+    frames = max(1, round(seconds * FPS))
+    w, h = s.width, s.height
+
+    def feed(pipe) -> None:
+        for n in range(frames):
+            pipe.write(_photo_frame(canvas, w, h, move, n / max(1, frames - 1)).tobytes())
+
+    inputs = [
+        "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}", "-r", str(FPS), "-i", "pipe:0",
+        "-f", "lavfi", "-t", f"{seconds:.3f}", "-i", "anullsrc=r=48000:cl=stereo",
+    ]
+    _encode_segment(inputs, "[0:v]format=yuv420p[v];[1:a]anull[a]", seconds, out, s, feed=feed)
     return seconds
 
 
-def _encode_segment(inputs: list[str], graph: str, length: float, out: Path, s: RenderSettings) -> None:
+# Photos move gently while on screen (the "Ken Burns" look). Each photo gets one of these moves, chosen from
+# its file name so it stays the same every time you make the video.
+ZOOM = 1.15  # how far in the moves go (15%)
+MOVES = ["in", "out", "left", "right", "in-up", "out-down"]
+CANVAS = 1.25  # the photo is prepared this much bigger than the video, so zooming in stays sharp
+
+
+def _is_tall(still: Path) -> bool:
+    with Image.open(still) as img:
+        return img.height > img.width
+
+
+def _pick_move(path, canvas_is_tall: bool) -> str:
+    moves = ["in", "out", "in-up", "out-down"] if canvas_is_tall else MOVES  # tall photos: no sideways pans
+    return moves[int(hashlib.sha1(str(path).encode()).hexdigest(), 16) % len(moves)]
+
+
+def _photo_canvas(img: Image.Image, w: int, h: int) -> np.ndarray:
+    """The photo fitted into the video frame (bigger, for zooming); empty sides filled with a blurred copy."""
+    cw, ch = round(w * CANVAS), round(h * CANVAS)
+    bg = ImageOps.fit(img, (max(1, cw // 8), max(1, ch // 8))).filter(ImageFilter.GaussianBlur(4)).resize((cw, ch))
+    fg = ImageOps.contain(img, (cw, ch), Image.LANCZOS)
+    bg.paste(fg, ((cw - fg.width) // 2, (ch - fg.height) // 2))
+    return np.asarray(bg)
+
+
+def _photo_frame(canvas: np.ndarray, w: int, h: int, move: str, t: float) -> np.ndarray:
+    """One frame of the move, t from 0 (start) to 1 (end). Positions are not rounded to whole pixels,
+    so the picture glides instead of shaking."""
+    ch, cw = canvas.shape[:2]
+    t = t * t * (3 - 2 * t) * 0.35 + t * 0.65  # a little gentler at the start and end
+    zoom_in = 1 + (ZOOM - 1) * t
+    zoom = {"in": zoom_in, "in-up": zoom_in, "out": ZOOM - (ZOOM - 1) * t, "out-down": ZOOM - (ZOOM - 1) * t}.get(move, 1.1)
+    vw, vh = cw / zoom, ch / zoom  # the part of the canvas in view
+    room_x, room_y = cw - vw, ch - vh
+    x0, y0 = room_x / 2, room_y / 2
+    if move == "left":
+        x0 = room_x * (1 - t)  # the view travels left: the picture slides right
+    elif move == "right":
+        x0 = room_x * t
+    elif move == "in-up":
+        y0 = room_y * 0.3
+    elif move == "out-down":
+        y0 = room_y * 0.7
+    m = np.float32([[vw / w, 0, x0], [0, vh / h, y0]])
+    return cv2.warpAffine(canvas, m, (w, h), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, borderMode=cv2.BORDER_REFLECT)
+
+
+def _encode_segment(inputs: list[str], graph: str, length: float, out: Path, s: RenderSettings, feed=None) -> None:
     # Exactly the planned number of frames (repeat the last one if the source falls a frame short),
     # so cuts land where they were planned, e.g. on the music's beat.
     frames = max(1, round(length * FPS))
@@ -209,6 +265,7 @@ def _encode_segment(inputs: list[str], graph: str, length: float, out: Path, s: 
         s.width,
         s.height,
         final=False,
+        feed=feed,
     )
 
 

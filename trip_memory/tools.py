@@ -5,7 +5,9 @@ from __future__ import annotations
 import functools
 import shutil
 import subprocess
+import threading
 from collections.abc import Callable
+from typing import Any
 
 
 class FFmpegError(RuntimeError):
@@ -48,10 +50,27 @@ def probe(path: str) -> dict:
     return json.loads(result.stdout)
 
 
-def run_ffmpeg(args: list[str], total_seconds: float = 0, on_progress: Callable[[float], None] | None = None) -> None:
-    """Run ffmpeg, reporting progress (0..1) when the expected output length is known."""
+def run_ffmpeg(args: list[str], total_seconds: float = 0, on_progress: Callable[[float], None] | None = None,
+               feed: Callable[[Any], None] | None = None) -> None:
+    """Run ffmpeg, reporting progress (0..1) when the expected output length is known.
+
+    feed, if given, writes ffmpeg's input (e.g. picture frames) to the pipe it is handed."""
     cmd = [ffmpeg_paths()[0], "-hide_banner", "-loglevel", "error", "-y", "-progress", "pipe:1", "-nostats", *args]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            stdin=subprocess.PIPE if feed else None)
+    if feed:
+        def write() -> None:
+            try:
+                feed(proc.stdin.buffer if hasattr(proc.stdin, "buffer") else proc.stdin)
+            except (BrokenPipeError, OSError):
+                pass  # ffmpeg stopped early; its error message says why
+            finally:
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass
+
+        threading.Thread(target=write, daemon=True).start()
     for line in proc.stdout:
         key, _, value = line.strip().partition("=")
         if key == "out_time_us" and on_progress and total_seconds > 0 and value.isdigit():
