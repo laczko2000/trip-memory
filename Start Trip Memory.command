@@ -9,6 +9,14 @@ if ! command -v uv >/dev/null 2>&1; then
   export PATH="$HOME/.local/bin:$PATH"
 fi
 
+# If an older copy of the app is still running, stop it so the browser shows this version.
+OLD=$(lsof -ti tcp:8765 2>/dev/null)
+if [ -n "$OLD" ]; then
+  echo "Stopping a Trip Memory that was already running..."
+  kill $OLD 2>/dev/null
+  sleep 1
+fi
+
 echo "Starting Trip Memory... The first start downloads what it needs and can take a few minutes."
 uv run --python 3.12 trip-memory
 echo "Trip Memory has stopped. You can close this window."
