@@ -22,7 +22,7 @@ from . import music as free_music
 from . import songmap
 from . import taps as song_taps
 from .beats import song_length
-from .autoedit import CUT_ON
+from .autoedit import CUT_ON, STORYLINES
 from .autoedit import Limits as AutoLimits
 from .render import TRANSITIONS, RenderSettings, clip_range, render
 from .scenes import SCENES
@@ -918,6 +918,8 @@ class Page:
                         ui.slider(min=lo, max=hi, step=0.5, value=getattr(limits, key),
                                   on_change=lambda e, k=key: self.set_limit(k, e.value)).props("label-always").classes("mt-6")
             with ui.row().classes("w-full items-center gap-3"):
+                ui.select(STORYLINES, value=limits.storyline if limits.storyline in STORYLINES else "teaser",
+                          label="Storyline", on_change=lambda e: self.set_limit("storyline", e.value)).classes("w-56")
                 ui.select(CUT_ON, value=limits.cut_on if limits.cut_on in CUT_ON else "strong", label="Cut on",
                           on_change=lambda e: self.set_limit("cut_on", e.value)).classes("w-56")
                 ui.label({
@@ -925,7 +927,16 @@ class Page:
                     "bass": "Cuts on the kick drum and bass notes.",
                     "changes": "Few cuts: shots held as long as you allow, cut on the biggest moments.",
                     "beats": "Cuts on a steady count of beats, lined up with the bars.",
+                    "taps": "Cuts exactly on the pins you tapped in the Music tab.",
                 }.get(limits.cut_on, "")).classes("text-sm text-gray-600")
+            ui.label({
+                "teaser": "Storyline: opens with a quick teaser of the most exciting shots, then tells each story; every "
+                          "story starts with a wide, calm view, look-alike shots never come back to back, and the "
+                          "video ends on a calm shot.",
+                "stories": "Storyline: each story starts with a wide, calm view, look-alike shots never come back to "
+                           "back, and the video ends on a calm shot.",
+                "date": "Storyline: everything in the order it was taken.",
+            }.get(limits.storyline, "")).classes("text-sm text-gray-600")
             # 3. Length, then go
             with ui.row().classes("w-full items-center gap-4 mt-2"):
                 ui.label("3.").classes("font-medium")
@@ -942,7 +953,7 @@ class Page:
             ui.label(
                 "Cuts land on the beat: quick shots in the lively parts, longer ones in the calm parts, and a cut at every "
                 "change in the music. Action clips go to lively music, calm and cinematic clips and photos to calm music, "
-                "in the order they were taken, each at its best moment."
+                "following your storyline, each at its best moment."
             ).classes("text-sm text-gray-600")
 
     def set_limit(self, key: str, value) -> None:

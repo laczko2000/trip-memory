@@ -55,7 +55,7 @@ def test_action_goes_to_lively_music_and_cuts_stay_on_the_beat():
     rows = []
     for n in range(60):  # alternating calm and action clips through the day
         rows.append(_clip(n, action=20.0 if n % 2 else 0.5, camera=1.5 if n % 2 == 0 else 0.0))
-    limits = autoedit.Limits(max_video=4.0, max_photo=2.0, min_shot=1.0)
+    limits = autoedit.Limits(max_video=4.0, max_photo=2.0, min_shot=1.0, storyline="date")
     plan = autoedit.plan_to_music(rows, {}, _song(), limits, None, 0.8, "Fade")
     assert abs(plan.length - 40.0) < 0.05
     by_path = {r["path"]: r for r in rows}
@@ -142,3 +142,22 @@ def test_transitions_are_suggested_with_a_reason():
     assert any(s.transition == transitions.HARD_CUT for s in cuts)  # mostly clean cuts on the beat
     assert len({s.transition for s in cuts}) >= 3  # but not one and the same everywhere
     assert plan.shots[-1].transition is None
+
+
+def test_storyline_has_a_teaser_openers_and_a_calm_ending():
+    rows = []
+    for n in range(30):  # three stories of ten shots; one action shot in each, look-alikes in pairs
+        r = _clip(n, action=25.0 if n % 10 == 6 else 2.0)
+        r.update(story=n // 10, story_rank=n // 10, look_group=n // 2)
+        rows.append(r)
+    rows[12]["motion_action"], rows[12]["motion_camera"] = 0.2, 1.5  # a calm, cinematic view early in story 2
+    rows[29]["motion_action"] = 0.1  # a still shot near the end
+    shaped = autoedit.arrange(autoedit.choose(rows), "teaser")
+    paths = [r["path"] for r in shaped]
+    assert paths[:3] == ["/trip/06.mov", "/trip/16.mov", "/trip/26.mov"]  # the teaser: each story's action shot
+    assert paths.index("/trip/12.mov") == paths.index("/trip/10.mov") - 1 or paths[3 + 9] == "/trip/12.mov"
+    assert paths[-1] == "/trip/29.mov" and shaped[-1]["must"]
+    for a, b in zip(shaped, shaped[1:]):
+        assert a["look_group"] != b["look_group"] or a["story"] != b["story"]
+    assert sorted(paths) == sorted(r["path"] for r in rows)  # every shot is still there
+    assert [r["path"] for r in autoedit.arrange(autoedit.choose(rows), "date")] == sorted(paths)

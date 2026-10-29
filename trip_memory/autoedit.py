@@ -103,6 +103,88 @@ def shot_value(row: dict) -> float:
     return value
 
 
+# How Auto-edit arranges the shots.
+STORYLINES = {
+    "teaser": "Teaser, then the stories",  # a few of the most exciting shots first, then story by story
+    "stories": "Story by story",  # each story opens with a wide, calm view; the video ends on a calm shot
+    "date": "Plain date order",
+}
+TEASER_SHOTS = 4
+
+
+def excitement(row: dict) -> float:
+    pace, _ = pace_of(row)
+    return pace + 0.5 * (row.get("peak") or 0.0) + 0.2 * shot_value(row)
+
+
+def _establishing(row: dict) -> float:
+    """How well a shot sets the scene: a wide, steady, calm view (or a smooth camera move over one)."""
+    tags = row.get("tags_final") or []
+    pace, cinematic = pace_of(row)
+    score = (1 - pace) + (0.6 if cinematic else 0) + (0.3 if row.get("people_tag") in (None, "No people") else 0)
+    return score + 0.3 * sum(t in tags for t in ("Landscape", "Cityscape", "Beach", "Mountains", "Sunset"))
+
+
+def arrange(candidates: list[dict], style: str) -> list[dict]:
+    """Put the shots in story order with some shape: an opener per story, no two look-alikes back to back,
+    a calm last shot, and (for the teaser) a few of the most exciting shots up front.
+
+    Marks shots that should certainly be used (c["must"] = True)."""
+    rows = [dict(c, must=False) for c in candidates]
+    if style == "date" or len(rows) < 6:
+        return rows
+    stories: list[list[dict]] = []
+    for r in rows:
+        if stories and stories[-1][0].get("story_rank", 0) == r.get("story_rank", 0) and \
+                stories[-1][0].get("story") == r.get("story"):
+            stories[-1].append(r)
+        else:
+            stories.append([r])
+    teaser: list[dict] = []
+    if style == "teaser" and len(rows) >= 3 * TEASER_SHOTS:
+        # The most exciting shot of each of the busiest stories (no more than one per story).
+        best = sorted((max(st, key=excitement) for st in stories if len(st) >= 3), key=excitement, reverse=True)
+        teaser = sorted(best[:TEASER_SHOTS], key=lambda r: r["taken_at"])
+        chosen = {id(r) for r in teaser}
+        stories = [[r for r in st if id(r) not in chosen] for st in stories]
+        for r in teaser:
+            r["must"] = True
+    shaped: list[dict] = []
+    for st in stories:
+        if len(st) >= 4:
+            opener = max(st[: max(2, len(st) // 3)], key=_establishing)  # from the early part of the story
+            st = [opener, *[r for r in st if r is not opener]]
+        shaped += _spread_look_alikes(st)
+    if len(shaped) >= 4:
+        # End on a calm, steady shot from the last story.
+        last_story = shaped[-max(2, len(stories[-1])):]
+        closer = max(last_story, key=_establishing)
+        shaped = [r for r in shaped if r is not closer] + [closer]
+        closer["must"] = True
+        # Keep the last story free of back-to-back look-alikes, working back from the closer (which stays last).
+        tail = len(last_story)
+        shaped[-tail:] = _spread_look_alikes(shaped[-tail:][::-1])[::-1]
+    return teaser + shaped
+
+
+def _spread_look_alikes(rows: list[dict]) -> list[dict]:
+    """Move a shot that looks like the one before it a little later, so look-alikes don't come back to back."""
+    rows = list(rows)
+    for k in range(1, len(rows)):
+        group = rows[k].get("look_group")
+        if group is not None and rows[k - 1].get("look_group") == group:
+            later = next((j for j in range(k + 1, len(rows)) if rows[j].get("look_group") != group), None)
+            if later is not None:
+                rows.insert(k, rows.pop(later))
+                continue
+            # Nothing different after it: tuck it in earlier, between two shots that don't look like it.
+            shot = rows.pop(k)
+            spot = next((p for p in range(k - 1, 0, -1) if group not in (rows[p - 1].get("look_group"),
+                                                                         rows[p].get("look_group"))), None)
+            rows.insert(spot if spot is not None else k, shot)
+    return rows
+
+
 def choose(rows: list[dict]) -> list[dict]:
     """The shots to choose from: everything you ticked, story by story in your story order, then as taken.
 
@@ -122,6 +204,7 @@ class Limits:
     max_photo: float = 2.5
     min_shot: float = 1.0
     cut_on: str = "strong"  # which beats the cuts go on: a key of CUT_ON
+    storyline: str = "teaser"  # how the shots are arranged: a key of STORYLINES
 
 
 @dataclass
@@ -289,7 +372,7 @@ def fill_slots(slots: list[Slot], candidates: list[dict], limits: Limits) -> lis
     if not n_slots or not n:
         return []
     paces = [pace_of(c)[0] for c in candidates]
-    values = [shot_value(c) for c in candidates]
+    values = [shot_value(c) + (4.0 if c.get("must") else 0.0) for c in candidates]
     neg = -1e9
     score = np.full((n_slots, n), neg)
     back = np.full((n_slots, n), -1, dtype=int)
@@ -333,7 +416,7 @@ def plan_to_music(
     for r in rows:
         if r["path"] in curves and len(curves[r["path"]]):
             r["peak"] = float(np.clip(np.percentile(curves[r["path"]], 90), 0, 1))
-    candidates = choose(rows)
+    candidates = arrange(choose(rows), limits.storyline)
     end = song.duration if target is None or target >= song.duration else target
     if target is not None and target < song.duration:
         bars = song.bar_starts()
