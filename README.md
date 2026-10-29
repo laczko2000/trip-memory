@@ -42,11 +42,12 @@ Nothing is uploaded anywhere.
 4. **People tab:** for each face group, pick a name you already used from the drop-down, or type a new one
    and press Enter. Picking an existing name joins the groups. **Unknown** hides strangers. Faces seen only
    once or twice are listed separately so you can check them, then **Mark all of these as Unknown**.
-5. **Storyboard tab:** **✨ Auto-edit** makes a first cut for you: pick a length (or "as long as the song") and
-   click *Make a first cut*. It keeps one shot of each set of look-alike shots, every story, and the best of the
-   rest; finds the best moment of each video (movement and sound, no shake); uses short shots and hard cuts for
-   action and longer ones for calm moments; and, if you chose music on the Make video tab, puts every cut on
-   the beat. Then fine-tune it: change the order with the arrows, trim videos by dragging the ends of the bar (the preview
+5. **Storyboard tab:** **✨ Auto-edit** makes a first cut where the music leads: (1) choose the song, and the
+   app studies it (beats, bars, calm and lively parts, where it changes) and shows a music map; (2) set your
+   limits: longest video clip, longest photo, shortest shot; (3) pick a length and click *Make a first cut*.
+   Cuts land on the beat: quick shots in lively parts, longer ones in calm parts, a cut at every change in the
+   music. Action clips go to lively music, calm and cinematic clips and photos to calm music, in the order they
+   were taken, each at its best moment. Then fine-tune it: change the order with the arrows, trim videos by dragging the ends of the bar (the preview
    plays only the part you keep; hover over it to watch again), pick a
    transition for any cut, and switch day title cards ("Day 2 · Lisbon") on or off.
 6. **Make video tab:** choose transition, photo length, music (your own file, or **Find free music** to search
@@ -57,6 +58,7 @@ Everything runs on your Mac. Nothing is uploaded.
 
 ## What's new
 
+- **0.12:** music-led Auto-edit: song first with a music map, your limits for clip, photo and shot length, quick cuts in lively parts and long ones in calm parts, action clips matched to lively music. New *Cinematic* tag.
 - **0.11.3:** after you download a ccMixter song on its page, the app finds it in Downloads and selects it by itself.
 - **0.11.2:** when a music site only allows downloads from its own page (ccMixter), the app opens that page for you and still remembers the song's credit.
 - **0.11.1:** free music search also asks ccMixter and waits longer, so a slow library no longer stops it.
@@ -83,7 +85,7 @@ Everything runs on your Mac. Nothing is uploaded.
 
 - Python engine in `trip_memory/`: `media.py` finds and dates files, `catalog.py` keeps the per-trip SQLite
   catalogue (in ~/Library/Application Support/TripMemory), `faces.py` (InsightFace buffalo_l via onnxruntime),
-  `scenes.py` (CLIP via fastembed), `tags.py` (CLIP tag groups, look-alike groups), `motion.py` (optical-flow movement), `beats.py` (tempo and beat grid), `autoedit.py` (first-cut planner), `music.py` (Openverse music search), `render.py` builds the video with FFmpeg, `app.py` is the NiceGUI screen.
+  `scenes.py` (CLIP via fastembed), `tags.py` (CLIP tag groups, look-alike groups), `motion.py` (optical-flow movement), `beats.py` (tempo and beat grid), `songmap.py` (beats, bars, energy, sections), `autoedit.py` (music-led first cut), `music.py` (Openverse music search), `render.py` builds the video with FFmpeg, `app.py` is the NiceGUI screen.
 - Face models are InsightFace's, licensed for non-commercial use only.
 - Run with `uv run trip-memory`. Tests: `uv run pytest`.
 - FFmpeg comes from the system if installed, otherwise the `static-ffmpeg` package downloads a free build once.

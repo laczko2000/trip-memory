@@ -24,7 +24,7 @@ ACTION_LEVELS = [(0.5, "Still"), (3, "Calm"), (12, "Lively")]
 FAST = "Fast action"
 CAMERA_MOVING = 1.2  # average camera movement
 SHAKY = 1.0  # how much the camera movement jumps around from step to step
-MOVEMENT_TAGS = ["Still", "Calm", "Lively", FAST, "Camera moving", "Shaky"]
+MOVEMENT_TAGS = ["Still", "Calm", "Lively", FAST, "Camera moving", "Cinematic", "Shaky"]
 
 
 @dataclass
@@ -41,6 +41,8 @@ class Motion:
         tags = [level]
         if self.camera >= CAMERA_MOVING:
             tags = ["Camera moving"] if level == "Still" else [level, "Camera moving"]  # a pan over a still view
+        if self.camera >= 1.0 and self.shake < 0.6 * SHAKY and self.action < 3:
+            tags.append("Cinematic")  # a smooth, steady camera move over a calm scene
         if self.shake >= SHAKY:
             tags.append("Shaky")
         return tags

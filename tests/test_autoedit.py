@@ -3,7 +3,7 @@
 import numpy as np
 
 from trip_memory import autoedit
-from trip_memory.beats import Beat
+from trip_memory.songmap import Section, SongMap
 
 
 def _row(n, kind="video", duration=12.0, story=0, similar=None, best=False, tags=()):
@@ -21,43 +21,63 @@ def test_best_moment_is_found():
     assert 6.0 <= start <= 7.0
 
 
-def test_cuts_land_on_the_beat_and_length_is_respected():
-    rows = [_row(n, story=n // 4) for n in range(16)] + [_row(20 + n, kind="photo", story=5) for n in range(4)]
-    beat = Beat(period=0.5, first=0.12, duration=180, clear=True)
-    plan = autoedit.plan(rows, {}, target=30.0, transition_seconds=0.8, beat=beat)
-    assert 27 <= plan.length <= 40
-    assert {s.path for s in plan.shots}.isdisjoint(plan.left_out)
-    assert len({r["story"] for r in rows if r["path"] in {s.path for s in plan.shots}}) == 5  # every story
-    begin = 0.0
-    for shot in plan.shots[:-1]:
-        t = 1 / 30 if shot.transition == autoedit.HARD_CUT else min(0.8, 0.4 * shot.seconds)
-        middle = begin + shot.seconds - t / 2
-        assert abs((middle - beat.first) / beat.period - round((middle - beat.first) / beat.period)) * beat.period < 0.05
-        begin += shot.seconds - t
-        assert shot.seconds >= 2.0
-
-
 def test_one_shot_per_set_of_look_alikes():
     rows = [_row(0, similar=7, best=False), _row(1, similar=7, best=True), _row(2, similar=7)]
-    plan = autoedit.plan(rows, {}, target=None, transition_seconds=0.8, beat=None)
-    assert [s.path for s in plan.shots] == ["/trip/01.mov"]
+    keep, rest = autoedit.choose(rows)
+    assert [r["path"] for r in keep] == ["/trip/01.mov"] and len(rest) == 2
 
 
-def test_lively_neighbours_get_hard_cuts():
-    rows = [_row(0, tags=["Fast action"]), _row(1, tags=["Lively"]), _row(2, tags=["Calm"])]
-    plan = autoedit.plan(rows, {}, target=None, transition_seconds=0.8, beat=None)
-    assert [s.transition for s in plan.shots] == [autoedit.HARD_CUT, None, None]
+def _song():
+    # 120 BPM: calm for 16 s, lively for 16 s, calm again for 8 s.
+    return SongMap(
+        duration=40.0, bpm=120, period=0.5, first_beat=0.0, clear_beat=True, downbeat=0,
+        sections=[Section(0, 16, 0.1, "Calm"), Section(16, 32, 0.9, "Lively"), Section(32, 40, 0.1, "Calm")],
+    )
 
 
-def test_day_titles_are_counted_so_cuts_stay_on_the_beat():
-    rows = [_row(n) for n in range(4)]
-    rows[2]["taken_at"] = rows[3]["taken_at"] = "2025-07-04T10:00:00+00:00"
-    beat = Beat(period=0.5, first=0.1, duration=60, clear=True)
-    plan = autoedit.plan(rows, {}, target=None, transition_seconds=0.8, beat=beat, title_seconds=3.0)
-    begin = 3.0 - 0.8  # the first day's title card
-    for n, shot in enumerate(plan.shots[:-1]):
-        middle = begin + shot.seconds - 0.4
-        assert abs(((middle - 0.1) / 0.5) - round((middle - 0.1) / 0.5)) * 0.5 < 0.05
-        begin += shot.seconds - 0.8
-        if n == 1:
-            begin += 3.0 - 0.8  # the second day's title card
+def _clip(n, action, duration=10.0, camera=0.0, kind="video"):
+    r = _row(n, kind=kind, duration=duration)
+    r.update(motion_action=action, motion_camera=camera, motion_shake=0.1)
+    return r
+
+
+def test_music_slots_follow_the_music_and_your_limits():
+    limits = autoedit.Limits(max_video=4.0, max_photo=2.0, min_shot=1.0)
+    slots = autoedit.music_slots(_song(), limits, end=40.0)
+    assert all(s.seconds <= 4.0 + 1e-6 and s.seconds >= 1.0 - 1e-6 for s in slots)
+    calm = [s.seconds for s in slots if s.end <= 16]
+    lively = [s.seconds for s in slots if 16 <= s.start < 32]
+    assert min(calm) >= 4.0 - 1e-6 and max(lively) <= 1.0 + 1e-6  # long shots when calm, quick when lively
+    assert any(abs(s.start - 16) < 1e-6 for s in slots) and any(abs(s.start - 32) < 1e-6 for s in slots)
+    for s in slots:
+        assert abs(s.start / 0.5 - round(s.start / 0.5)) < 1e-6  # every cut on a beat
+
+
+def test_action_goes_to_lively_music_and_cuts_stay_on_the_beat():
+    rows = []
+    for n in range(60):  # alternating calm and action clips through the day
+        rows.append(_clip(n, action=20.0 if n % 2 else 0.5, camera=1.5 if n % 2 == 0 else 0.0))
+    limits = autoedit.Limits(max_video=4.0, max_photo=2.0, min_shot=1.0)
+    plan = autoedit.plan_to_music(rows, {}, _song(), limits, None, 0.8, "Fade")
+    assert abs(plan.length - 40.0) < 0.05
+    by_path = {r["path"]: r for r in rows}
+    begin, overlap = 0.0, 0.0
+    lively_actions, calm_actions = [], []
+    for k, shot in enumerate(plan.shots):
+        start = begin
+        assert shot.seconds <= 4.0 + 0.8 + 0.05
+        end_mid = begin + shot.seconds - (0 if k == len(plan.shots) - 1 else (0.8 if shot.transition == "Fade" else 1 / 30)) / 2
+        assert abs(end_mid / 0.5 - round(end_mid / 0.5)) * 0.5 < 0.02  # each cut on a beat
+        (lively_actions if 16 <= start + 0.1 < 32 else calm_actions).append(by_path[shot.path]["motion_action"])
+        begin += shot.seconds - (0.8 if shot.transition == "Fade" else 1 / 30)
+    assert np.mean(lively_actions) > 15 and np.mean(calm_actions) < 5
+    times = [by_path[s.path]["taken_at"] for s in plan.shots]
+    assert times == sorted(times)  # still in time order
+
+
+def test_photos_respect_their_maximum():
+    rows = [_clip(n, 0.0, kind="photo") for n in range(40)]
+    limits = autoedit.Limits(max_video=4.0, max_photo=2.0, min_shot=1.0)
+    plan = autoedit.plan_to_music(rows, {}, _song(), limits, 20.0, 0.8, "Fade")
+    assert plan.shots and all(s.seconds <= 2.0 + 0.8 for s in plan.shots)
+    assert 18 <= plan.length <= 22

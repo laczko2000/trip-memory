@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import traceback
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
@@ -18,8 +19,9 @@ from nicegui import app, run, ui
 from .catalog import Trip, app_dir
 from .media import MediaItem
 from . import music as free_music
-from .beats import song_length
-from .render import TITLE_SECONDS, TRANSITIONS, RenderSettings, clip_range, render
+from . import songmap
+from .autoedit import Limits as AutoLimits
+from .render import TRANSITIONS, RenderSettings, clip_range, render
 from .scenes import SCENES
 from .tags import ALL_TAGS, EDITABLE_TAGS, TAG_GROUP
 
@@ -99,6 +101,8 @@ class Page:
         self.media_route: str | None = None
         self.chapters = bool(load_settings().get("chapters", True))
         self.auto_length: object = None
+        self.auto_limits = AutoLimits(**load_settings().get("limits", {}))
+        self.song_maps: dict = {}
         self.dirty = False
         self.last_refresh = 0.0
         self.filters = {"day": ALL, "place": ALL, "scene": ALL, "tag": ALL, "look": ALL, "person": ALL, "show": ALL}
@@ -693,24 +697,93 @@ class Page:
 
     def auto_edit_card(self) -> None:
         music = self.music_path()
+        limits = self.auto_limits
         with ui.card().classes("w-full bg-blue-50"):
-            with ui.row().classes("w-full items-center gap-4"):
-                ui.label("✨ Auto-edit").classes("text-lg font-semibold")
+            ui.label("✨ Auto-edit: the music leads, the shots follow").classes("text-lg font-semibold")
+            # 1. The song
+            with ui.row().classes("w-full items-center gap-3"):
+                ui.label("1. Song:").classes("font-medium")
+                ui.label(Path(music).name if music else "none chosen yet").classes("text-gray-700")
+                if sys.platform == "darwin":
+                    ui.button("Choose song…", icon="music_note", on_click=self.browse_music).props("outline dense")
+                ui.button("Find free music", icon="library_music", on_click=self.find_music).props("flat dense")
+            if music:
+                self.music_map_view(music)
+            else:
+                ui.label(
+                    "Without a song the cuts follow a steady pace. With one, the app studies its beats and calm and "
+                    "lively parts first, and cuts to them."
+                ).classes("text-sm text-gray-600")
+            # 2. Your limits
+            ui.label("2. Your limits").classes("font-medium mt-2")
+            with ui.row().classes("w-full gap-8"):
+                for key, label, lo, hi in (("max_video", "Longest video clip", 1.0, 10.0),
+                                           ("max_photo", "Longest photo", 0.5, 6.0),
+                                           ("min_shot", "Shortest shot", 0.5, 3.0)):
+                    with ui.column().classes("min-w-48 flex-grow gap-0"):
+                        ui.label(label).classes("text-sm text-gray-600")
+                        ui.slider(min=lo, max=hi, step=0.5, value=getattr(limits, key),
+                                  on_change=lambda e, k=key: self.set_limit(k, e.value)).props("label-always").classes("mt-6")
+            # 3. Length, then go
+            with ui.row().classes("w-full items-center gap-4 mt-2"):
+                ui.label("3.").classes("font-medium")
                 lengths = {60: "1 minute", 120: "2 minutes", 180: "3 minutes", 300: "5 minutes", 600: "10 minutes",
                            "all": "Use everything"}
                 if music:
                     lengths = {"song": "As long as the song", **lengths}
+                    lengths.pop("all")
                 if self.auto_length not in lengths:
                     self.auto_length = "song" if music else 180
                 ui.select(lengths, value=self.auto_length, label="Length",
                           on_change=lambda e: setattr(self, "auto_length", e.value)).classes("w-48")
                 ui.button("Make a first cut", icon="auto_fix_high", on_click=self.confirm_auto_edit)
             ui.label(
-                "Picks the best shots and their best moments, keeps every story, uses short cuts for action and longer "
-                "ones for calm moments. "
-                + (f"Cuts land on the beat of {Path(music).name}." if music
-                   else "Choose music on the Make video tab and the cuts will land on its beat.")
+                "Cuts land on the beat: quick shots in the lively parts, longer ones in the calm parts, and a cut at every "
+                "change in the music. Action clips go to lively music, calm and cinematic clips and photos to calm music, "
+                "in the order they were taken, each at its best moment."
             ).classes("text-sm text-gray-600")
+
+    def set_limit(self, key: str, value: float) -> None:
+        setattr(self.auto_limits, key, value)
+        save_settings(limits=asdict(self.auto_limits))
+
+    def music_map_view(self, music: str) -> None:
+        """A small picture of the song: one bar per musical bar, tall when lively, with its parts named."""
+        song = self.song_maps.get(music)
+        if song is None:
+            with ui.row().classes("items-center"):
+                ui.spinner()
+                ui.label("Listening to the song…").classes("text-sm text-gray-600")
+
+            async def study() -> None:
+                try:
+                    self.song_maps[music] = await run.io_bound(songmap.analyse, music, app_dir() / "music-maps")
+                except Exception as exc:
+                    traceback.print_exc()
+                    ui.notify(f"Could not study the song: {exc}", type="negative")
+                    return
+                self.storyboard_view.refresh()
+
+            ui.timer(0.1, study, once=True)
+            return
+        colours = {"Calm": "#93c5fd", "Medium": "#60a5fa", "Lively": "#f97316"}
+        width = max(1, len(song.bar_energy))
+        bars = []
+        bar_len = song.period * songmap.BEATS_PER_BAR
+        starts = song.bar_starts()
+        for k, e in enumerate(song.bar_energy):
+            t = starts[k] if k < len(starts) else song.duration
+            level = next((s.level for s in song.sections if s.start <= t < s.end), "Medium")
+            h = 8 + 52 * e
+            bars.append(f'<rect x="{k}" y="{60 - h:.1f}" width="0.8" height="{h:.1f}" fill="{colours[level]}"/>')
+        for s in song.sections[1:]:
+            x = (s.start - song.first_beat) / bar_len if bar_len else 0
+            bars.append(f'<line x1="{x:.2f}" y1="0" x2="{x:.2f}" y2="60" stroke="#1e3a8a" stroke-width="0.25"/>')
+        ui.html(f'<svg viewBox="0 0 {width} 60" preserveAspectRatio="none" style="width:100%;height:60px">{"".join(bars)}</svg>',
+                sanitize=False).classes("w-full")
+        parts = " → ".join(f"{s.level} {fmt_length(s.end - s.start)}" for s in song.sections)
+        beat = f"{song.bpm:.0f} beats a minute" if song.clear_beat else "no clear beat (steady pace)"
+        ui.label(f"{fmt_length(song.duration)} · {beat} · {parts}").classes("text-xs text-gray-600")
 
     def music_changed(self) -> None:
         if hasattr(self, "music_credit"):
@@ -740,15 +813,17 @@ class Page:
     async def run_auto_edit(self) -> None:
         music = self.music_path()
         s = self.settings_now()
-        hard = TRANSITIONS.get(s.transition, "fade") is None
+        style = s.transition if TRANSITIONS.get(s.transition, "fade") not in (None, "mixed") else "Fade"
         target = self.auto_length
+        limits = AutoLimits(**asdict(self.auto_limits))
         note = ui.notification("Making a first cut…", spinner=True, timeout=None)
 
         def work() -> object:
-            length = None if target == "all" else (song_length(music) if target == "song" else float(target))
-            return self.trip.auto_edit(length, 1 / 30 if hard else s.transition_seconds, music,
-                                       TITLE_SECONDS if self.chapters else None,
-                                       lambda _f, message: setattr(note, "message", message))
+            length = None if target in ("song", "all") else float(target)
+            report = lambda _f, message: setattr(note, "message", message)  # noqa: E731
+            if music:
+                return self.trip.auto_edit_to_music(music, limits, length, s.transition_seconds, style, report)
+            return self.trip.auto_edit_steady(limits, length, s.transition_seconds, style, report)
 
         try:
             result = await run.io_bound(work)
@@ -758,10 +833,16 @@ class Page:
             ui.notify(f"Auto-edit stopped: {exc}", type="negative", multi_line=True)
             return
         note.dismiss()
+        if self.chapters:
+            self.set_chapters(False)  # title cards would push every cut off the beat
         beat = result.beat
-        on_beat = f", cuts on the beat ({beat.bpm:.0f} BPM)" if beat and beat.clear else ""
+        on_beat = f", cuts on the beat ({beat.bpm:.0f} BPM)" if music and beat and beat.clear else ""
+        song = self.song_maps.get(music) if music else None
+        wanted = song.duration if song and target == "song" else (float(target) if target not in ("song", "all") else None)
+        short = (f" There weren't enough shots for {fmt_length(wanted)}, so the video ends there; tick more files "
+                 "or allow longer clips." if wanted and result.length < wanted - 3 else "")
         ui.notify(f"First cut ready: {len(result.shots)} shots, {fmt_length(result.length)}{on_beat}. "
-                  "Fine-tune it below, then make the video.", type="positive", multi_line=True, timeout=8000)
+                  f"Fine-tune it below, then make the video.{short}", type="positive", multi_line=True, timeout=10000)
         self.story_page = 1
         self.refresh_all()
 

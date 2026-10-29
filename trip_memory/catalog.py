@@ -24,7 +24,7 @@ from PIL import Image, ImageOps
 
 from .faces import FaceFinder, group_faces
 from .media import MediaItem, scan_folder
-from . import autoedit, beats, motion, stories
+from . import autoedit, motion, stories
 from .scenes import SceneTagger, mean_vector
 from .tags import Tagger, group_name, look_alike_groups, people_tag
 from .tools import ffmpeg_paths
@@ -345,39 +345,52 @@ class Trip:
     def reset_order(self) -> None:
         self.execute("UPDATE items SET position = NULL")
 
-    def auto_edit(
+    def auto_edit_to_music(
         self,
+        song_path: str,
+        limits: autoedit.Limits,
         target: float | None,
         transition_seconds: float,
-        music: str | None = None,
-        title_seconds: float | None = None,
+        soft_transition: str,
         on_progress: Callable[[float, str], None] | None = None,
     ) -> autoedit.Plan:
-        """Make a first cut: choose shots, their best moments and lengths, on the music's beat.
+        """The music-driven first cut: the song's beats, bars and energy decide the cuts; shots are matched to it."""
+        from . import songmap
 
-        target: wanted length in seconds (None = use everything, "song" handled by the caller).
-        It replaces the storyboard's choices (what's in, order, trims, transitions)."""
         report = on_progress or (lambda _f, _m: None)
         rows = [r for r in self.items() if r["chosen"]]
+        scores = self._video_scores(rows, report)
+        report(0.95, "Listening to the music")
+        song = songmap.analyse(song_path, app_dir() / "music-maps")
+        result = autoedit.plan_to_music(rows, scores, song, limits, target, transition_seconds, soft_transition)
+        self._apply_plan(result)
+        report(1.0, "Done")
+        return result
+
+    def _video_scores(self, rows: list[dict], report) -> dict:
         videos = [r for r in rows if r["kind"] == "video"]
         for n, r in enumerate(v for v in videos if not v["curves"]):
             report(n / max(1, len(videos)), f"Finding the best moments: {Path(r['path']).name}")
             moved = motion.measure(r["path"])
             if moved:
                 curves = _curves_json(moved, Path(r["path"]), r["has_audio"])
-                self.execute("UPDATE items SET curves = ? WHERE path = ?", (curves, r["path"]))
-                r["curves"] = curves
+                self.execute(
+                    "UPDATE items SET curves = ?, motion_action = COALESCE(motion_action, ?), "
+                    "motion_camera = COALESCE(motion_camera, ?), motion_shake = COALESCE(motion_shake, ?) WHERE path = ?",
+                    (curves, moved.action, moved.camera, moved.shake, r["path"]),
+                )
+                r.update(curves=curves, motion_action=r["motion_action"] if r["motion_action"] is not None else moved.action,
+                         motion_camera=r["motion_camera"] if r["motion_camera"] is not None else moved.camera,
+                         motion_shake=r["motion_shake"] if r["motion_shake"] is not None else moved.shake)
         scores = {}
         for r in videos:
             if r["curves"]:
                 c = json.loads(r["curves"])
                 n = max(len(c["action"]) + 1, int((r["duration"] or 0) * motion.FPS))
                 scores[r["path"]] = autoedit.interest(c["action"], c["shake"], c["loud"], n)
-        beat = None
-        if music:
-            report(0.95, "Listening to the music's beat")
-            beat = beats.find_beat(music)
-        result = autoedit.plan(rows, scores, target, transition_seconds, beat, title_seconds)
+        return scores
+
+    def _apply_plan(self, result: autoedit.Plan) -> None:
         with self._lock:
             for shot_no, shot in enumerate(result.shots):
                 trim = (shot.start, shot.start + shot.seconds) if shot.kind == "video" else (None, None)
@@ -388,6 +401,26 @@ class Trip:
                 )
             self.db.executemany("UPDATE items SET included = 0, position = NULL WHERE path = ?", [(p,) for p in result.left_out])
             self.db.commit()
+
+    def auto_edit_steady(
+        self,
+        limits: autoedit.Limits,
+        target: float | None,
+        transition_seconds: float,
+        soft_transition: str,
+        on_progress: Callable[[float, str], None] | None = None,
+    ) -> autoedit.Plan:
+        """A first cut without music: a steady pace of about two seconds a shot, within your limits."""
+        from .songmap import Section, SongMap
+
+        report = on_progress or (lambda _f, _m: None)
+        rows = [r for r in self.items() if r["chosen"]]
+        scores = self._video_scores(rows, report)
+        length = target or 3600.0  # "use everything": it stops when the shots run out
+        steady = SongMap(duration=length, bpm=120, period=0.5, first_beat=0.0, clear_beat=False, downbeat=0,
+                         sections=[Section(0.0, length, 0.5, "Medium")])
+        result = autoedit.plan_to_music(rows, scores, steady, limits, None, transition_seconds, soft_transition)
+        self._apply_plan(result)
         report(1.0, "Done")
         return result
 

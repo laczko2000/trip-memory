@@ -31,7 +31,7 @@ def test_still():
 
 
 def test_pan_is_the_camera_not_action():
-    assert from_frames(_clip([(6 * n, 0) for n in range(10)])).tags() == ["Camera moving"]
+    assert from_frames(_clip([(6 * n, 0) for n in range(10)])).tags() == ["Camera moving", "Cinematic"]
 
 
 def test_shaky_camera():
