@@ -48,8 +48,8 @@ Nothing is uploaded anywhere.
    Cuts land on the beat: quick shots in lively parts, longer ones in calm parts, a cut at every change in the
    music. Action clips go to lively music, calm and cinematic clips and photos to calm music, in the order they
    were taken, each at its best moment. Then fine-tune it: change the order with the arrows, trim videos by dragging the ends of the bar (the preview
-   plays only the part you keep; hover over it to watch again), pick a
-   transition for any cut, and switch day title cards ("Day 2 · Lisbon") on or off.
+   plays only the part you keep; hover over it to watch again), and pick a
+   transition for any cut.
 6. **Make video tab:** choose transition, photo length, music (your own file, or **Find free music** to search
    free Creative Commons songs online and download one), then **Make my video**. The file is saved in
    *Movies → Trip Memory*.
@@ -58,6 +58,7 @@ Everything runs on your Mac. Nothing is uploaded.
 
 ## What's new
 
+- **0.12.1:** no more automatic day title cards (titles may come back later, placed where you choose).
 - **0.12:** music-led Auto-edit: song first with a music map, your limits for clip, photo and shot length, quick cuts in lively parts and long ones in calm parts, action clips matched to lively music. New *Cinematic* tag.
 - **0.11.3:** after you download a ccMixter song on its page, the app finds it in Downloads and selects it by itself.
 - **0.11.2:** when a music site only allows downloads from its own page (ccMixter), the app opens that page for you and still remembers the song's credit.

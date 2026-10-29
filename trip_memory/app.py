@@ -99,7 +99,6 @@ class Page:
         self.choose_page = 1
         self.story_page = 1
         self.media_route: str | None = None
-        self.chapters = bool(load_settings().get("chapters", True))
         self.auto_length: object = None
         self.auto_limits = AutoLimits(**load_settings().get("limits", {}))
         self.song_maps: dict = {}
@@ -431,7 +430,6 @@ class Page:
         self.choose_page = 1
         self.story_page = 1
         self.media_route: str | None = None
-        self.chapters = bool(load_settings().get("chapters", True))
         self.choose_view.refresh()
 
     def go_to_choose_page(self, page: int) -> None:
@@ -677,7 +675,6 @@ class Page:
             return
         with ui.row().classes("w-full items-center gap-4"):
             ui.label(f"{len(board)} clips in this order").classes("text-lg font-semibold")
-            ui.switch("Day title cards (\"Day 2 · Lisbon\")", value=self.chapters, on_change=lambda e: self.set_chapters(e.value))
             ui.button("Back to date order", icon="restart_alt", on_click=self.reset_order).props("flat dense")
         ui.label(
             "Use the arrows to change the order. For videos, drag the two ends of the bar to choose which part to keep. "
@@ -686,11 +683,7 @@ class Page:
         pages = max(1, -(-len(board) // STORY_PAGE_SIZE))
         self.story_page = min(self.story_page, pages)
         first = (self.story_page - 1) * STORY_PAGE_SIZE
-        previous_day = board[first - 1]["day"] if first else None
         for n, it in enumerate(board[first : first + STORY_PAGE_SIZE], first + 1):
-            if self.chapters and it["day"] != previous_day:
-                ui.label(f"🎬 Day title: {datetime.fromisoformat(it['day']):%a %d %b}").classes("text-sm text-blue-700 mt-2")
-            previous_day = it["day"]
             self.story_row(n, it, last=n == len(board))
         if pages > 1:
             ui.pagination(1, pages, direction_links=True, value=self.story_page, on_change=lambda e: self.go_to_story_page(e.value))
@@ -833,8 +826,6 @@ class Page:
             ui.notify(f"Auto-edit stopped: {exc}", type="negative", multi_line=True)
             return
         note.dismiss()
-        if self.chapters:
-            self.set_chapters(False)  # title cards would push every cut off the beat
         beat = result.beat
         on_beat = f", cuts on the beat ({beat.bpm:.0f} BPM)" if music and beat and beat.clear else ""
         song = self.song_maps.get(music) if music else None
@@ -902,11 +893,6 @@ class Page:
             kept.update(min=lo, max=hi)
             if box:
                 ui.run_javascript(f"tmPlayPart('{box}', {lo}, {hi}, {from_})")
-
-    def set_chapters(self, on: bool) -> None:
-        self.chapters = on
-        save_settings(chapters=on)
-        self.storyboard_view.refresh()
 
     def move(self, path: str, steps: int) -> None:
         self.trip.move(path, steps)
@@ -1094,7 +1080,7 @@ class Page:
         r = self.rendering
         if r["busy"] or not self.trip:
             return
-        items = self.trip.media_items(chapters=self.chapters)
+        items = self.trip.media_items()
         if not items:
             ui.notify("Nothing is ticked for the video yet. Pick items in the Library.", type="warning")
             return
