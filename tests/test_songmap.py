@@ -38,3 +38,16 @@ def test_finds_calm_and_lively_parts():
     assert levels[0][1] == "Calm"
     assert any(abs(start - 32) <= 1 and level == "Lively" for start, level in levels)
     assert any(abs(start - 64) <= 1 and level == "Calm" for start, level in levels)
+
+
+def test_finds_the_strong_beats():
+    samples, total = _song()
+    song = map_of(samples, total)
+    beats = song.beat_times()
+    assert len(song.accents) == len(beats) == len(song.bass) == len(song.highs)
+    accents = np.array(song.accents)
+    # In the calm part the first beat of each bar has the big kick; the others are soft.
+    calm = [(k, t) for k, t in enumerate(beats) if 2 < t < 30]
+    on_one = [accents[k] for k, t in calm if round((t - 0.2) / 0.5) % 4 == 0]
+    others = [accents[k] for k, t in calm if round((t - 0.2) / 0.5) % 4 != 0]
+    assert np.mean(on_one) > np.mean(others) + 0.2

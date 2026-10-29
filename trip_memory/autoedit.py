@@ -119,6 +119,7 @@ class Limits:
     max_video: float = 4.0
     max_photo: float = 2.5
     min_shot: float = 1.0
+    cut_on: str = "strong"  # which beats the cuts go on: a key of CUT_ON
 
 
 @dataclass
@@ -136,6 +137,15 @@ class Slot:
 # How many beats a shot lasts, by how lively the music is: quick cuts when it's busy, long ones when calm.
 BEATS_FOR = {"Lively": 2, "Medium": 4, "Calm": 8}
 
+# Where the cuts go. Every one of them still lands on a beat, and every change in the music is a cut.
+CUT_ON = {
+    "strong": "Strong beats",  # the hardest hits, keeping roughly the pace the music asks for
+    "bass": "Bass hits",  # the kick drum and bass notes
+    "changes": "Big moments only",  # few cuts, held as long as allowed, on the biggest hits
+    "beats": "Every few beats",  # a steady count of beats, line up with the bars
+}
+CUT_STRENGTH = {"strong": 1.5, "bass": 1.5, "changes": 3.0}  # how far a cut may drift from the pace for a hit
+
 
 def music_slots(song, limits: Limits, end: float, longest: float | None = None) -> list[Slot]:
     """Cut the music into shot-sized pieces: every cut on a beat, every change in the music a cut."""
@@ -151,12 +161,14 @@ def music_slots(song, limits: Limits, end: float, longest: float | None = None) 
         while n * song.period < limits.min_shot - 1e-6:
             n *= 2
         stop = min(section.end, end)
-        # Cuts every n beats, counted from the bar lines, so they line up with the music's bars.
-        cuts = [section.start]
-        for k, b in enumerate(beats):
-            if section.start + 1e-3 < b < stop - 1e-3 and (k - song.downbeat) % n == 0 and b - cuts[-1] >= limits.min_shot - 1e-6:
-                cuts.append(float(b))
-        cuts.append(stop)
+        cuts = _cuts_on_hits(song, limits, section.start, stop, n, longest)
+        if cuts is None:
+            # Cuts every n beats, counted from the bar lines, so they line up with the music's bars.
+            cuts = [section.start]
+            for k, b in enumerate(beats):
+                if section.start + 1e-3 < b < stop - 1e-3 and (k - song.downbeat) % n == 0 and b - cuts[-1] >= limits.min_shot - 1e-6:
+                    cuts.append(float(b))
+            cuts.append(stop)
         # Too short a piece at the end joins the one before it, when the joined piece is allowed.
         if len(cuts) > 2 and cuts[-1] - cuts[-2] < limits.min_shot and cuts[-1] - cuts[-3] <= longest:
             cuts.pop(-2)
@@ -177,6 +189,45 @@ def music_slots(song, limits: Limits, end: float, longest: float | None = None) 
         cuts = sorted(set(cuts))
         result += [Slot(a, b, s.energy) for a, b in zip(cuts, cuts[1:])]
     return result
+
+
+def _cuts_on_hits(song, limits: Limits, start: float, stop: float, n: int, longest: float) -> list[float] | None:
+    """Cuts on the music's hits: the best set of beats to cut on, trading how hard each one hits against
+    keeping close to the pace (n beats a shot) and within your limits. None = cut on a steady count instead."""
+    mode = limits.cut_on if limits.cut_on in CUT_STRENGTH else None
+    strength = getattr(song, "bass" if mode == "bass" else "accents", None)
+    beats = song.beat_times()
+    if mode is None or not strength or len(strength) != len(beats):
+        return None
+    strength = np.asarray(strength, float)
+    pace = longest if mode == "changes" else n * song.period
+    if mode == "changes":
+        strength = np.where(strength >= 0.6, strength, 0.0)  # only the big hits count
+    inside = [(float(t), float(strength[k])) for k, t in enumerate(beats) if start + 1e-3 < t < stop - 1e-3]
+    points = [(start, 0.0), *inside, (stop, 0.0)]
+    shortest, most = limits.min_shot - 1e-6, longest * 1.03
+    weight = CUT_STRENGTH[mode]
+    best = np.full(len(points), -np.inf)
+    back = np.zeros(len(points), int)
+    best[0] = 0.0
+    for j in range(1, len(points)):
+        tj, hit = points[j]
+        for i in range(j - 1, -1, -1):
+            d = tj - points[i][0]
+            if d > most:
+                break
+            if d < shortest or best[i] == -np.inf:
+                continue
+            score = best[i] + weight * hit - ((d - pace) / pace) ** 2
+            if score > best[j]:
+                best[j], back[j] = score, i
+    if best[-1] == -np.inf:
+        return None
+    cuts, j = [], len(points) - 1
+    while j > 0:
+        cuts.append(points[j][0])
+        j = back[j]
+    return [start, *cuts[::-1]]
 
 
 def merge_slots(slots: list[Slot], count: int, longest: float) -> list[Slot]:

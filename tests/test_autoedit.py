@@ -99,3 +99,19 @@ def test_few_shots_stretch_further():
     limits = autoedit.Limits(max_video=4.0, max_photo=2.5, min_shot=1.0)
     plan = autoedit.plan_to_music(rows, {}, _song(), limits, None, 0.8, "Fade")
     assert len(plan.shots) == 6 and plan.length > 6 * 2.0  # longer pieces, not 6 quick ones
+
+
+def test_cuts_go_on_the_strong_beats():
+    song = _song()
+    beats = song.beat_times()
+    # Big hits on beats 3 and 11 of every 16 (off the bar lines), the rest are soft.
+    song.accents = [0.9 if k % 16 in (3, 11) else 0.1 for k in range(len(beats))]
+    song.bass = list(song.accents)
+    limits = autoedit.Limits(max_video=6.0, max_photo=6.0, min_shot=1.0, cut_on="strong")
+    slots = autoedit.music_slots(song, limits, end=16.0)
+    inner = [s.start for s in slots[1:]]
+    assert inner and all(round(t / 0.5) % 16 in (3, 11) for t in inner)
+    every = autoedit.music_slots(song, autoedit.Limits(max_video=6.0, max_photo=6.0, min_shot=1.0, cut_on="beats"), end=16.0)
+    assert all(round(s.start / 0.5) % 8 == 0 for s in every)  # the steady count: every bar pair
+    few = autoedit.music_slots(song, autoedit.Limits(max_video=6.0, max_photo=6.0, min_shot=1.0, cut_on="changes"), end=16.0)
+    assert len(few) <= len(slots)

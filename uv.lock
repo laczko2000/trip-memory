@@ -2900,7 +2900,7 @@ wheels = [
 
 [[package]]
 name = "trip-memory"
-version = "0.13.3"
+version = "0.14.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastembed" },

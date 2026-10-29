@@ -20,6 +20,7 @@ from .catalog import Trip, app_dir
 from .media import MediaItem
 from . import music as free_music
 from . import songmap
+from .autoedit import CUT_ON
 from .autoedit import Limits as AutoLimits
 from .render import TRANSITIONS, RenderSettings, clip_range, render
 from .scenes import SCENES
@@ -798,6 +799,15 @@ class Page:
                         ui.label(label).classes("text-sm text-gray-600")
                         ui.slider(min=lo, max=hi, step=0.5, value=getattr(limits, key),
                                   on_change=lambda e, k=key: self.set_limit(k, e.value)).props("label-always").classes("mt-6")
+            with ui.row().classes("w-full items-center gap-3"):
+                ui.select(CUT_ON, value=limits.cut_on if limits.cut_on in CUT_ON else "strong", label="Cut on",
+                          on_change=lambda e: self.set_limit("cut_on", e.value)).classes("w-56")
+                ui.label({
+                    "strong": "Cuts on the hardest hits (drums, accents), keeping the pace of each part of the song.",
+                    "bass": "Cuts on the kick drum and bass notes.",
+                    "changes": "Few cuts: shots held as long as you allow, cut on the biggest moments.",
+                    "beats": "Cuts on a steady count of beats, lined up with the bars.",
+                }.get(limits.cut_on, "")).classes("text-sm text-gray-600")
             # 3. Length, then go
             with ui.row().classes("w-full items-center gap-4 mt-2"):
                 ui.label("3.").classes("font-medium")
@@ -817,9 +827,11 @@ class Page:
                 "in the order they were taken, each at its best moment."
             ).classes("text-sm text-gray-600")
 
-    def set_limit(self, key: str, value: float) -> None:
+    def set_limit(self, key: str, value) -> None:
         setattr(self.auto_limits, key, value)
         save_settings(limits=asdict(self.auto_limits))
+        if key == "cut_on":
+            self.storyboard_view.refresh()
 
     def music_map_view(self, music: str) -> None:
         """A small picture of the song: one bar per musical bar, tall when lively, with its parts named."""
@@ -850,6 +862,12 @@ class Page:
             level = next((s.level for s in song.sections if s.start <= t < s.end), "Medium")
             h = 8 + 52 * e
             bars.append(f'<rect x="{k}" y="{60 - h:.1f}" width="0.8" height="{h:.1f}" fill="{colours[level]}"/>')
+        # The strong beats: small marks along the top, taller for a harder hit.
+        first_bar = starts[0] if len(starts) else song.first_beat
+        for t, a in zip(song.beat_times(), song.accents):
+            if a >= 0.6 and bar_len:
+                x = (t - first_bar) / bar_len
+                bars.append(f'<line x1="{x:.2f}" y1="0" x2="{x:.2f}" y2="{3 + 6 * a:.1f}" stroke="#be123c" stroke-width="0.3"/>')
         for s in song.sections[1:]:
             x = (s.start - song.first_beat) / bar_len if bar_len else 0
             bars.append(f'<line x1="{x:.2f}" y1="0" x2="{x:.2f}" y2="60" stroke="#1e3a8a" stroke-width="0.25"/>')
@@ -857,6 +875,8 @@ class Page:
                 sanitize=False).classes("w-full")
         parts = " → ".join(f"{s.level} {fmt_length(s.end - s.start)}" for s in song.sections)
         beat = f"{song.bpm:.0f} beats a minute" if song.clear_beat else "no clear beat (steady pace)"
+        strong = sum(a >= 0.6 for a in song.accents)
+        beat += f" · {strong} strong beats (red marks)" if strong else ""
         ui.label(f"{fmt_length(song.duration)} · {beat} · {parts}").classes("text-xs text-gray-600")
 
     def music_changed(self) -> None:

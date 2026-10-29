@@ -58,6 +58,7 @@ Everything runs on your Mac. Nothing is uploaded.
 
 ## What's new
 
+- **0.15:** the app now hears which beats hit hardest (drums, bass, cymbals), shown as red marks over the song. A new *Cut on* choice in Auto-edit: *Strong beats* (the default), *Bass hits*, *Big moments only* (few, long shots) or *Every few beats* (the old steady count).
 - **0.14:** a new *Stories* tab. Each story is named by what it shows, where and when (for example "Fish & aquarium · Lisbon · Sat 5 Jul, morning"); rename it, move it up or down, or switch it off. Auto-edit and the Storyboard tell the stories in that order. Click *Analyse* once more so existing trips get the new names.
 - **0.13.3:** Auto-edit uses only your selection (ticked in Choose files and "In the video" in the Library) and never unticks it; files that don't fit a cut stay selected for next time.
 - **0.13.2:** fixed the finished video stopping after the first clip on the Mac.

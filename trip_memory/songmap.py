@@ -38,6 +38,10 @@ class SongMap:
     downbeat: int  # which of the first 4 beats starts a bar
     bar_energy: list[float] = field(default_factory=list)  # 0..1 for each bar
     sections: list[Section] = field(default_factory=list)
+    # For each beat, 0..1: how hard it hits overall, in the bass (kick, bass notes) and in the highs (cymbals, claps).
+    accents: list[float] = field(default_factory=list)
+    bass: list[float] = field(default_factory=list)
+    highs: list[float] = field(default_factory=list)
 
     @property
     def beat(self) -> Beat:
@@ -59,7 +63,7 @@ class SongMap:
 def analyse(path: str, cache_dir: Path | None = None) -> SongMap:
     """Study a song once (the result is remembered)."""
     stat = Path(path).stat()
-    key = hashlib.sha1(f"{path}|{stat.st_mtime}|{stat.st_size}|2".encode()).hexdigest()[:16]
+    key = hashlib.sha1(f"{path}|{stat.st_mtime}|{stat.st_size}|4".encode()).hexdigest()[:16]
     cached = cache_dir / f"{key}.json" if cache_dir else None
     if cached and cached.exists():
         data = json.loads(cached.read_text())
@@ -77,6 +81,7 @@ def map_of(samples: np.ndarray, duration: float) -> SongMap:
     beats = np.arange(beat.first, duration, beat.period)
     # Loudness and "busyness" (how much is going on) between one beat and the next.
     feats, loud, busy = _beat_features(samples, beats)
+    accents, bass, highs = _accents(samples, beats)
     downbeat = _downbeat(samples, beats)
     bars = [slice(i, i + BEATS_PER_BAR) for i in range(downbeat, len(beats) - 1, BEATS_PER_BAR)]
     if not bars:
@@ -98,6 +103,7 @@ def map_of(samples: np.ndarray, duration: float) -> SongMap:
     return SongMap(
         duration=duration, bpm=beat.bpm, period=beat.period, first_beat=beat.first, clear_beat=beat.clear,
         downbeat=downbeat, bar_energy=[round(float(e), 3) for e in energy], sections=sections,
+        accents=_rounded(accents), bass=_rounded(bass), highs=_rounded(highs),
     )
 
 
@@ -120,6 +126,53 @@ def _beat_features(samples: np.ndarray, beats: np.ndarray):
         loud.append(10 * np.log10(power[a:b].mean() + 1e-12))  # average power, so hits count fully
         busy.append(flux[a:b].mean())
     return np.array(feats), np.array(loud), np.array(busy)
+
+
+# Frequency bands (Hz): the bass (kick drum, bass notes), the middle (voices, guitars, snare body), the highs (cymbals).
+BANDS = {"bass": (30, 150), "mid": (150, 2000), "high": (3500, RATE / 2)}
+CONTEXT_BEATS = 16  # a hit counts as strong compared with the beats around it
+
+
+def _accents(samples: np.ndarray, beats: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """How hard each beat hits: a sudden rise in sound, in each band, right at the beat.
+
+    Each band is judged mostly against its own neighbourhood (and a little against the whole song), so a big
+    hit in a quiet part still counts, and a loud chorus doesn't make every beat "strong"."""
+    if len(beats) == 0:
+        return np.zeros(0), np.zeros(0), np.zeros(0)
+    window = np.hanning(WINDOW).astype(np.float32)
+    hz = np.fft.rfftfreq(WINDOW, 1 / RATE)
+    fine = HOP // 4  # look closely (every 6 ms) around each beat, so a short hit can't fall between two looks
+    reach = int(0.08 * RATE)  # the beats found can be a few hundredths of a second off the hit
+    padded = np.concatenate([np.zeros(WINDOW + reach, np.float32), samples, np.zeros(WINDOW + reach, np.float32)])
+    picks = {name: (hz >= lo) & (hz < hi) for name, (lo, hi) in BANDS.items()}
+    at_beat = {name: np.zeros(len(beats)) for name in BANDS}
+    for k, t in enumerate(beats):
+        centre = int(t * RATE) + WINDOW + reach
+        part = padded[centre - reach - WINDOW // 2 - fine : centre + reach + WINDOW // 2]
+        frames = np.lib.stride_tricks.sliding_window_view(part, WINDOW)[::fine] * window
+        spec = np.log1p(10 * np.abs(np.fft.rfft(frames, axis=1)))
+        for name, pick in picks.items():
+            band = spec[:, pick].mean(axis=1)
+            at_beat[name][k] = max(0.0, float(np.diff(band).max())) if len(band) > 1 else 0.0
+    hits = {name: 0.3 * _norm(v) + 0.7 * _local(v) for name, v in at_beat.items()}
+    overall = 0.45 * hits["bass"] + 0.3 * hits["mid"] + 0.25 * hits["high"]
+    return overall, hits["bass"], hits["high"]
+
+
+def _local(v: np.ndarray) -> np.ndarray:
+    """Each value against its neighbours: 0 = an ordinary beat here, 1 = clearly the strongest around."""
+    out = np.zeros(len(v))
+    half = CONTEXT_BEATS // 2
+    for i in range(len(v)):
+        near = v[max(0, i - half) : i + half + 1]
+        typical, top = np.median(near), near.max()
+        out[i] = np.clip((v[i] - typical) / (top - typical), 0, 1) if top > typical else 0.0
+    return out
+
+
+def _rounded(v: np.ndarray) -> list[float]:
+    return [round(float(x), 3) for x in v]
 
 
 def _downbeat(samples: np.ndarray, beats: np.ndarray) -> int:
