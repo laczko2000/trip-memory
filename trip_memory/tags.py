@@ -67,6 +67,56 @@ GROUPS: dict[str, dict[str, list[str]]] = {
 }
 PEOPLE_TAGS = ["No people", "Solo", "Couple", "Group"]
 
+# What a story is about: a wide vocabulary of holiday subjects, to name stories ("Fish & aquarium").
+SUBJECTS: dict[str, list[str]] = {
+    # animals
+    "Fish & aquarium": ["fish swimming in an aquarium", "a big aquarium tank"], "Deer": ["deer in a park or forest"],
+    "Horses": ["horses"], "Cows & farm animals": ["cows, sheep or goats on a farm"], "Dogs": ["a dog"], "Cats": ["a cat"],
+    "Birds": ["birds", "seagulls or pigeons"], "Ducks & swans": ["ducks or swans on water"], "Dolphins & whales": ["dolphins or whales in the sea"],
+    "Turtles": ["a sea turtle"], "Monkeys": ["monkeys"], "Elephants": ["elephants"], "Lions & big cats": ["a lion or a tiger"],
+    "Giraffes & zebras": ["giraffes or zebras"], "Zoo": ["animals at a zoo"], "Butterflies & insects": ["a butterfly or insects"],
+    "Penguins": ["penguins"], "Camels": ["camels in the desert"],
+    # activities
+    "Running": ["people running or jogging"], "Walking": ["people walking along a path"], "Hiking": ["people hiking in the mountains"],
+    "Cycling": ["people riding bicycles"], "Swimming": ["people swimming"], "Snorkelling": ["snorkelling with a mask underwater"],
+    "Scuba diving": ["scuba diving underwater"], "Surfing": ["surfing on a wave"], "Kayaking": ["people kayaking"],
+    "Paddle boarding": ["stand up paddle boarding"], "Sailing": ["a sailing boat"], "Boat trip": ["people on a boat trip"],
+    "Jet ski": ["riding a jet ski"], "Fishing": ["people fishing"], "Skiing": ["skiing on a slope"], "Snowboarding": ["snowboarding"],
+    "Ice skating": ["ice skating"], "Climbing": ["rock climbing"], "Horse riding": ["people riding horses"],
+    "Playing football": ["people playing football"], "Beach volleyball": ["playing beach volleyball"], "Tennis": ["playing tennis"],
+    "Golf": ["playing golf"], "Yoga": ["doing yoga"], "Dancing": ["people dancing"], "Party": ["a party with friends"],
+    "Concert": ["a concert with a stage and lights"], "Festival": ["a festival with crowds"], "Fireworks": ["fireworks in the night sky"],
+    "Playground": ["children on a playground"], "Kids playing": ["children playing"], "Sandcastles": ["building sandcastles on the beach"],
+    "Picnic": ["a picnic on the grass"], "Barbecue": ["a barbecue"], "Camping": ["camping with a tent"], "Campfire": ["a campfire"],
+    "Sunbathing": ["people sunbathing on a beach"], "Shopping": ["people shopping in stores"], "Market": ["a market with stalls"],
+    "Theme park": ["a theme park with rides"], "Roller coaster": ["a roller coaster"], "Water park": ["a water park with slides"],
+    "Museum visit": ["inside a museum with exhibits"], "Art gallery": ["paintings in an art gallery"], "Wine tasting": ["wine tasting"],
+    "Cooking": ["people cooking food"], "Road trip": ["a road trip in a car"], "Train ride": ["a train journey"],
+    "Flight": ["an airplane flight", "the view from an airplane window"], "Airport": ["an airport terminal"], "Ferry": ["a ferry crossing"],
+    "Cable car": ["a cable car or gondola"], "Hot air balloon": ["hot air balloons"], "Selfie time": ["people taking a selfie"],
+    "Group photo": ["a group of friends posing"], "Wedding": ["a wedding"], "Birthday": ["a birthday cake and party"],
+    # food and drink
+    "Breakfast": ["breakfast with coffee and pastries"], "Pizza": ["pizza"], "Pasta": ["a plate of pasta"], "Seafood": ["seafood on a plate"],
+    "Sushi": ["sushi"], "Ice cream": ["ice cream"], "Cake & dessert": ["cake or dessert"], "Burgers": ["burgers and fries"],
+    "Street food": ["street food stalls"], "Coffee": ["a cup of coffee"], "Cocktails": ["cocktails at a bar"], "Beer": ["glasses of beer"],
+    "Wine": ["glasses of wine"], "Dinner out": ["dinner at a restaurant table"], "Fruit": ["fresh fruit"],
+    # places
+    "Beach": ["a sandy beach"], "Sea view": ["a view of the sea"], "Coast & cliffs": ["cliffs by the sea"], "Harbour": ["boats in a harbour"],
+    "Lighthouse": ["a lighthouse"], "Island": ["an island"], "Pool": ["a swimming pool"], "Lake": ["a lake"], "River": ["a river"],
+    "Waterfall": ["a waterfall"], "Mountains": ["mountains"], "Forest": ["a forest"], "Park": ["a city park with trees"],
+    "Garden": ["a garden with flowers"], "Flowers": ["flowers"], "Countryside": ["green countryside"], "Vineyard": ["a vineyard"],
+    "Desert": ["a desert with sand dunes"], "Snow": ["snowy landscape"], "Cave": ["inside a cave"], "Volcano": ["a volcano"],
+    "Old town": ["old town narrow streets"], "City street": ["a busy city street"], "Skyline": ["a city skyline"],
+    "Square": ["a town square with a fountain"], "Bridge": ["a bridge"], "Church & cathedral": ["a church or cathedral"],
+    "Castle": ["a castle"], "Palace": ["a palace"], "Temple": ["a temple"], "Mosque": ["a mosque"], "Ruins": ["ancient ruins"],
+    "Monument & statue": ["a monument or statue"], "Tower": ["a tall tower"], "Street art": ["graffiti and street art"],
+    "Hotel": ["a hotel room"], "Villa & holiday home": ["a holiday villa or apartment"], "Restaurant": ["inside a restaurant"],
+    "Cafe": ["a cafe terrace"], "Bar & nightlife": ["a bar at night"], "Stadium": ["a sports stadium"], "Aquarium tunnel": ["an aquarium tunnel"],
+    "Viewpoint": ["a panoramic viewpoint over the landscape"], "Sunset": ["a sunset"], "Sunrise": ["a sunrise"], "Night lights": ["a city at night with lights"],
+    "Rain": ["rainy weather"], "Car": ["a car"], "Bus & tram": ["a bus or a tram"],
+}
+SUBJECT_NAMES = list(SUBJECTS)
+
 # How sure (0..1, compared with the other tags of the same group) a match must be.
 SURE = {"Place": 0.35, "Activity": 0.30, "Light": 0.5}
 MAX_PER_PICTURE = {"Place": 1, "Activity": 2, "Light": 1}
@@ -92,8 +142,38 @@ class Tagger:
                 rows.append(mean / np.linalg.norm(mean))
             self.groups[group] = (names, np.array(rows))
 
+        rows = []
+        for descriptions in SUBJECTS.values():
+            mean = scenes.describe([f"a holiday photo of {d}" for d in descriptions]).mean(axis=0)
+            rows.append(mean / np.linalg.norm(mean))
+        self.subject_matrix = np.array(rows)
+
     def tag(self, frame_vectors: np.ndarray) -> list[str]:
         return tag_frames(frame_vectors, self.groups)
+
+    def subjects(self, vector: np.ndarray) -> list[tuple[str, float]]:
+        return top_subjects(vector, self.subject_matrix)
+
+
+def top_subjects(vector: np.ndarray, matrix: np.ndarray, count: int = 3) -> list[tuple[str, float]]:
+    """The most likely subjects of a picture, with how sure (0..1)."""
+    logits = 100 * matrix @ vector
+    probs = np.exp(logits - logits.max())
+    probs /= probs.sum()
+    return [(SUBJECT_NAMES[i], round(float(probs[i]), 3)) for i in np.argsort(probs)[::-1][:count]]
+
+
+def story_subject(subject_lists: list[list]) -> str | None:
+    """What a story is about: the subject its photos and videos agree on most (None if they don't agree)."""
+    known = [subjects for subjects in subject_lists if subjects]
+    score: Counter = Counter()
+    for subjects in known:
+        for name, prob in subjects:
+            score[name] += prob
+    if not score:
+        return None
+    best, total = score.most_common(1)[0]
+    return best if total / len(known) >= 0.15 else None
 
 
 def tag_frames(frame_vectors: np.ndarray, groups: dict[str, tuple[list[str], np.ndarray]]) -> list[str]:

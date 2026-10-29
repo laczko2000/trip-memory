@@ -269,3 +269,28 @@ def test_auto_edit_uses_only_your_selection_and_keeps_it(tmp_path, monkeypatch):
     assert [r["path"] for r in trip.auto_edit_pool()] == paths[:4]
     trip.auto_edit_steady(limits, 60.0, 0.8, "Fade")
     assert [r["path"] for r in trip.storyboard()] == paths[:4]
+
+
+def test_stories_are_named_ordered_and_switched(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    monkeypatch.setattr(catalog, "FaceFinder", FakeFaces)
+    monkeypatch.setattr(catalog, "SceneTagger", FakeScenes)
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    _gps_photo(trip_dir / "a.jpg", "2025:07:03 09:00:00", 38.7223, -9.1393, "red")
+    _gps_photo(trip_dir / "b.jpg", "2025:07:04 15:00:00", 47.4979, 19.0402, "blue")
+    trip = catalog.Trip(trip_dir)
+    trip.analyse()
+    stories = trip.stories()
+    assert [s["name"] for s in stories] == ["Beach · Lisbon · Thu 3 Jul, morning", "Beach · Budapest · Fri 4 Jul, afternoon"]
+
+    trip.rename_story(stories[1]["key"], "Thermal baths")
+    trip.move_story(stories[1]["key"], -1)
+    assert [s["name"] for s in trip.stories()] == ["Thermal baths", "Beach · Lisbon · Thu 3 Jul, morning"]
+    assert [r["path"][-5:] for r in trip.storyboard()] == ["b.jpg", "a.jpg"]  # the video follows your story order
+    assert [r["path"][-5:] for r in trip.auto_edit_pool()] == ["b.jpg", "a.jpg"]
+
+    trip.set_story_enabled(stories[0]["key"], False)
+    assert [r["path"][-5:] for r in trip.storyboard()] == ["b.jpg"]
+    assert [r["path"][-5:] for r in trip.auto_edit_pool()] == ["b.jpg"]

@@ -172,6 +172,7 @@ class Page:
                 self.choose_tab = ui.tab("Choose files", icon="checklist")
                 library_tab = ui.tab("Library", icon="photo_library")
                 people_tab = ui.tab("People", icon="people")
+                stories_tab = ui.tab("Stories", icon="auto_stories")
                 story_tab = ui.tab("Storyboard", icon="view_timeline")
                 video_tab = ui.tab("Make video", icon="movie")
             self.library_tab = library_tab
@@ -182,6 +183,8 @@ class Page:
                     self.build_library()
                 with ui.tab_panel(people_tab):
                     self.people_view()
+                with ui.tab_panel(stories_tab):
+                    self.stories_view()
                 with ui.tab_panel(story_tab):
                     self.storyboard_view()
                 with ui.tab_panel(video_tab):
@@ -283,6 +286,7 @@ class Page:
         self.people_view.refresh()
         self.video_summary.refresh()
         self.storyboard_view.refresh()
+        self.stories_view.refresh()
 
     # ---------- Choose files ----------
 
@@ -472,6 +476,7 @@ class Page:
         self.gallery.refresh()
         self.video_summary.refresh()
         self.storyboard_view.refresh()
+        self.stories_view.refresh()
 
     @ui.refreshable
     def gallery(self) -> None:
@@ -663,6 +668,81 @@ class Page:
             transition_seconds=self.t_len.value,
             music_volume=self.music_vol.value,
         )
+
+    @ui.refreshable
+    def stories_view(self) -> None:
+        if not self.trip:
+            ui.label("Open a trip first.").classes("text-gray-500")
+            return
+        stories = [s for s in self.trip.stories() if any(it["chosen"] for it in s["items"])]
+        if not stories:
+            ui.label("No stories yet. Click Analyse to group your files into stories.").classes("text-gray-500")
+            return
+        with ui.row().classes("w-full items-center gap-4"):
+            ui.label(f"{len(stories)} stories").classes("text-lg font-semibold")
+            ui.button("Back to date order", icon="restart_alt", on_click=self.reset_story_order).props("flat dense")
+        ui.label(
+            "Each story is a group of shots of the same thing, at the same time and place. Give them names, put them in "
+            "the order you want the video to tell them, and switch off the ones you don't want. Auto-edit and the "
+            "Storyboard follow this order."
+        ).classes("text-sm text-gray-600")
+        if not any(it.get("subjects") for s in stories for it in s["items"]):
+            ui.label("Tip: click Analyse again so the app can name stories by what they show (fish, deer, running…).") \
+                .classes("text-sm text-amber-700")
+        for n, story in enumerate(stories, 1):
+            self.story_card(n, story, last=n == len(stories))
+
+    def story_card(self, n: int, story: dict, last: bool) -> None:
+        members = [it for it in story["items"] if it["chosen"]]
+        included = sum(1 for it in members if it["included"])
+        with ui.card().classes("w-full p-2" + ("" if story["enabled"] else " opacity-50")):
+            with ui.row().classes("w-full items-center no-wrap gap-3"):
+                with ui.column().classes("gap-0 items-center"):
+                    ui.button(icon="arrow_upward", on_click=lambda k=story["key"]: self.move_story(k, -1)) \
+                        .props("flat dense round size=sm" + (" disable" if n == 1 else ""))
+                    ui.label(str(n)).classes("text-xs text-gray-500")
+                    ui.button(icon="arrow_downward", on_click=lambda k=story["key"]: self.move_story(k, 1)) \
+                        .props("flat dense round size=sm" + (" disable" if last else ""))
+                with ui.row().classes("gap-1 no-wrap"):
+                    for it in members[:4]:
+                        if it["thumb"]:
+                            self.preview(it, "width:90px;height:64px;flex:none", view=f"tale{n}")
+                with ui.column().classes("flex-grow gap-1"):
+                    name = ui.input("Story name", value=story["name"]).props("dense").classes("w-full")
+                    name.on("blur", lambda e, k=story["key"], box=name: self.rename_story(k, box.value))
+                    name.on("keydown.enter", lambda e, k=story["key"], box=name: self.rename_story(k, box.value))
+                    places = [it["place"] or it["country"] for it in members if it["place"] or it["country"]]
+                    place = max(set(places), key=places.count) if places else ""
+                    start, end = fmt_time(story["start"]), datetime.fromisoformat(story["end"]).astimezone().strftime("%H:%M")
+                    ui.label(f"{start}–{end}" + (f" · {place}" if place else "") +
+                             f" · {len(members)} files, {included} in the video").classes("text-xs text-gray-600")
+                    if story["renamed"]:
+                        ui.label(f"The app's name: {story['auto_name']}").classes("text-xs text-gray-400")
+                ui.switch("In the video", value=story["enabled"],
+                          on_change=lambda e, k=story["key"]: self.set_story_enabled(k, e.value))
+
+    def rename_story(self, key: str, name: str) -> None:
+        current = next((s for s in self.trip.stories() if s["key"] == key), None)
+        if current and (name or "").strip() != current["name"]:
+            self.trip.rename_story(key, name)
+            ui.notify("Story renamed")
+            self.stories_view.refresh()
+
+    def move_story(self, key: str, steps: int) -> None:
+        self.trip.move_story(key, steps)
+        self.stories_view.refresh()
+        self.storyboard_view.refresh()
+
+    def set_story_enabled(self, key: str, enabled: bool) -> None:
+        self.trip.set_story_enabled(key, enabled)
+        self.stories_view.refresh()
+        self.storyboard_view.refresh()
+        self.video_summary.refresh()
+
+    def reset_story_order(self) -> None:
+        self.trip.reset_story_order()
+        self.stories_view.refresh()
+        self.storyboard_view.refresh()
 
     @ui.refreshable
     def storyboard_view(self) -> None:

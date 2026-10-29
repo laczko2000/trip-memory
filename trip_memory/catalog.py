@@ -26,7 +26,7 @@ from .faces import FaceFinder, group_faces
 from .media import MediaItem, scan_folder
 from . import autoedit, motion, stories
 from .scenes import SceneTagger, mean_vector
-from .tags import Tagger, group_name, look_alike_groups, people_tag
+from .tags import TAG_GROUP, Tagger, group_name, look_alike_groups, people_tag, story_subject
 from .tools import ffmpeg_paths
 
 
@@ -83,9 +83,16 @@ CREATE TABLE IF NOT EXISTS items (
     clip_sound INTEGER DEFAULT 0,
     clip_volume REAL DEFAULT 1.0,
     cut_out INTEGER DEFAULT 0,
+    subjects TEXT,
     faces_done INTEGER DEFAULT 0,
     scene_done INTEGER DEFAULT 0,
     tags_done INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS story_info (
+    key TEXT PRIMARY KEY,  -- the story's first file
+    name TEXT,
+    position REAL,
+    enabled INTEGER DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
@@ -144,7 +151,7 @@ class Trip:
             "rotation INTEGER DEFAULT 0", "rotation_checked INTEGER DEFAULT 0",
             "tags TEXT", "tags_user TEXT", "motion_action REAL", "motion_camera REAL", "motion_shake REAL",
             "look_group INTEGER", "tags_done INTEGER DEFAULT 0", "seconds REAL", "curves TEXT",
-            "clip_sound INTEGER DEFAULT 0", "clip_volume REAL DEFAULT 1.0", "cut_out INTEGER DEFAULT 0",
+            "clip_sound INTEGER DEFAULT 0", "clip_volume REAL DEFAULT 1.0", "cut_out INTEGER DEFAULT 0", "subjects TEXT",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
@@ -249,11 +256,16 @@ class Trip:
     def storyboard(self) -> list[dict]:
         """The files going into the video, in storyboard order.
 
-        Files you moved keep their place; anything not placed yet follows in date order.
+        Files you moved keep their place; anything not placed yet follows story by story (your story order).
         """
-        rows = [it for it in self.items() if it["chosen"] and it["included"] and not it["cut_out"]]
+        items = self.items()
+        stories = self.stories(items)
+        off = {r["path"] for s in stories if not s["enabled"] for r in s["items"]}
+        rank = {r["path"]: n for n, s in enumerate(stories) for r in s["items"]}
+        rows = [it for it in items if it["chosen"] and it["included"] and not it["cut_out"] and it["path"] not in off]
         placed = sorted((r for r in rows if r["position"] is not None), key=lambda r: r["position"])
-        return placed + [r for r in rows if r["position"] is None]
+        rest = sorted((r for r in rows if r["position"] is None), key=lambda r: (rank.get(r["path"], 0), r["taken_at"]))
+        return placed + rest
 
     def media_items(self, chapters: bool = False) -> list[MediaItem]:
         """What the video is made from, in storyboard order, optionally with a title card for each day."""
@@ -353,8 +365,16 @@ class Trip:
         self.execute("UPDATE items SET position = NULL")
 
     def auto_edit_pool(self) -> list[dict]:
-        """What Auto-edit picks from: your selection (ticked in Choose files and "In the video" in the Library)."""
-        return [r for r in self.items() if r["chosen"] and r["included"]]
+        """What Auto-edit picks from: your selection (ticked in Choose files and "In the video" in the Library),
+        story by story in your story order, leaving out stories you switched off."""
+        items = self.items()
+        pool = []
+        for rank, story in enumerate(self.stories(items)):
+            if story["enabled"]:
+                for r in story["items"]:
+                    if r["chosen"] and r["included"]:
+                        pool.append(r | {"story_rank": rank})
+        return pool
 
     def auto_edit_to_music(
         self,
@@ -578,10 +598,82 @@ class Trip:
                 p.notes.append(f"Could not analyse {Path(row['path']).name}: {exc}")
         self._group_stories()  # pictures turned upright get a fresh look-alike fingerprint
         self._group_look_alike()
+        self._find_subjects(tagger, notify)
 
         p.message = "Grouping faces into people…"
         notify()
         self._group_people()
+
+    def _find_subjects(self, tagger, notify: Callable[[], None]) -> None:
+        """What each photo or video shows (fish, deer, running...), for naming the stories."""
+        rows = self.query("SELECT path, clip FROM items WHERE clip IS NOT NULL AND subjects IS NULL")
+        if not rows:
+            return
+        if tagger is None:
+            self.progress.message = "Loading the AI model for naming the stories…"
+            notify()
+            scenes = self._load(lambda: SceneTagger(app_dir() / "models" / "clip"), "story names")
+            tagger = scenes and self._load(lambda: Tagger(scenes), "story names")
+            if tagger is None:
+                return
+        with self._lock:
+            self.db.executemany(
+                "UPDATE items SET subjects = ? WHERE path = ?",
+                [(json.dumps(tagger.subjects(np.frombuffer(r["clip"], dtype=np.float32))), r["path"]) for r in rows],
+            )
+            self.db.commit()
+
+    # ---------- stories ----------
+
+    def stories(self, items: list[dict] | None = None) -> list[dict]:
+        """The trip's stories in your order, each with a name: what it shows, where and when."""
+        items = items if items is not None else self.items()
+        groups: dict[int, list[dict]] = {}
+        for it in items:
+            if it["story"] is not None:
+                groups.setdefault(it["story"], []).append(it)
+        info = {r["key"]: dict(r) for r in self.query("SELECT * FROM story_info")}
+        result = []
+        for number, members in sorted(groups.items()):
+            members.sort(key=lambda r: (r["taken_at"], r["path"]))
+            key = members[0]["path"]
+            saved = info.get(key, {})
+            auto = story_name(members)
+            result.append({
+                "key": key, "number": number, "items": members, "auto_name": auto,
+                "name": saved.get("name") or auto, "renamed": bool(saved.get("name")),
+                "enabled": saved.get("enabled", 1) != 0, "position": saved.get("position"),
+                "start": members[0]["taken_at"], "end": members[-1]["taken_at"],
+            })
+        placed = sorted((s for s in result if s["position"] is not None), key=lambda s: s["position"])
+        return placed + [s for s in result if s["position"] is None]
+
+    def _story_info(self, key: str) -> None:
+        self.execute("INSERT OR IGNORE INTO story_info (key) VALUES (?)", (key,))
+
+    def rename_story(self, key: str, name: str) -> None:
+        self._story_info(key)
+        self.execute("UPDATE story_info SET name = ? WHERE key = ?", ((name or "").strip() or None, key))
+
+    def set_story_enabled(self, key: str, enabled: bool) -> None:
+        self._story_info(key)
+        self.execute("UPDATE story_info SET enabled = ? WHERE key = ?", (int(enabled), key))
+
+    def move_story(self, key: str, steps: int) -> None:
+        """Move a story earlier (negative) or later; Auto-edit follows this order."""
+        order = [s["key"] for s in self.stories()]
+        if key not in order:
+            return
+        i = order.index(key)
+        order.insert(max(0, min(len(order) - 1, i + steps)), order.pop(i))
+        with self._lock:
+            for n, k in enumerate(order):
+                self.db.execute("INSERT OR IGNORE INTO story_info (key) VALUES (?)", (k,))
+                self.db.execute("UPDATE story_info SET position = ? WHERE key = ?", (n, k))
+            self.db.commit()
+
+    def reset_story_order(self) -> None:
+        self.execute("UPDATE story_info SET position = NULL")
 
     def _thumb_path(self, path: str, rotation: int = 0) -> Path:
         # The rotation is part of the name so the browser shows the turned picture straight away.
@@ -778,6 +870,19 @@ def _curves_json(moved: motion.Motion, path: Path, has_audio) -> str:
     """Movement and loudness five times a second, for finding a video's best moment."""
     loud = autoedit.loudness_steps(str(path)) if has_audio else []
     return json.dumps({"action": moved.action_steps, "shake": moved.shake_steps, "loud": loud})
+
+
+def story_name(members: list[dict]) -> str:
+    """A story's name from what it shows, where and when, e.g. "Fish & aquarium · Lisbon · Sat 5 Jul, morning"."""
+    subject = story_subject([json.loads(m["subjects"]) if m.get("subjects") else None for m in members])
+    if subject is None:
+        tags = [t for m in members for t in m.get("tags_final") or [] if TAG_GROUP.get(t) in ("Activity", "Place")]
+        subject = max(set(tags), key=tags.count) if tags else None
+    places = [m.get("place") or m.get("country") for m in members if m.get("place") or m.get("country")]
+    place = max(set(places), key=places.count) if places else None
+    when = datetime.fromisoformat(members[0]["taken_at"]).astimezone()
+    part = "morning" if 5 <= when.hour < 12 else "afternoon" if when.hour < 17 else "evening" if when.hour < 21 else "night"
+    return " · ".join(x for x in (subject, place, f"{when:%a} {when.day} {when:%b}, {part}") if x)
 
 
 def rotate_filter(rotation: int) -> str:

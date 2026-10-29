@@ -102,11 +102,11 @@ def shot_value(row: dict) -> float:
 
 
 def choose(rows: list[dict]) -> list[dict]:
-    """The shots to choose from: everything you ticked, in the order it was taken.
+    """The shots to choose from: everything you ticked, story by story in your story order, then as taken.
 
     (Choose files already ticks only the best of each set of look-alike shots for you; anything else you
     ticked yourself, you want in.)"""
-    return sorted(rows, key=lambda r: (r["taken_at"], r["path"]))
+    return sorted(rows, key=lambda r: (r.get("story_rank", 0), r["taken_at"], r["path"]))
 
 
 # ---------- music-driven editing ----------
