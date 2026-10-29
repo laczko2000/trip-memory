@@ -15,7 +15,8 @@ Nothing is uploaded anywhere.
 
 1. **Choose your trip folder** with *Browse…*. The app looks through every video and photo and works out:
    - **when** each was taken (sorted by day),
-   - **where**: the place name from the phone's GPS, looked up offline,
+   - **where**: the place name from the phone's GPS, looked up offline. Photos without GPS borrow the place
+     of a photo taken within 3 hours, or at least the country from the same day (marked "guessed"),
    - **what**: a suggested scene type such as Beach, City, Food or Group photo,
    - **who**: faces grouped by person.
 
@@ -33,6 +34,7 @@ Everything runs on your Mac. Nothing is uploaded.
 
 ## What's new
 
+- **0.3.2:** missing places are guessed from photos taken around the same time.
 - **0.3.1:** name drop-down, one-click Unknown, review list for faces seen only once or twice.
 - **0.3 (milestone 3):** trip catalogue with places, scene suggestions, people, filters and picking.
 - **0.2 (milestone 2):** basic stitcher: date order, blurred background for vertical shots, slow zoom on photos,

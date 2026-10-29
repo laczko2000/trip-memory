@@ -78,6 +78,10 @@ CREATE INDEX IF NOT EXISTS faces_person ON faces(person_id);
 """
 
 
+# A photo without GPS borrows the place of the nearest photo taken within this many hours,
+# and at least the country of one taken the same day.
+PLACE_GUESS_HOURS = 3
+
 # Unnamed people seen in fewer photos/videos than this are listed separately for review (often strangers).
 MIN_APPEARANCES = 3
 
@@ -131,7 +135,9 @@ class Trip:
             row["people"] = [people[i]["label"] for i in ids]
             row["scene_final"] = row["scene_user"] or row["scene"]
             row["day"] = row["taken_at"][:10]
+            row["place_guessed"] = False
             row.pop("clip", None)
+        _guess_places(rows)
         return rows
 
     def _people_status(self) -> dict[int, dict]:
@@ -376,6 +382,28 @@ class Trip:
                     group = created[group]
                 self.db.execute("UPDATE faces SET person_id = ? WHERE id = ?", (group, row["id"]))
             self.db.commit()
+
+
+def _guess_places(rows: list[dict]) -> None:
+    """Fill in missing places from photos taken around the same time: nobody changes country in a few hours."""
+    located = [(datetime.fromisoformat(r["taken_at"]), r) for r in rows if r["place"]]
+    if not located:
+        return
+    for row in rows:
+        if row["place"]:
+            continue
+        when = datetime.fromisoformat(row["taken_at"])
+        gap, nearest = min(((abs((t - when).total_seconds()), r) for t, r in located), key=lambda x: x[0])
+        if gap <= PLACE_GUESS_HOURS * 3600:
+            row["place"], row["country"] = nearest["place"], nearest["country"]
+        elif nearest["day"] == row["day"]:
+            row["country"] = nearest["country"]
+        else:
+            same_day = [r for _, r in located if r["day"] == row["day"]]
+            if not same_day:
+                continue
+            row["country"] = same_day[0]["country"]
+        row["place_guessed"] = True
 
 
 def _frames(path: Path, kind: str, duration: float, out_dir: Path) -> list[Path]:

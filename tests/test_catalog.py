@@ -98,3 +98,22 @@ def test_group_faces_keeps_known_people():
 def test_classify_picks_closest_scene():
     vectors = np.eye(len(SCENES), dtype=np.float32)
     assert classify(vectors[3], vectors)[0][0] == SCENES[3]
+
+
+def test_missing_places_are_guessed_from_nearby_photos():
+    def row(when, place=None, country=None):
+        return {"taken_at": when, "day": when[:10], "place": place, "country": country, "place_guessed": False}
+
+    rows = [
+        row("2025-07-03T10:00:00+02:00", "Lisbon", "Portugal"),
+        row("2025-07-03T11:30:00+02:00"),  # 1.5 h later: same place
+        row("2025-07-03T21:00:00+02:00"),  # same day, much later: country only
+        row("2025-07-09T12:00:00+02:00"),  # another day with no GPS at all: unknown
+    ]
+    catalog._guess_places(rows)
+    assert [(r["place"], r["country"], r["place_guessed"]) for r in rows] == [
+        ("Lisbon", "Portugal", False),
+        ("Lisbon", "Portugal", True),
+        (None, "Portugal", True),
+        (None, None, False),
+    ]

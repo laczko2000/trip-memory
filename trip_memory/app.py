@@ -277,7 +277,10 @@ class Page:
                 icon = "🎬 " + fmt_length(it["duration"]) if it["kind"] == "video" else "📷"
                 ui.label(f"{icon} · {fmt_time(it['taken_at'])}").classes("text-xs text-gray-600")
                 place = ", ".join(x for x in (it["place"], it["country"]) if x) or "Unknown place"
-                ui.label(f"📍 {place}").classes("text-xs")
+                if it["place_guessed"]:
+                    ui.label(f"📍 {place} (guessed from photos taken around then)").classes("text-xs text-gray-500")
+                else:
+                    ui.label(f"📍 {place}").classes("text-xs")
                 ui.select(
                     [*SCENES],
                     value=it["scene_final"],
