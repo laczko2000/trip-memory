@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -79,14 +80,6 @@ def rotate_buttons(on_turn) -> None:
     ui.button(icon="rotate_right", on_click=lambda: on_turn(90)).props("flat dense round size=sm").tooltip(
         "Turn 90° clockwise"
     )
-
-
-def video_turn(rotation: int) -> str:
-    """CSS that turns the hover video the same way as its preview picture."""
-    if rotation in (90, 270):
-        return f"width:96px;height:144px;left:24px;top:-24px;transform:rotate({rotation}deg);"
-    turn = f"transform:rotate({rotation}deg);" if rotation else ""
-    return f"inset:0;width:144px;height:96px;{turn}"
 
 
 class Page:
@@ -355,21 +348,7 @@ class Page:
 
     def choose_tile(self, it: dict, in_set: bool) -> None:
         with ui.column().classes("w-36 gap-0" + ("" if it["chosen"] else " opacity-40")):
-            thumb = data_url(it["thumb"])
-            if it["kind"] == "video" and self.media_route:
-                start = (it["duration"] or 0) * 0.3
-                src = f"{self.media_route}/{quote(str(Path(it['path']).relative_to(self.trip.folder)))}#t={start:.1f}"
-                ui.html(
-                    f'<div class="tm-hover" style="position:relative;width:144px;height:96px">'
-                    f'<img src="{thumb}" style="width:144px;height:96px;object-fit:contain;background:#222;border-radius:4px">'
-                    f'<video data-src="{src}" muted loop playsinline preload="none" '
-                    f'style="display:none;position:absolute;{video_turn(it.get("rotation") or 0)}object-fit:contain;background:#222;border-radius:4px"></video>'
-                    f'<span style="position:absolute;left:4px;bottom:2px;color:white;font-size:11px;text-shadow:0 0 3px black">'
-                    f'▶ {fmt_length(it["duration"])}</span></div>',
-                    sanitize=False,
-                )
-            elif thumb:
-                ui.image(thumb).props('fit=contain').classes("w-36 h-24 rounded bg-gray-800")
+            self.preview(it, "width:144px;height:96px", start=(it["duration"] or 0) * 0.3)
             with ui.row().classes("items-center gap-0 no-wrap"):
                 ui.checkbox(
                     value=bool(it["chosen"]),
@@ -378,6 +357,30 @@ class Page:
                 rotate_buttons(lambda degrees, path=it["path"]: self.rotate(path, degrees))
                 star = "⭐ " if in_set and it["best"] else ""
                 ui.label(f"{star}{datetime.fromisoformat(it['taken_at']).astimezone():%H:%M:%S}").classes("text-xs text-gray-600")
+
+    def preview(self, it: dict, size: str, start: float = 0, end: float | None = None) -> str:
+        """A preview picture; for a video, hovering plays it (only the part from start to end).
+
+        Returns the element id so the storyboard can change the part being played."""
+        box = f"tm-{hashlib.sha1(it['path'].encode()).hexdigest()[:12]}"
+        thumb = data_url(it["thumb"])
+        if it["kind"] != "video" or not self.media_route:
+            if thumb:
+                ui.image(thumb).props("fit=contain").style(size).classes("rounded bg-gray-800")
+            return box
+        src = f"{self.media_route}/{quote(str(Path(it['path']).relative_to(self.trip.folder)))}"
+        end = (it["duration"] or 0) if end is None else end
+        ui.html(
+            f'<div id="{box}" class="tm-hover" data-start="{start:.2f}" data-end="{end:.2f}" data-rot="{it.get("rotation") or 0}" '
+            f'style="position:relative;overflow:hidden;border-radius:4px;background:#222;{size}">'
+            f'<img src="{thumb}" style="width:100%;height:100%;object-fit:contain">'
+            f'<video data-src="{src}" muted playsinline preload="none" '
+            f'style="display:none;position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#222"></video>'
+            f'<span style="position:absolute;left:4px;bottom:2px;color:white;font-size:11px;text-shadow:0 0 3px black">'
+            f'▶ {fmt_length(it["duration"])}</span></div>',
+            sanitize=False,
+        )
+        return box
 
     def suggest(self) -> None:
         self.trip.suggest_selection()
@@ -476,7 +479,7 @@ class Page:
     def card(self, it: dict) -> None:
         with ui.card().tight().classes("w-full" + ("" if it["included"] else " opacity-50")):
             if it["thumb"]:
-                ui.image(data_url(it["thumb"])).props("fit=contain").classes("w-full thumb bg-gray-800")
+                self.preview(it, "width:100%;height:150px", start=(it["duration"] or 0) * 0.3)
             else:
                 ui.label("Analysing…").classes("w-full thumb flex items-center justify-center bg-gray-100 text-gray-400")
             with ui.column().classes("p-2 gap-1 w-full"):
@@ -651,14 +654,16 @@ class Page:
                     ui.button(icon="arrow_upward", on_click=lambda p=it["path"]: self.move(p, -1)).props("flat dense round size=sm")
                     ui.label(str(n)).classes("text-xs text-gray-500")
                     ui.button(icon="arrow_downward", on_click=lambda p=it["path"]: self.move(p, 1)).props("flat dense round size=sm")
+                box = None
                 if it["thumb"]:
-                    ui.image(data_url(it["thumb"])).classes("w-32 h-20 object-cover rounded")
+                    start, end = self.kept_part(it) if it["kind"] == "video" else (0, None)
+                    box = self.preview(it, "width:160px;height:100px;flex:none", start, end)
                 with ui.column().classes("flex-grow gap-1"):
                     place = ", ".join(x for x in (it["place"], it["country"]) if x)
                     icon = "🎬" if it["kind"] == "video" else "📷"
                     ui.label(f"{icon} {fmt_time(it['taken_at'])}" + (f" · {place}" if place else "")).classes("text-sm")
                     if it["kind"] == "video":
-                        self.trim_control(it)
+                        self.trim_control(it, box)
                     else:
                         ui.label("Photo").classes("text-xs text-gray-500")
                 with ui.column().classes("gap-1 w-56"):
@@ -671,10 +676,14 @@ class Page:
                         ).props("dense options-dense").classes("w-full")
                     ui.button("Leave out", icon="remove_circle_outline", on_click=lambda p=it["path"]: self.leave_out(p)).props("flat dense size=sm")
 
-    def trim_control(self, it: dict) -> None:
+    def kept_part(self, it: dict) -> tuple[float, float]:
         item = MediaItem(path=Path(it["path"]), kind="video", taken_at=datetime.now(), duration=it["duration"],
                          trim_start=it["trim_start"], trim_end=it["trim_end"])
-        start, end = clip_range(item, self.settings_now())
+        return clip_range(item, self.settings_now())
+
+    def trim_control(self, it: dict, box: str | None) -> None:
+        start, end = self.kept_part(it)
+        kept = {"min": round(start, 1), "max": round(end, 1)}
         label = ui.label().classes("text-xs text-gray-600")
 
         def show(lo: float, hi: float) -> None:
@@ -683,8 +692,17 @@ class Page:
         show(start, end)
         ui.range(
             min=0, max=round(it["duration"], 1), step=0.1, value={"min": round(start, 1), "max": round(end, 1)},
-            on_change=lambda e, p=it["path"]: (show(e.value["min"], e.value["max"]), self.trip.set_trim(p, e.value["min"], e.value["max"])),
+            on_change=lambda e: trimmed(e.value["min"], e.value["max"]),
         ).props("dense").classes("w-full")
+
+        def trimmed(lo: float, hi: float) -> None:
+            show(lo, hi)
+            self.trip.set_trim(it["path"], lo, hi)
+            # Play the part now kept: from its start, or its last 2 seconds when the end was moved.
+            from_ = lo if lo != kept["min"] or hi == kept["max"] else max(lo, hi - 2)
+            kept.update(min=lo, max=hi)
+            if box:
+                ui.run_javascript(f"tmPlayPart('{box}', {lo}, {hi}, {from_})")
 
     def set_chapters(self, on: bool) -> None:
         self.chapters = on
@@ -813,20 +831,56 @@ _served: dict[str, str] = {}
 # Plays a video preview while the mouse is over it, and stops it when the mouse leaves.
 HOVER_SCRIPT = """
 <script>
+// Hover a video preview to play it. It plays only from data-start to data-end, then starts again.
+function tmVideo(box) {
+  const v = box.querySelector('video');
+  if (!v.src) {
+    v.preload = 'auto';  // fetch it now so we can jump to the start of the part
+    v.src = v.dataset.src;
+    v.addEventListener('timeupdate', () => {
+      if (v.currentTime >= parseFloat(box.dataset.end) - 0.05) v.currentTime = parseFloat(box.dataset.start);
+    });
+    v.addEventListener('ended', () => { v.currentTime = parseFloat(box.dataset.start); v.play().catch(() => {}); });
+  }
+  const rot = parseInt(box.dataset.rot || '0');
+  if (rot === 90 || rot === 270) {  // turned sideways: swap the frame's width and height
+    const w = box.clientWidth, h = box.clientHeight;
+    Object.assign(v.style, {width: h + 'px', height: w + 'px', left: (w - h) / 2 + 'px', top: (h - w) / 2 + 'px', inset: 'auto'});
+  }
+  v.style.transform = rot ? `rotate(${rot}deg)` : '';
+  v.style.display = 'block';
+  return v;
+}
+function tmPlayFrom(box, from) {
+  const v = tmVideo(box);
+  const go = () => { v.currentTime = from; v.play().catch(() => {}); };
+  if (v.readyState >= 1) go(); else v.addEventListener('loadedmetadata', go, {once: true});
+}
+function tmStop(box) {
+  const v = box.querySelector('video');
+  v.pause();
+  v.style.display = 'none';
+}
+let tmPlaying = null;
+function tmPlayPart(id, start, end, from) {
+  const box = document.getElementById(id);
+  if (!box) return;
+  if (tmPlaying && tmPlaying !== box) tmStop(tmPlaying);
+  box.dataset.start = start; box.dataset.end = end;
+  tmPlaying = box;
+  tmPlayFrom(box, from);
+}
 document.addEventListener('mouseenter', (e) => {
   const box = e.target.closest && e.target.closest('.tm-hover');
   if (!box || e.target !== box) return;
-  const v = box.querySelector('video');
-  if (!v.src) v.src = v.dataset.src;
-  v.style.display = 'block';
-  v.play().catch(() => {});
+  if (tmPlaying && tmPlaying !== box) tmStop(tmPlaying);
+  tmPlaying = box;
+  tmPlayFrom(box, parseFloat(box.dataset.start));
 }, true);
 document.addEventListener('mouseleave', (e) => {
   const box = e.target.closest && e.target.closest('.tm-hover');
   if (!box || e.target !== box) return;
-  const v = box.querySelector('video');
-  v.pause();
-  v.style.display = 'none';
+  tmStop(box);
 }, true);
 </script>
 """

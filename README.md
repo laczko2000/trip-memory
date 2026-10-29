@@ -36,7 +36,8 @@ Nothing is uploaded anywhere.
 4. **People tab:** for each face group, pick a name you already used from the drop-down, or type a new one
    and press Enter. Picking an existing name joins the groups. **Unknown** hides strangers. Faces seen only
    once or twice are listed separately so you can check them, then **Mark all of these as Unknown**.
-5. **Storyboard tab:** change the order with the arrows, trim videos by dragging the ends of the bar, pick a
+5. **Storyboard tab:** change the order with the arrows, trim videos by dragging the ends of the bar (the preview
+   plays only the part you keep; hover over it to watch again), pick a
    transition for any cut, and switch day title cards ("Day 2 · Lisbon") on or off.
 6. **Make video tab:** choose transition, photo length, music, then **Make my video**. The file is saved in
    *Movies → Trip Memory*.
@@ -45,6 +46,7 @@ Everything runs on your Mac. Nothing is uploaded.
 
 ## What's new
 
+- **0.8:** hover-to-play in the Library and Storyboard too. In the Storyboard the preview plays only the part you keep, and moving the trim bar plays the new part straight away.
 - **0.7.1:** turn buttons both ways, the whole picture is shown in previews, and a message confirms each turn.
 - **0.7:** rotate button in Choose files and the Library, automatic upright fix for shots with faces.
 - **0.6:** Choose files grouped into stories and sets of similar shots, best-shot suggestion, hover-to-play.
