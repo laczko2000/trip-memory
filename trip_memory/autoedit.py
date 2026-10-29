@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from . import transitions
 from .beats import Beat
 from .motion import FPS as STEPS_PER_SECOND
 from .tools import ffmpeg_paths
@@ -29,6 +30,7 @@ class Shot:
     start: float = 0.0  # for videos: where the used part starts
     seconds: float = 0.0  # how long it is on screen (including its transition into the next shot)
     transition: str | None = None  # into the next shot; None = the default from Make video
+    why: str | None = None  # why that transition was suggested
 
 
 @dataclass
@@ -352,13 +354,24 @@ def plan_to_music(
     if not slots:
         return Plan(left_out=[r["path"] for r in rows], beat=song.beat)
 
-    # Soft transitions only inside calm music, where both shots are long enough for it to fit fully.
-    t = transition_seconds
-    for k in range(1, len(slots)):
-        a, b = slots[k - 1], slots[k]
-        same_section = abs(a.energy - b.energy) < 1e-9
-        slots[k].soft_before = same_section and a.energy < 0.38 and t <= 0.4 * a.seconds and t <= 0.4 * b.seconds
-    overlap = [t if s.soft_before else 1 / 30 for s in slots[1:]] + [0.0]  # into the next shot
+    # A suggested transition at every cut, from the music, the stories and the shots, each sized to fit.
+    beats_at = song.beat_times()
+    accents = np.asarray(getattr(song, "accents", None) or [], float)
+
+    def hit_at(t: float) -> float:
+        if len(accents) != len(beats_at) or not len(accents):
+            return 0.0
+        k = int(np.argmin(np.abs(beats_at - t)))
+        return float(accents[k]) if abs(beats_at[k] - t) < 0.06 else 0.0
+
+    cuts = [
+        transitions.Cut(before=candidates[picks[k - 1]], after=candidates[picks[k]],
+                        energy_before=slots[k - 1].energy, energy_after=slots[k].energy,
+                        room=0.4 * min(slots[k - 1].seconds, slots[k].seconds), hit=hit_at(slots[k].start))
+        for k in range(1, len(slots))
+    ]
+    chosen = transitions.recommend(cuts, transition_seconds)
+    overlap = [transitions.seconds_of(name, transition_seconds) for name, _ in chosen] + [0.0]  # into the next shot
 
     shots: list[Shot] = []
     begin = 0  # in video frames, where this shot starts
@@ -374,8 +387,9 @@ def plan_to_music(
             longest_start = max(0.0, (c["duration"] or seconds) - seconds)
             start = best_start(curve, c["duration"], seconds) if curve is not None else longest_start / 2
             start = min(max(0.0, start), longest_start)
-        transition = None if k == len(slots) - 1 else (soft_transition if slots[k + 1].soft_before else HARD_CUT)
-        shots.append(Shot(path=c["path"], kind=c["kind"], start=round(start, 2), seconds=seconds, transition=transition))
+        transition, why = chosen[k] if k < len(chosen) else (None, None)
+        shots.append(Shot(path=c["path"], kind=c["kind"], start=round(start, 2), seconds=seconds, transition=transition,
+                          why=why))
     used = {s.path for s in shots}
     length = begin / 30
     return Plan(shots=shots, left_out=[r["path"] for r in rows if r["path"] not in used], length=length, beat=song.beat)

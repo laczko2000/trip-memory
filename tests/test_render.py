@@ -112,5 +112,5 @@ def test_joining_survives_clips_that_start_late_or_use_another_clock(tmp_path):
     segments = [tmp_path / n for n in ("a.mp4", "b.mp4", "c.mp4", "a.mp4")]
     out = tmp_path / "out.mp4"
     settings = RenderSettings(width=320, height=180, transition_seconds=0.8)
-    _join(segments, [_segment_length(s) for s in segments], [None, "fade", None], settings, out, lambda _f: None)
+    _join(segments, [_segment_length(s) for s in segments], [(None, 0.8), ("fade", 0.8), (None, 0.8)], settings, out, lambda _f: None)
     assert abs(float(probe(str(out))["format"]["duration"]) - (12 - 0.8 - 2 / 30)) < 0.3

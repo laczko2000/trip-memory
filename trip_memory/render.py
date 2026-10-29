@@ -23,21 +23,11 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 from .media import MediaItem
+from .transitions import MIXED, STYLES, seconds_of
 from .tools import FFmpegError, has_encoder, has_filter, probe, run_ffmpeg
 
 # Friendly name -> FFmpeg xfade transition. None means a hard cut.
-TRANSITIONS: dict[str, str | None] = {
-    "Fade": "fade",
-    "Fade through black": "fadeblack",
-    "Dissolve": "dissolve",
-    "Slide": "slideleft",
-    "Wipe": "wipeleft",
-    "Circle": "circleopen",
-    "Zoom": "zoomin",
-    "Mixed": "mixed",
-    "None (hard cut)": None,
-}
-MIXED = ["fade", "slideleft", "circleopen", "dissolve", "wipeleft", "fadeblack", "zoomin", "slideup"]
+TRANSITIONS: dict[str, str | None] = {name: style.xfade for name, style in STYLES.items()}
 
 FPS = 30
 AUDIO = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
@@ -357,16 +347,19 @@ def render(
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def _transition_between(before: MediaItem, k: int, s: RenderSettings) -> str | None:
-    """The FFmpeg transition into clip k: the one you picked after the previous clip, else the default."""
-    style = TRANSITIONS.get(before.transition or s.transition, "fade")
-    return MIXED[(k - 1) % len(MIXED)] if style == "mixed" else style
+def _transition_between(before: MediaItem, k: int, s: RenderSettings) -> tuple[str | None, float]:
+    """The FFmpeg transition into clip k and how long it lasts: the one set after the previous clip, else the
+    default."""
+    name = before.transition or s.transition
+    style = TRANSITIONS.get(name, "fade")
+    seconds = seconds_of(name if name in TRANSITIONS else "Fade", s.transition_seconds)
+    return (MIXED[(k - 1) % len(MIXED)] if style == "mixed" else style), seconds
 
 
 def _join(
     segments: list[Path],
     lengths: list[float],
-    styles: list[str | None],
+    styles: list[tuple[str | None, float]],
     s: RenderSettings,
     out: Path,
     progress: Callable[[float], None],
@@ -386,9 +379,9 @@ def _join(
     # all cuts the same way keeps their timing predictable, e.g. for cutting on the music's beat.)
     v_prev, a_prev, offset, total = "sv0", "sa0", 0.0, lengths[0]
     for k in range(1, n):
-        style = styles[k - 1]
+        style, seconds = styles[k - 1]
         # A transition is never longer than ~40% of either clip.
-        t = min(s.transition_seconds, lengths[k - 1] * 0.4, lengths[k] * 0.4) if style else 1 / FPS
+        t = min(seconds, lengths[k - 1] * 0.4, lengths[k] * 0.4) if style else 1 / FPS
         offset = total - t
         parts.append(f"[{v_prev}][sv{k}]xfade=transition={style or 'fade'}:duration={t:.3f}:offset={offset:.3f}[v{k}]")
         parts.append(f"[{a_prev}][sa{k}]acrossfade=d={t:.3f}[a{k}]")

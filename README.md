@@ -58,6 +58,7 @@ Everything runs on your Mac. Nothing is uploaded.
 
 ## What's new
 
+- **0.18:** Auto-edit now suggests a transition for every cut, with the reason under it (for example "Next story: Deer", "The music lifts here", "A fast camera move: a whip pan"). New quick effects: Flash, Whip left/right/up, Zoom punch, Blur, Pixelate, plus Dip to white, Smooth wipe and Radial. Change any of them in the Storyboard. Also fixed: ticking *In the video* in the Library now adds the file straight away, in time order, and counts it in the video length.
 - **0.17:** a new *Music* tab: play your song and tap the right Shift key wherever you want a cut. Play it back to hear a click at every pin, drag pins to move them, click one and press delete to remove it. *Snap to the music* moves each pin onto the exact hit, *These are final* makes Auto-edit cut exactly there (Cut on: My taps). After your last pin the app cuts the rest by itself.
 - **0.16:** photos glide smoothly instead of flickering, and move more: each one zooms in, zooms out or pans sideways (tall photos only zoom), so a row of photos feels varied.
 - **0.15:** the app now hears which beats hit hardest (drums, bass, cymbals), shown as red marks over the song. A new *Cut on* choice in Auto-edit: *Strong beats* (the default), *Bass hits*, *Big moments only* (few, long shots) or *Every few beats* (the old steady count).

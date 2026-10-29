@@ -506,7 +506,7 @@ class Page:
         self.gallery.refresh()
 
     def card(self, it: dict) -> None:
-        with ui.card().tight().classes("w-full" + ("" if it["included"] else " opacity-50")):
+        with ui.card().tight().classes("w-full" + ("" if it["included"] else " opacity-50")) as card:
             if it["thumb"]:
                 self.preview(it, "width:100%;height:150px", start=(it["duration"] or 0) * 0.3)
             else:
@@ -514,8 +514,8 @@ class Page:
             with ui.column().classes("p-2 gap-1 w-full"):
                 icon = "🎬 " + fmt_length(it["duration"]) if it["kind"] == "video" else "📷"
                 ui.label(f"{icon} · {fmt_time(it['taken_at'])}").classes("text-xs text-gray-600")
-                if it["included"] and it["cut_out"]:
-                    ui.label("✂ Selected, but not in the current Auto-edit cut").classes("text-xs text-orange-700")
+                cut_note = ui.label("✂ Selected, but not in the current Auto-edit cut").classes("text-xs text-orange-700")
+                cut_note.visible = bool(it["included"] and it["cut_out"])
                 place = ", ".join(x for x in (it["place"], it["country"]) if x) or "Unknown place"
                 if it["place_guessed"]:
                     ui.label(f"📍 {place} (guessed from photos taken around then)").classes("text-xs text-gray-500")
@@ -550,7 +550,7 @@ class Page:
                     ui.checkbox(
                         "In the video",
                         value=bool(it["included"]),
-                        on_change=lambda e, path=it["path"]: self.toggle(path, e.value),
+                        on_change=lambda e, path=it["path"], card=card, note=cut_note: self.toggle(path, e.value, card, note),
                     ).props("dense")
                     with ui.row().classes("gap-0 no-wrap"):
                         rotate_buttons(lambda degrees, path=it["path"]: self.rotate(path, degrees))
@@ -567,13 +567,21 @@ class Page:
         self.filters_view.refresh()
         self.gallery.refresh()
 
-    def toggle(self, path: str, included: bool) -> None:
+    def toggle(self, path: str, included: bool, card: ui.card | None = None, note: ui.label | None = None) -> None:
+        """Put a file in the video or take it out; it shows at once (and counts in the video's length)."""
         self.trip.set_included([path], included)
         for it in self.items:
             if it["path"] == path:
-                it["included"] = int(included)
+                it["included"], it["cut_out"] = int(included), 0
+        if card is not None:
+            card.classes(remove="opacity-50") if included else card.classes(add="opacity-50")
+        if note is not None:
+            note.visible = False
+        if included:
+            ui.notify("Added to the video. It's in the Storyboard, in time order.", type="positive", timeout=2000)
         self.video_summary.refresh()
         self.storyboard_view.refresh()
+        self.stories_view.refresh()
 
     # ---------- People ----------
 
@@ -1077,13 +1085,20 @@ class Page:
                         ui.label(f"Photo · {it['seconds']:.1f} s" if it["seconds"] else "Photo").classes("text-xs text-gray-500")
                 with ui.column().classes("gap-1 w-56"):
                     if not last:
+                        why = ui.label()
                         ui.select(
                             [DEFAULT_TRANSITION, *TRANSITIONS],
                             value=it["transition"] or DEFAULT_TRANSITION,
                             label="Transition after",
-                            on_change=lambda e, p=it["path"]: self.trip.set_transition(p, None if e.value == DEFAULT_TRANSITION else e.value),
-                        ).props("dense options-dense").classes("w-full")
+                            on_change=lambda e, p=it["path"], why=why: self.choose_transition(p, e.value, why),
+                        ).props("dense options-dense").classes("w-full").move(target_index=0)
+                        why.text = f"💡 {it['transition_why']}" if it.get("transition_why") else ""
+                        why.classes("text-xs text-gray-500")
                     ui.button("Leave out", icon="remove_circle_outline", on_click=lambda p=it["path"]: self.leave_out(p)).props("flat dense size=sm")
+
+    def choose_transition(self, path: str, value: str, why: ui.label) -> None:
+        self.trip.set_transition(path, None if value == DEFAULT_TRANSITION else value)
+        why.text = "Your choice"
 
     def kept_part(self, it: dict) -> tuple[float, float]:
         item = MediaItem(path=Path(it["path"]), kind="video", taken_at=datetime.now(), duration=it["duration"],

@@ -86,7 +86,8 @@ CREATE TABLE IF NOT EXISTS items (
     subjects TEXT,
     faces_done INTEGER DEFAULT 0,
     scene_done INTEGER DEFAULT 0,
-    tags_done INTEGER DEFAULT 0
+    tags_done INTEGER DEFAULT 0,
+    transition_why TEXT
 );
 CREATE TABLE IF NOT EXISTS story_info (
     key TEXT PRIMARY KEY,  -- the story's first file
@@ -152,6 +153,7 @@ class Trip:
             "tags TEXT", "tags_user TEXT", "motion_action REAL", "motion_camera REAL", "motion_shake REAL",
             "look_group INTEGER", "tags_done INTEGER DEFAULT 0", "seconds REAL", "curves TEXT",
             "clip_sound INTEGER DEFAULT 0", "clip_volume REAL DEFAULT 1.0", "cut_out INTEGER DEFAULT 0", "subjects TEXT",
+            "transition_why TEXT",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
@@ -265,7 +267,15 @@ class Trip:
         rows = [it for it in items if it["chosen"] and it["included"] and not it["cut_out"] and it["path"] not in off]
         placed = sorted((r for r in rows if r["position"] is not None), key=lambda r: r["position"])
         rest = sorted((r for r in rows if r["position"] is None), key=lambda r: (rank.get(r["path"], 0), r["taken_at"]))
-        return placed + rest
+        # Anything not placed yet goes in by story and time: after the last placed file that comes before it.
+        for r in rest:
+            key = (rank.get(r["path"], 0), r["taken_at"])
+            at = 0
+            for i, p in enumerate(placed):
+                if (rank.get(p["path"], 0), p["taken_at"]) <= key:
+                    at = i + 1
+            placed.insert(at, r)
+        return placed
 
     def media_items(self, chapters: bool = False) -> list[MediaItem]:
         """What the video is made from, in storyboard order, optionally with a title card for each day."""
@@ -316,7 +326,9 @@ class Trip:
     def set_included(self, paths: list[str], included: bool) -> None:
         with self._lock:
             # Your own choice also overrides an earlier Auto-edit leaving the file out.
-            self.db.executemany("UPDATE items SET included = ?, cut_out = 0 WHERE path = ?", [(int(included), p) for p in paths])
+            # Put back in: it slots into the storyboard by time (see storyboard()).
+            self.db.executemany("UPDATE items SET included = ?, cut_out = 0, position = NULL WHERE path = ?",
+                                [(int(included), p) for p in paths])
             self.db.commit()
 
     def set_chosen(self, paths: list[str], chosen: bool) -> None:
@@ -373,7 +385,7 @@ class Trip:
             if story["enabled"]:
                 for r in story["items"]:
                     if r["chosen"] and r["included"]:
-                        pool.append(r | {"story_rank": rank})
+                        pool.append(r | {"story_rank": rank, "story_name": story["name"]})
         return pool
 
     def auto_edit_to_music(
@@ -428,8 +440,8 @@ class Trip:
                 trim = (shot.start, shot.start + shot.seconds) if shot.kind == "video" else (None, None)
                 self.db.execute(
                     "UPDATE items SET cut_out = 0, position = ?, trim_start = ?, trim_end = ?, transition = ?, "
-                    "seconds = ? WHERE path = ?",
-                    (shot_no, *trim, shot.transition, shot.seconds if shot.kind == "photo" else None, shot.path),
+                    "transition_why = ?, seconds = ? WHERE path = ?",
+                    (shot_no, *trim, shot.transition, shot.why, shot.seconds if shot.kind == "photo" else None, shot.path),
                 )
             # Left out of this cut, but still in your selection, so the next Auto-edit can use it again.
             self.db.executemany("UPDATE items SET cut_out = 1, position = NULL WHERE path = ?", [(p,) for p in result.left_out])
@@ -468,7 +480,7 @@ class Trip:
             self.execute("UPDATE items SET clip_sound = ?, clip_volume = ? WHERE path = ?", (int(on), volume, path))
 
     def set_transition(self, path: str, transition: str | None) -> None:
-        self.execute("UPDATE items SET transition = ? WHERE path = ?", (transition, path))
+        self.execute("UPDATE items SET transition = ?, transition_why = NULL WHERE path = ?", (transition, path))
 
     def set_scene(self, path: str, scene: str | None) -> None:
         self.execute("UPDATE items SET scene_user = ? WHERE path = ?", (scene, path))

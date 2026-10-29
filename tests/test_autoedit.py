@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from trip_memory import autoedit
+from trip_memory import autoedit, transitions
 from trip_memory.songmap import Section, SongMap
 
 
@@ -64,10 +64,11 @@ def test_action_goes_to_lively_music_and_cuts_stay_on_the_beat():
     for k, shot in enumerate(plan.shots):
         start = begin
         assert shot.seconds <= 4.0 + 0.8 + 0.05
-        end_mid = begin + shot.seconds - (0 if k == len(plan.shots) - 1 else (0.8 if shot.transition == "Fade" else 1 / 30)) / 2
+        lap = 0 if k == len(plan.shots) - 1 else transitions.seconds_of(shot.transition, 0.8)
+        end_mid = begin + shot.seconds - lap / 2
         assert abs(end_mid / 0.5 - round(end_mid / 0.5)) * 0.5 < 0.02  # each cut on a beat
         (lively_actions if 16 <= start + 0.1 < 32 else calm_actions).append(by_path[shot.path]["motion_action"])
-        begin += shot.seconds - (0.8 if shot.transition == "Fade" else 1 / 30)
+        begin += shot.seconds - lap
     assert np.mean(lively_actions) > 15 and np.mean(calm_actions) < 5
     times = [by_path[s.path]["taken_at"] for s in plan.shots]
     assert times == sorted(times)  # still in time order
@@ -126,3 +127,18 @@ def test_cuts_follow_your_taps_then_the_music():
     assert all(s.seconds <= 6.0 * 1.03 for s in slots)
     assert abs(slots[-1].end - 40.0) < 1e-6
     assert any(abs(s.start - 16) < 1e-6 for s in slots)  # after your last tap, the music's own changes again
+
+
+def test_transitions_are_suggested_with_a_reason():
+    rows = [_clip(n, action=20.0 if 8 <= n < 24 else 0.5, camera=1.5) for n in range(40)]
+    for r in rows:
+        r["story"] = r["story_rank"] = 0 if int(r["path"][-6:-4]) < 20 else 1
+        r["story_name"] = "Deer" if r["story"] else "Running in the park"
+    plan = autoedit.plan_to_music(rows, {}, _song(), autoedit.Limits(max_video=4.0, max_photo=2.0, min_shot=1.0),
+                                  None, 0.8, "Fade")
+    cuts = plan.shots[:-1]
+    assert all(s.transition in transitions.STYLES and s.why for s in cuts)
+    assert any(s.why == "Next story: Deer" for s in cuts)
+    assert any(s.transition == transitions.HARD_CUT for s in cuts)  # mostly clean cuts on the beat
+    assert len({s.transition for s in cuts}) >= 3  # but not one and the same everywhere
+    assert plan.shots[-1].transition is None
