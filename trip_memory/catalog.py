@@ -568,6 +568,14 @@ class Trip:
         notify()
         self._name_places()
 
+        # A preview made before its file was turned shows it the old way round (the video itself is turned):
+        # make those again, so the preview always matches what plays and what goes into the video.
+        stale = [r["path"] for r in self.query("SELECT path, thumb, rotation FROM items WHERE thumb IS NOT NULL")
+                 if not r["thumb"].endswith(f"_{r['rotation'] or 0}.jpg") or not Path(r["thumb"]).exists()]
+        if stale:
+            with self._lock:
+                self.db.executemany("UPDATE items SET thumb = NULL WHERE path = ?", [(path,) for path in stale])
+                self.db.commit()
         todo = self.query("SELECT path, kind, duration, rotation FROM items WHERE thumb IS NULL ORDER BY taken_at")
         for i, row in enumerate(todo):
             p.fraction = i / len(todo)

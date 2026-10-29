@@ -294,3 +294,21 @@ def test_stories_are_named_ordered_and_switched(tmp_path, monkeypatch):
     trip.set_story_enabled(stories[0]["key"], False)
     assert [r["path"][-5:] for r in trip.storyboard()] == ["b.jpg"]
     assert [r["path"][-5:] for r in trip.auto_edit_pool()] == ["b.jpg"]
+
+
+def test_previews_made_before_a_turn_are_made_again(tmp_path):
+    from PIL import Image
+    from trip_memory.catalog import Trip
+
+    trip = tmp_path / "trip"
+    trip.mkdir()
+    Image.new("RGB", (60, 40), "red").save(trip / "a.jpg")
+    t = Trip(trip)
+    t.prepare()
+    path = t.items()[0]["path"]
+    t.execute("UPDATE items SET rotation = 90 WHERE path = ?", (path,))  # turned, but the preview is still the old one
+    t.prepare()
+    item = t.items()[0]
+    assert item["thumb"].endswith("_90.jpg")
+    with Image.open(item["thumb"]) as img:
+        assert img.height > img.width

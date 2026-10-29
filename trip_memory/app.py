@@ -552,7 +552,10 @@ class Page:
                         value=bool(it["included"]),
                         on_change=lambda e, path=it["path"], card=card, note=cut_note: self.toggle(path, e.value, card, note),
                     ).props("dense")
-                    with ui.row().classes("gap-0 no-wrap"):
+                    with ui.row().classes("gap-0 no-wrap items-center"):
+                        if it["rotation"]:
+                            ui.label(f"↻ {it['rotation']}°").classes("text-xs text-orange-700") \
+                                .tooltip("Turned by the app or by you; use the arrows to change it")
                         rotate_buttons(lambda degrees, path=it["path"]: self.rotate(path, degrees))
 
     def set_tags(self, path: str, tags: list[str]) -> None:

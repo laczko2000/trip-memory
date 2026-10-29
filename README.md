@@ -58,6 +58,7 @@ Everything runs on your Mac. Nothing is uploaded.
 
 ## What's new
 
+- **0.21.4:** previews made before a file was turned are made again when the trip opens, so the Library shows each file the way it plays and goes into the video. Turned files show a small ↻ 90° label.
 - **0.21.3:** fixed finished videos stopping half way when the new quick transitions were used: every transition now starts and ends exactly on a frame.
 - **0.21.2:** if a finished video ever comes out shorter than planned, the app now tries again by itself (on the main processor, then with every clip re-made in one plain format) and saves a report next to the video.
 - **0.21.1:** the Storyboard is one long list you scroll through, with no pages.
