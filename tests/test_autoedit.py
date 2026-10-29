@@ -161,3 +161,18 @@ def test_storyline_has_a_teaser_openers_and_a_calm_ending():
         assert a["look_group"] != b["look_group"] or a["story"] != b["story"]
     assert sorted(paths) == sorted(r["path"] for r in rows)  # every shot is still there
     assert [r["path"] for r in autoedit.arrange(autoedit.choose(rows), "date")] == sorted(paths)
+
+
+def test_speed_effects():
+    rows = [_clip(n, action=0.2, camera=1.5) for n in range(20)]  # calm, cinematic views
+    rows += [_clip(20 + n, action=0.5, camera=0.0) for n in range(30)]  # calm shots, also used in lively music
+    limits = autoedit.Limits(max_video=4.0, max_photo=2.0, min_shot=1.0, storyline="date")
+    plan = autoedit.plan_to_music(rows, {}, _song(), limits, None, 0.8, "Fade")
+    calm = [s for s in plan.shots if s.speed < 1]
+    fast = [s for s in plan.shots if s.speed > 1]
+    assert calm and all(s.speed_why for s in calm)
+    assert fast and all(s.speed_why == "Sped up to match the lively music" for s in fast)
+    off = autoedit.plan_to_music(rows, {}, _song(), autoedit.Limits(max_video=4.0, max_photo=2.0, min_shot=1.0,
+                                                                     storyline="date", speed_effects=False),
+                                 None, 0.8, "Fade")
+    assert all(s.speed == 1.0 for s in off.shots)

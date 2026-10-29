@@ -929,6 +929,8 @@ class Page:
                     "beats": "Cuts on a steady count of beats, lined up with the bars.",
                     "taps": "Cuts exactly on the pins you tapped in the Music tab.",
                 }.get(limits.cut_on, "")).classes("text-sm text-gray-600")
+            ui.switch("Speed effects: slow motion in calm, cinematic moments; slow shots sped up in lively music",
+                      value=limits.speed_effects, on_change=lambda e: self.set_limit("speed_effects", e.value))
             ui.label({
                 "teaser": "Storyline: opens with a quick teaser of the most exciting shots, then tells each story; every "
                           "story starts with a wide, calm view, look-alike shots never come back to back, and the "
@@ -1091,7 +1093,9 @@ class Page:
                     ui.label(f"{icon} {fmt_time(it['taken_at'])}" + (f" · {place}" if place else "")).classes("text-sm")
                     if it["kind"] == "video":
                         self.trim_control(it, box)
-                        self.sound_control(it)
+                        with ui.row().classes("items-center gap-4"):
+                            self.sound_control(it)
+                            self.speed_control(it)
                     else:
                         ui.label(f"Photo · {it['seconds']:.1f} s" if it["seconds"] else "Photo").classes("text-xs text-gray-500")
                 with ui.column().classes("gap-1 w-56"):
@@ -1121,7 +1125,7 @@ class Page:
         if not it["has_audio"]:
             ui.label("🔇 This clip has no sound").classes("text-xs text-gray-400")
             return
-        with ui.row().classes("items-center gap-3 w-full no-wrap"):
+        with ui.row().classes("items-center gap-3 no-wrap"):
             volume = round(100 * (1.0 if it["clip_volume"] is None else it["clip_volume"]))
 
             def switch(on: bool) -> None:
@@ -1146,7 +1150,11 @@ class Page:
         label = ui.label().classes("text-xs text-gray-600")
 
         def show(lo: float, hi: float) -> None:
-            label.text = f"Keeping {fmt_length(lo)} to {fmt_length(hi)} ({hi - lo:.1f} s of {fmt_length(it['duration'])})"
+            speed = it.get("speed") or 1.0
+            label.text = f"Keeping {fmt_length(lo)} to {fmt_length(hi)} ({hi - lo:.1f} s of {fmt_length(it['duration'])})" + (
+                f" · {(hi - lo) / speed:.1f} s on screen at {speed:g}×" if abs(speed - 1) > 1e-3 else "")
+
+        it["_show_trim"] = lambda: show(*self.kept_part(it))
 
         show(start, end)
         ui.range(
@@ -1162,6 +1170,23 @@ class Page:
             kept.update(min=lo, max=hi)
             if box:
                 ui.run_javascript(f"tmPlayPart('{box}', {lo}, {hi}, {from_})")
+
+    def speed_control(self, it: dict) -> None:
+        speeds = {0.5: "0.5× slow motion", 0.75: "0.75× slower", 1.0: "1× normal speed", 1.5: "1.5× faster", 2.0: "2× fast"}
+        speed = min(speeds, key=lambda v: abs(v - (it.get("speed") or 1.0)))
+        column = ui.column().classes("gap-0")
+        with column:
+            why = ui.label(f"💡 {it['speed_why']}" if it.get("speed_why") else "").classes("text-xs text-gray-500")
+
+        def changed(value: float) -> None:
+            self.trip.set_speed(it["path"], value)
+            it["speed"] = value
+            why.text = ""
+            it["_show_trim"]()
+
+        with column:
+            ui.select(speeds, value=speed, on_change=lambda e: changed(e.value)).props("dense options-dense") \
+                .classes("w-40").move(target_index=0)
 
     def move(self, path: str, steps: int) -> None:
         self.trip.move(path, steps)

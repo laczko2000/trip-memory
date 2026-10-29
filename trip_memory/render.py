@@ -114,13 +114,17 @@ def clip_range(item: MediaItem, s: RenderSettings) -> tuple[float, float]:
 
 def _video_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
     start, end = clip_range(item, s)
-    length = end - start
+    speed = min(2.0, max(0.5, item.speed or 1.0))  # the range the sound can follow too
+    length = (end - start) / speed  # on screen
     pre = (_hdr_to_sdr() if item.hdr else "") + rotate_filter(item.rotation)
+    if abs(speed - 1) > 1e-3:
+        pre = f"setpts=(PTS-STARTPTS)/{speed:.4f}," + pre  # slow motion or sped up
     graph = f"[0:v]{pre}format=yuv420p[src];" + _fit_with_blur("src", s.width, s.height, "fit")
     graph += f";[fit]fps={FPS},format=yuv420p[v]"
-    inputs = ["-ss", f"{start:.3f}", "-t", f"{length:.3f}", "-i", str(item.path)]
+    inputs = ["-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", str(item.path)]
     if item.has_audio and item.sound and s.keep_clip_sound:
-        graph += f";[0:a]aformat=sample_rates=48000:channel_layouts=stereo,volume={item.volume * s.clip_volume:.2f}[a]"
+        tempo = f"atempo={speed:.4f}," if abs(speed - 1) > 1e-3 else ""  # the sound keeps its pitch
+        graph += f";[0:a]{tempo}aformat=sample_rates=48000:channel_layouts=stereo,volume={item.volume * s.clip_volume:.2f}[a]"
     else:
         inputs += ["-f", "lavfi", "-t", f"{length:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
         graph += ";[1:a]anull[a]"
@@ -268,7 +272,8 @@ def _segment_key(item: MediaItem, s: RenderSettings) -> str:
     elif item.kind == "title":
         parts += [item.title]
     else:
-        parts += [clip_range(item, s), item.has_audio and item.sound and s.keep_clip_sound, item.volume * s.clip_volume]
+        parts += [clip_range(item, s), item.has_audio and item.sound and s.keep_clip_sound, item.volume * s.clip_volume,
+                  item.speed]
     return hashlib.sha1(repr(parts).encode()).hexdigest()[:20]
 
 

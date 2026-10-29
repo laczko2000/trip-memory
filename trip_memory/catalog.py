@@ -27,7 +27,7 @@ from .media import MediaItem, scan_folder
 from . import autoedit, motion, stories
 from .scenes import SceneTagger, mean_vector
 from .tags import TAG_GROUP, Tagger, group_name, look_alike_groups, people_tag, story_subject
-from .tools import ffmpeg_paths
+from .tools import ffmpeg_paths, probe
 
 
 def app_dir() -> Path:
@@ -88,7 +88,10 @@ CREATE TABLE IF NOT EXISTS items (
     scene_done INTEGER DEFAULT 0,
     tags_done INTEGER DEFAULT 0,
     transition_why TEXT,
-    camera_moves TEXT
+    camera_moves TEXT,
+    speed REAL DEFAULT 1.0,
+    speed_why TEXT,
+    fps REAL
 );
 CREATE TABLE IF NOT EXISTS story_info (
     key TEXT PRIMARY KEY,  -- the story's first file
@@ -154,7 +157,7 @@ class Trip:
             "tags TEXT", "tags_user TEXT", "motion_action REAL", "motion_camera REAL", "motion_shake REAL",
             "look_group INTEGER", "tags_done INTEGER DEFAULT 0", "seconds REAL", "curves TEXT",
             "clip_sound INTEGER DEFAULT 0", "clip_volume REAL DEFAULT 1.0", "cut_out INTEGER DEFAULT 0", "subjects TEXT",
-            "transition_why TEXT", "camera_moves TEXT",
+            "transition_why TEXT", "camera_moves TEXT", "speed REAL DEFAULT 1.0", "speed_why TEXT", "fps REAL",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
@@ -303,6 +306,7 @@ class Trip:
                     seconds=r["seconds"],
                     sound=bool(r["clip_sound"]),  # videos are silent unless you switch their sound on
                     volume=1.0 if r["clip_volume"] is None else r["clip_volume"],
+                    speed=r["speed"] or 1.0,
                 )
             )
         return result
@@ -403,6 +407,7 @@ class Trip:
 
         report = on_progress or (lambda _f, _m: None)
         rows = self.auto_edit_pool()
+        self._frame_rates(rows)
         scores = self._video_scores(rows, report)
         report(0.95, "Listening to the music")
         song = songmap.analyse(song_path, app_dir() / "music-maps")
@@ -411,6 +416,23 @@ class Trip:
         self._apply_plan(result)
         report(1.0, "Done")
         return result
+
+    def set_speed(self, path: str, speed: float) -> None:
+        """Play a video slower or faster; the same part of it is used, so it lasts longer or shorter."""
+        self.execute("UPDATE items SET speed = ?, speed_why = NULL WHERE path = ?", (speed, path))
+
+    def _frame_rates(self, rows: list[dict]) -> None:
+        """How many pictures a second each video has (high = smooth slow motion), looked up once."""
+        for r in rows:
+            if r["kind"] == "video" and r.get("fps") is None:
+                try:
+                    stream = next(st for st in probe(r["path"])["streams"] if st.get("codec_type") == "video")
+                    num, _, den = (stream.get("avg_frame_rate") or "30/1").partition("/")
+                    fps = float(num) / float(den or 1) if float(den or 1) else 30.0
+                except Exception:
+                    fps = 30.0
+                self.execute("UPDATE items SET fps = ? WHERE path = ?", (fps, r["path"]))
+                r["fps"] = fps
 
     def _video_scores(self, rows: list[dict], report) -> dict:
         videos = [r for r in rows if r["kind"] == "video"]
@@ -438,11 +460,12 @@ class Trip:
     def _apply_plan(self, result: autoedit.Plan) -> None:
         with self._lock:
             for shot_no, shot in enumerate(result.shots):
-                trim = (shot.start, shot.start + shot.seconds) if shot.kind == "video" else (None, None)
+                trim = (shot.start, shot.start + shot.seconds * shot.speed) if shot.kind == "video" else (None, None)
                 self.db.execute(
                     "UPDATE items SET cut_out = 0, position = ?, trim_start = ?, trim_end = ?, transition = ?, "
-                    "transition_why = ?, seconds = ? WHERE path = ?",
-                    (shot_no, *trim, shot.transition, shot.why, shot.seconds if shot.kind == "photo" else None, shot.path),
+                    "transition_why = ?, seconds = ?, speed = ?, speed_why = ? WHERE path = ?",
+                    (shot_no, *trim, shot.transition, shot.why, shot.seconds if shot.kind == "photo" else None,
+                     shot.speed, shot.speed_why, shot.path),
                 )
             # Left out of this cut, but still in your selection, so the next Auto-edit can use it again.
             self.db.executemany("UPDATE items SET cut_out = 1, position = NULL WHERE path = ?", [(p,) for p in result.left_out])
@@ -461,6 +484,7 @@ class Trip:
 
         report = on_progress or (lambda _f, _m: None)
         rows = self.auto_edit_pool()
+        self._frame_rates(rows)
         scores = self._video_scores(rows, report)
         length = target or 3600.0  # "use everything": it stops when the shots run out
         steady = SongMap(duration=length, bpm=120, period=0.5, first_beat=0.0, clear_beat=False, downbeat=0,

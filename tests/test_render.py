@@ -114,3 +114,15 @@ def test_joining_survives_clips_that_start_late_or_use_another_clock(tmp_path):
     settings = RenderSettings(width=320, height=180, transition_seconds=0.8)
     _join(segments, [_segment_length(s) for s in segments], [(None, 0.8), ("fade", 0.8), (None, 0.8)], settings, out, lambda _f: None)
     assert abs(float(probe(str(out))["format"]["duration"]) - (12 - 0.8 - 2 / 30)) < 0.3
+
+
+def test_slow_motion_and_speed_up_change_the_length(tmp_path):
+    trip = tmp_path / "trip"
+    trip.mkdir()
+    make_clip(trip / "a.mp4", "640x360", 2, "2025-07-03T10:00:00Z")
+    items, _ = scan_folder(trip)
+    settings = RenderSettings(width=320, height=180)
+    for speed, expected in ((0.5, 4.0), (1.5, 2 / 1.5)):
+        items[0].speed, items[0].sound = speed, True
+        out = render(items, settings, tmp_path / f"s{speed}.mp4")
+        assert abs(float(probe(str(out))["format"]["duration"]) - expected) < 0.15

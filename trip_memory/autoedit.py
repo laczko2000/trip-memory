@@ -31,6 +31,8 @@ class Shot:
     seconds: float = 0.0  # how long it is on screen (including its transition into the next shot)
     transition: str | None = None  # into the next shot; None = the default from Make video
     why: str | None = None  # why that transition was suggested
+    speed: float = 1.0  # 0.5 = slow motion, 1.5 = sped up
+    speed_why: str | None = None
 
 
 @dataclass
@@ -205,6 +207,7 @@ class Limits:
     min_shot: float = 1.0
     cut_on: str = "strong"  # which beats the cuts go on: a key of CUT_ON
     storyline: str = "teaser"  # how the shots are arranged: a key of STORYLINES
+    speed_effects: bool = True  # slow motion in calm moments, sped-up shots in lively ones
 
 
 @dataclass
@@ -366,6 +369,23 @@ def pace_of(row: dict) -> tuple[float, bool]:
     return (0.3 if cinematic else pace), cinematic
 
 
+SLOW, FAST_SPEED = 0.5, 1.5
+
+
+def speed_for(row: dict, slot: Slot, seconds: float) -> tuple[float, str | None]:
+    """Slow motion for a calm, cinematic moment in calm music; a speed-up for a slow shot in lively music."""
+    if row["kind"] != "video":
+        return 1.0, None
+    pace, cinematic = pace_of(row)
+    if slot.energy < 0.38 and (cinematic or pace < 0.35) and seconds >= 2.0:
+        if (row.get("fps") or 30) >= 50:
+            return SLOW, "Slow motion: a calm, cinematic moment"
+        return 0.75, "A little slower: a calm, cinematic moment"  # gentler, so normal videos stay smooth
+    if slot.energy >= 0.62 and pace < 0.45 and (row.get("duration") or 0) >= seconds * FAST_SPEED + 0.1:
+        return FAST_SPEED, "Sped up to match the lively music"
+    return 1.0, None
+
+
 def fill_slots(slots: list[Slot], candidates: list[dict], limits: Limits) -> list[int]:
     """Choose a shot for every slot, keeping the trip in time order, matching lively shots to lively music.
 
@@ -467,14 +487,16 @@ def plan_to_music(
         seconds = (finish - begin) / 30
         begin = finish - round(overlap[k] * 30)
         start = 0.0
+        speed, speed_why = speed_for(c, slot, seconds) if limits.speed_effects else (1.0, None)
         if c["kind"] == "video":
             curve = curves.get(c["path"])
-            longest_start = max(0.0, (c["duration"] or seconds) - seconds)
-            start = best_start(curve, c["duration"], seconds) if curve is not None else longest_start / 2
+            used = seconds * speed  # of the video itself
+            longest_start = max(0.0, (c["duration"] or used) - used)
+            start = best_start(curve, c["duration"], used) if curve is not None else longest_start / 2
             start = min(max(0.0, start), longest_start)
         transition, why = chosen[k] if k < len(chosen) else (None, None)
         shots.append(Shot(path=c["path"], kind=c["kind"], start=round(start, 2), seconds=seconds, transition=transition,
-                          why=why))
+                          why=why, speed=speed, speed_why=speed_why))
     used = {s.path for s in shots}
     length = begin / 30
     return Plan(shots=shots, left_out=[r["path"] for r in rows if r["path"] not in used], length=length, beat=song.beat)

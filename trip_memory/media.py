@@ -48,6 +48,7 @@ class MediaItem:
     seconds: float | None = None  # for photos: how long it is shown (None = the Make video setting)
     sound: bool = True  # for videos: use the clip's own sound
     volume: float = 1.0  # its loudness (1.0 = as recorded, up to 2.0)
+    speed: float = 1.0  # 0.5 = slow motion, 2 = twice as fast
     title: str | None = None  # for kind "title": the chapter card text, two lines split by "\n"
 
     @property
