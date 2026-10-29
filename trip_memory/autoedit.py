@@ -275,6 +275,7 @@ class Slot:
     end: float  # the cut after it
     energy: float  # how lively the music is here, 0..1
     soft_before: bool = False  # a soft transition (fade) into this slot instead of a hard cut
+    tapped: bool = False  # both its cuts are yours (Music tab): never joined with another, never cut shorter
 
     @property
     def seconds(self) -> float:
@@ -327,10 +328,12 @@ def music_slots(song, limits: Limits, end: float, longest: float | None = None) 
         if len(cuts) > 2 and cuts[-1] - cuts[-2] < limits.min_shot and cuts[-1] - cuts[-3] <= longest:
             cuts.pop(-2)
         slots += [Slot(a, b, section.energy) for a, b in zip(cuts, cuts[1:]) if b - a > 1e-3]
-    # Any piece still longer than allowed is split evenly on beats.
+    # Any piece still longer than allowed is split evenly on beats. (Between two of your taps: only if it is
+    # longer than your own limits; trying shorter pieces to fit more shots never adds cuts between your taps.)
     result: list[Slot] = []
     for s in slots:
-        pieces = int(np.ceil(s.seconds / (longest * 1.03)))
+        allowed = max(limits.max_video, limits.max_photo) if s.tapped else longest
+        pieces = int(np.ceil(s.seconds / (allowed * 1.03)))
         if pieces <= 1:
             result.append(s)
             continue
@@ -341,7 +344,7 @@ def music_slots(song, limits: Limits, end: float, longest: float | None = None) 
             cuts.append(float(inner[np.argmin(np.abs(inner - want))]) if len(inner) else want)
         cuts.append(s.end)
         cuts = sorted(set(cuts))
-        result += [Slot(a, b, s.energy) for a, b in zip(cuts, cuts[1:])]
+        result += [Slot(a, b, s.energy, tapped=s.tapped) for a, b in zip(cuts, cuts[1:])]
     return result
 
 
@@ -352,7 +355,7 @@ def _tap_slots(song, taps: list[float], end: float) -> list[Slot]:
         if 0.25 <= t - cuts[-1] and t < end - 0.25:
             cuts.append(float(t))
     cuts.append(end)
-    return [Slot(a, b, song.energy_at((a + b) / 2)) for a, b in zip(cuts, cuts[1:])]
+    return [Slot(a, b, song.energy_at((a + b) / 2), tapped=True) for a, b in zip(cuts, cuts[1:])]
 
 
 def _cuts_on_hits(song, limits: Limits, start: float, stop: float, n: int, longest: float) -> list[float] | None:
@@ -404,6 +407,7 @@ def merge_slots(slots: list[Slot], count: int, longest: float) -> list[Slot]:
             (slots[k].seconds + slots[k + 1].seconds, k)
             for k in range(len(slots) - 1)
             if slots[k].energy == slots[k + 1].energy and slots[k].seconds + slots[k + 1].seconds <= longest * 1.03
+            and not (slots[k].tapped or slots[k + 1].tapped)  # your own cuts always stay
         ]
         if not pairs:
             break
@@ -491,6 +495,8 @@ def fill_slots(slots: list[Slot], candidates: list[dict], limits: Limits) -> lis
             if c["kind"] == "video":
                 # Fits in the clip's longest good stretch (or, if that is very short, the clip as a whole).
                 room = c.get("usable") if (c.get("usable") or 0) >= limits.min_shot else c["duration"]
+                if slot.tapped:  # your cut comes first: the whole clip may be used, rather than lose the cut
+                    room = max(room or 0, c["duration"] or 0)
                 if (room or 0) < slot.seconds - 0.05 or slot.seconds > limits.max_video * 1.03 + 0.05:
                     continue
             elif slot.seconds > limits.max_photo * 1.03 + 0.05:

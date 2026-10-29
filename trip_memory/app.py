@@ -720,7 +720,7 @@ class Page:
             "and press Delete to remove it. Then let the app snap the pins onto the exact hits, and mark them final."
         ).classes("text-sm text-gray-600")
         ui.html(f'<audio id="tm-song" preload="auto" src="{serve_song(music)}" onloadedmetadata="tmTapDraw()" '
-                f'onplay="tmTapOnPlay()" onpause="tmTapDraw()"></audio>', sanitize=False)
+                f'onplay="tmTapOnPlay()" onpause="tmTapUnschedule(); tmTapDraw()"></audio>', sanitize=False)
         with ui.row().classes("w-full items-center gap-2"):
             ui.button("Play / pause", icon="play_arrow", on_click=lambda: ui.run_javascript("tmTapPlay()"))
             ui.button("5 s back", icon="replay_5", on_click=lambda: ui.run_javascript("tmTapSeek(-5)")).props("outline")
@@ -776,12 +776,12 @@ class Page:
         if not music or not pins:
             ui.notify("Place some pins first: play the song and tap the right Shift key.")
             return
-        snapped = await run.io_bound(song_taps.snap_song, music, [float(p) for p in pins])
-        moved = [abs(a - b) for a, b in zip(sorted(pins), snapped) if abs(a - b) > 0.005]
+        snapped, delay = await run.io_bound(song_taps.snap_song, music, [float(p) for p in pins])
         ui.run_javascript(f"tmTapSet({json.dumps(snapped)})")
-        ui.notify(f"Snapped {len(moved)} of {len(pins)} pins onto the hits" +
-                  (f" (moved {1000 * sum(moved) / len(moved):.0f} ms on average)" if moved else "") +
-                  ". Play it back to check.", type="positive")
+        habit = (f" You usually tap about {1000 * abs(delay):.0f} ms {'late' if delay > 0 else 'early'}; "
+                 "that is taken off every pin." if abs(delay) >= 0.02 else "")
+        ui.notify(f"Snapped {len(snapped)} pins onto the beats and hits.{habit} Play it back to check.",
+                  type="positive", multi_line=True, timeout=8000)
 
     async def save_taps(self, final: bool) -> None:
         music = self.music_path()
@@ -1661,7 +1661,7 @@ TAP_SCRIPT = """
 // The Music tab: play the song, press the RIGHT Shift key wherever you want a cut. Pins can be dragged,
 // selected and deleted; on playback every pin you pass makes a click so you hear where it is.
 window.tm = window.tm || {};
-tm.tap = {pins: [], sel: -1, view: 0, span: 0, last: 0, placed: -1, ctx: null, raf: 0, drag: -1};
+tm.tap = {pins: [], sel: -1, view: 0, span: 0, until: -1, ctx: null, raf: 0, drag: -1, osc: [], srcEl: null};
 
 function tmTapAudio() { return document.getElementById('tm-song'); }
 function tmTapVisible() { const tl = document.getElementById('tm-tl'); return tl && tl.offsetParent !== null; }
@@ -1670,12 +1670,12 @@ function tmTapVisible() { const tl = document.getElementById('tm-tl'); return tl
 function tmTapInit(pins, span) {
   const T = tm.tap;
   T.pins = (pins || []).slice().sort((a, b) => a - b);
-  T.sel = -1; T.view = 0; T.span = span || 0; T.placed = -1;
+  T.sel = -1; T.view = 0; T.span = span || 0; tmTapUnschedule();
   tmTapDraw();
 }
 function tmTapOnPlay() {
   const T = tm.tap, a = tmTapAudio();
-  tmTapCtx(); T.last = a.currentTime; cancelAnimationFrame(T.raf); tmTapLoop(); tmTapDraw();
+  tmTapCtx(); tmTapUnschedule(); cancelAnimationFrame(T.raf); tmTapLoop(); tmTapDraw();
 }
 // Listen on the whole page: the line itself is rebuilt whenever the screen refreshes or the tab opens.
 document.addEventListener('pointerdown', ev => { if (ev.target.closest && ev.target.closest('#tm-tl')) tmTapPointerDown(ev); });
@@ -1684,29 +1684,48 @@ window.addEventListener('pointerup', () => { if (tm.tap.drag >= 0) { tm.tap.drag
 // When the Music tab opens, draw the pins.
 setInterval(() => { const tl = document.getElementById('tm-tl'); if (tl && !tl.childElementCount) tmTapDraw(); }, 300);
 
+// The song plays through the same sound path as the clicks, so both reach your ears with the same delay.
 function tmTapCtx() {
-  if (!tm.tap.ctx) tm.tap.ctx = new (window.AudioContext || window.webkitAudioContext)();
-  if (tm.tap.ctx.state === 'suspended') tm.tap.ctx.resume();
+  const T = tm.tap, a = tmTapAudio();
+  if (!T.ctx) T.ctx = new (window.AudioContext || window.webkitAudioContext)();
+  if (T.ctx.state === 'suspended') T.ctx.resume();
+  if (a && T.srcEl !== a) {
+    try { T.ctx.createMediaElementSource(a).connect(T.ctx.destination); T.srcEl = a; } catch (e) { console.warn(e); }
+  }
+}
+// How long sound takes from the page to your ears (the sound card's own delay, as the browser reports it).
+function tmTapLatency() {
+  const c = tm.tap.ctx; if (!c || tm.tap.srcEl !== tmTapAudio()) return 0;
+  return (c.outputLatency || 0) + (c.baseLatency || 0);
 }
 
-// A short, bright "tick", easy to tell apart from the music.
-function tmTapClick(high) {
-  const ctx = tm.tap.ctx; if (!ctx) return;
+// A short, bright "tick", easy to tell apart from the music, at an exact moment on the sound card's clock.
+function tmTapClick(high, when) {
+  const T = tm.tap, ctx = T.ctx; if (!ctx) return;
+  const at = Math.max(ctx.currentTime, when || 0);
   const o = ctx.createOscillator(), g = ctx.createGain();
   o.type = 'square'; o.frequency.value = high ? 2200 : 1500;
-  g.gain.setValueAtTime(0.25, ctx.currentTime);
-  g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.06);
-  o.connect(g); g.connect(ctx.destination); o.start(); o.stop(ctx.currentTime + 0.07);
+  g.gain.setValueAtTime(0.25, at);
+  g.gain.exponentialRampToValueAtTime(0.001, at + 0.06);
+  o.connect(g); g.connect(ctx.destination); o.start(at); o.stop(at + 0.07);
+  if (!high) { T.osc.push(o); o.onended = () => { T.osc = T.osc.filter(x => x !== o); }; }
+}
+function tmTapUnschedule() {
+  const T = tm.tap;
+  T.osc.forEach(o => { try { o.stop(); } catch (e) {} });
+  T.osc = []; T.until = -1;
 }
 
+// Clicks are booked a quarter of a second ahead on the sound card's clock, so they land exactly on the pins
+// (not whenever the screen happens to redraw).
 function tmTapLoop() {
   const T = tm.tap, a = tmTapAudio();
   if (!a || a.paused) return;
-  const now = a.currentTime;
-  if (now > T.last && now - T.last < 0.5) {
-    T.pins.forEach((p, i) => { if (p > T.last && p <= now && i !== T.placed) tmTapClick(false); });
-  }
-  T.last = now;
+  const now = a.currentTime, rate = a.playbackRate || 1;
+  if (T.until < 0 || T.until < now - 0.3 || T.until > now + 1) T.until = now;  // just started, or jumped
+  const ahead = now + 0.25;
+  if (T.ctx) T.pins.forEach(p => { if (p > T.until && p <= ahead) tmTapClick(false, T.ctx.currentTime + (p - now) / rate); });
+  T.until = ahead;
   if (T.span && (now < T.view || now > T.view + T.span * 0.9)) T.view = Math.max(0, now - T.span * 0.1);
   tmTapDraw();
   T.raf = requestAnimationFrame(tmTapLoop);
@@ -1757,7 +1776,7 @@ function tmTapTimeAt(ev) {
 function tmTapPointerDown(ev) {
   const T = tm.tap, pin = ev.target.closest('[data-pin]');
   if (pin) { T.sel = T.drag = parseInt(pin.dataset.pin); ev.preventDefault(); }
-  else { T.sel = -1; const a = tmTapAudio(); if (a) { a.currentTime = tmTapTimeAt(ev); T.last = a.currentTime; } }
+  else { T.sel = -1; const a = tmTapAudio(); if (a) { a.currentTime = tmTapTimeAt(ev); tmTapUnschedule(); } }
   tmTapDraw();
 }
 
@@ -1772,25 +1791,26 @@ document.addEventListener('keydown', ev => {
   if (!tmTapVisible()) return;
   const T = tm.tap, a = tmTapAudio();
   if (ev.code === 'ShiftRight' && a && !ev.repeat) {
-    const t = a.currentTime;
+    // Where the song was when you HEARD it: take off the sound card's delay and the time since the key went down.
+    const waited = Math.min(0.2, Math.max(0, (performance.now() - ev.timeStamp) / 1000));
+    const t = Math.max(0, a.currentTime - (a.paused ? 0 : tmTapLatency() + waited));
     T.pins.push(t); T.pins.sort((x, y) => x - y);
-    T.placed = T.pins.indexOf(t);
     tmTapClick(true);
     tmTapDraw();
     ev.preventDefault();
   } else if ((ev.key === 'Delete' || ev.key === 'Backspace') && T.sel >= 0 && !['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
-    T.pins.splice(T.sel, 1); T.sel = -1; T.placed = -1; tmTapDraw(); ev.preventDefault();
+    T.pins.splice(T.sel, 1); T.sel = -1; tmTapUnschedule(); tmTapDraw(); ev.preventDefault();
   }
 });
 
 function tmTapPlay() { const a = tmTapAudio(); if (!a) return; tmTapCtx(); if (a.paused) a.play(); else a.pause(); }
-function tmTapSeek(by) { const a = tmTapAudio(); if (!a) return; a.currentTime = Math.max(0, a.currentTime + by); tm.tap.last = a.currentTime; tmTapDraw(); }
-function tmTapStart() { const a = tmTapAudio(); if (!a) return; a.currentTime = 0; tm.tap.last = 0; tm.tap.view = 0; tmTapDraw(); }
-function tmTapDelete() { const T = tm.tap; if (T.sel >= 0) { T.pins.splice(T.sel, 1); T.sel = -1; tmTapDraw(); } }
+function tmTapSeek(by) { const a = tmTapAudio(); if (!a) return; a.currentTime = Math.max(0, a.currentTime + by); tmTapUnschedule(); tmTapDraw(); }
+function tmTapStart() { const a = tmTapAudio(); if (!a) return; a.currentTime = 0; tmTapUnschedule(); tm.tap.view = 0; tmTapDraw(); }
+function tmTapDelete() { const T = tm.tap; if (T.sel >= 0) { T.pins.splice(T.sel, 1); T.sel = -1; tmTapUnschedule(); tmTapDraw(); } }
 function tmTapClear() { tm.tap.pins = []; tm.tap.sel = -1; tmTapDraw(); }
 function tmTapZoom(span) { const a = tmTapAudio(); tm.tap.span = span; tm.tap.view = a ? Math.max(0, a.currentTime - span * 0.1) : 0; tmTapDraw(); }
 function tmTapGet() { return tm.tap.pins.slice().sort((a, b) => a - b); }
-function tmTapSet(pins) { tm.tap.pins = pins.slice().sort((a, b) => a - b); tm.tap.sel = -1; tm.tap.placed = -1; tmTapDraw(); }
+function tmTapSet(pins) { tm.tap.pins = pins.slice().sort((a, b) => a - b); tm.tap.sel = -1; tmTapUnschedule(); tmTapDraw(); }
 </script>
 """
 

@@ -129,6 +129,21 @@ def test_cuts_follow_your_taps_then_the_music():
     assert any(abs(s.start - 16) < 1e-6 for s in slots)  # after your last tap, the music's own changes again
 
 
+def test_every_tap_is_kept_even_with_fewer_shots_than_taps():
+    song = _song()
+    song.taps = [1.25, 2.25, 3.75, 4.75, 6.25, 7.25, 8.25, 10.25, 11.25, 12.75, 13.75, 15.25]
+    rows = [_clip(n, action=1.0, duration=3.0 if n % 3 else 6.0) for n in range(10)]  # short clips, only ten
+    limits = autoedit.Limits(max_video=4.0, max_photo=2.5, min_shot=1.0, cut_on="taps")
+    plan = autoedit.plan_to_music(rows, {}, song, limits, 20.0, 0.8, "Fade")
+    cuts, begin = [], 0.0  # where each change-over is centred
+    for shot in plan.shots[:-1]:
+        overlap = transitions.seconds_of(shot.transition, 0.8)
+        cuts.append(begin + shot.seconds - overlap / 2)
+        begin += shot.seconds - overlap
+    assert len(plan.shots) == 10  # the shots run out...
+    assert max(abs(c - t) for c, t in zip(cuts, song.taps)) <= 1 / 30  # ...but no tap was joined away or moved
+
+
 def test_transitions_are_suggested_with_a_reason():
     rows = [_clip(n, action=20.0 if 8 <= n < 24 else 0.5, camera=1.5) for n in range(40)]
     for r in rows:
