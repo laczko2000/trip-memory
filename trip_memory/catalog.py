@@ -87,7 +87,8 @@ CREATE TABLE IF NOT EXISTS items (
     faces_done INTEGER DEFAULT 0,
     scene_done INTEGER DEFAULT 0,
     tags_done INTEGER DEFAULT 0,
-    transition_why TEXT
+    transition_why TEXT,
+    camera_moves TEXT
 );
 CREATE TABLE IF NOT EXISTS story_info (
     key TEXT PRIMARY KEY,  -- the story's first file
@@ -153,7 +154,7 @@ class Trip:
             "tags TEXT", "tags_user TEXT", "motion_action REAL", "motion_camera REAL", "motion_shake REAL",
             "look_group INTEGER", "tags_done INTEGER DEFAULT 0", "seconds REAL", "curves TEXT",
             "clip_sound INTEGER DEFAULT 0", "clip_volume REAL DEFAULT 1.0", "cut_out INTEGER DEFAULT 0", "subjects TEXT",
-            "transition_why TEXT",
+            "transition_why TEXT", "camera_moves TEXT",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
@@ -609,6 +610,7 @@ class Trip:
             except Exception as exc:
                 traceback.print_exc()
                 p.notes.append(f"Could not analyse {Path(row['path']).name}: {exc}")
+        self._find_camera_moves(notify)
         self._group_stories()  # pictures turned upright get a fresh look-alike fingerprint
         self._group_look_alike()
         self._find_subjects(tagger, notify)
@@ -616,6 +618,24 @@ class Trip:
         p.message = "Grouping faces into people…"
         notify()
         self._group_people()
+
+    def _find_camera_moves(self, notify: Callable[[], None]) -> None:
+        """How the camera moves in each video (pans, zooms, whips...), for videos analysed before this was added."""
+        rows = self.query("SELECT * FROM items WHERE chosen = 1 AND kind = 'video' AND camera_moves IS NULL")
+        for i, row in enumerate(rows):
+            self.progress.fraction = i / len(rows)
+            self.progress.message = f"Reading camera moves {i + 1} of {len(rows)}: {Path(row['path']).name}"
+            notify()
+            try:
+                moved = motion.measure(row["path"])
+            except Exception as exc:
+                traceback.print_exc()
+                self.progress.notes.append(f"Could not read the camera moves of {Path(row['path']).name}: {exc}")
+                continue
+            camera = moved.camera_tags() if moved else []
+            tags = json.loads(row["tags"]) if row["tags"] else []
+            self.execute("UPDATE items SET camera_moves = ?, tags = ? WHERE path = ?",
+                         (json.dumps(camera), json.dumps(_with_camera(tags, camera)), row["path"]))
 
     def _find_subjects(self, tagger, notify: Callable[[], None]) -> None:
         """What each photo or video shows (fish, deer, running...), for naming the stories."""
@@ -799,7 +819,8 @@ class Trip:
                 moved = motion.measure(str(path))
                 if moved:
                     updates.update(motion_action=moved.action, motion_camera=moved.camera, motion_shake=moved.shake,
-                                   curves=_curves_json(moved, path, row["has_audio"]))
+                                   curves=_curves_json(moved, path, row["has_audio"]),
+                                   camera_moves=json.dumps(moved.camera_tags()))
 
             if scenes is not None and not (row["scene_done"] and row["tags_done"]):
                 each = scenes.embed_each(frames)
@@ -815,11 +836,13 @@ class Trip:
                             action, updates.get("motion_camera", row["motion_camera"]),
                             updates.get("motion_shake", row["motion_shake"]),
                         ).tags() + found_tags
+                    camera = updates.get("camera_moves", row["camera_moves"])
+                    found_tags = _with_camera(found_tags, json.loads(camera) if camera else [])
                     updates.update(tags=json.dumps(found_tags), tags_done=1)
 
             if "tags" not in updates and "motion_action" in updates:  # no AI tags this time, but movement is known
                 moved_tags = motion.Motion(updates["motion_action"], updates["motion_camera"], updates["motion_shake"]).tags()
-                updates["tags"] = json.dumps(moved_tags)
+                updates["tags"] = json.dumps(_with_camera(moved_tags, json.loads(updates["camera_moves"])))
 
         if not updates:
             return
@@ -877,6 +900,11 @@ def _guess_places(rows: list[dict]) -> None:
                 continue
             row["country"] = same_day[0]["country"]
         row["place_guessed"] = True
+
+
+def _with_camera(tags: list[str], camera: list[str]) -> list[str]:
+    """The tags with the camera-move tags brought up to date."""
+    return [t for t in tags if t not in motion.CAMERA_TAGS] + list(camera)
 
 
 def _curves_json(moved: motion.Motion, path: Path, has_audio) -> str:

@@ -42,3 +42,20 @@ def test_shaky_camera():
 
 def test_something_moving():
     assert from_frames(_clip([(0, 0)] * 10, ball=8)).tags()[0] in ("Calm", "Lively")
+
+
+def test_camera_moves():
+    assert from_frames(_clip([(0, 0)] * 10)).camera_tags() == ["Static camera"]
+    assert "Pan right" in from_frames(_clip([(6 * n, 0) for n in range(10)])).camera_tags()
+    assert "Pan left" in from_frames(_clip([(60 - 6 * n, 0) for n in range(10)])).camera_tags()
+    assert "Tilt down" in from_frames(_clip([(0, 4 * n) for n in range(10)])).camera_tags()
+    whip = from_frames(_clip([(0, 0)] * 4 + [(30, 0)] * 6)).camera_tags()
+    assert "Whip pan" in whip
+    big = _scene(size=(600, 1000))
+    frames = []
+    for n in range(10):  # the view narrows on the centre: zooming in
+        w = int(480 - 25 * n)
+        h = w * 9 // 16
+        cx, cy = 500, 300
+        frames.append(cv2.resize(big[cy - h // 2 : cy + h // 2, cx - w // 2 : cx + w // 2], (160, 90)))
+    assert "Zoom in" in from_frames(np.array(frames)).camera_tags()

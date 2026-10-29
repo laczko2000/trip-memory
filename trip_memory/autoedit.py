@@ -361,6 +361,8 @@ def pace_of(row: dict) -> tuple[float, bool]:
         return next((level[t] for t in level if t in tags), 0.5), "Cinematic" in tags
     pace = float(np.clip(np.log1p(action) / np.log1p(15), 0, 1))
     cinematic = camera is not None and camera >= 1.0 and (shake or 0) < 0.6 and action < 3
+    if {"Whip pan", "Fast camera", "Turn around"} & set(row.get("tags_final") or []):
+        return max(pace, 0.75), False  # a swinging camera feels fast even when the scene is calm
     return (0.3 if cinematic else pace), cinematic
 
 

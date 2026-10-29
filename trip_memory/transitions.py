@@ -99,17 +99,25 @@ def recommend(cuts: list[Cut], soft_seconds: float) -> list[tuple[str, str]]:
         elif lift < -0.2:
             name, why = "Blur", "The music calms down"
         elif energy >= LIVELY:
-            moving = (a.get("motion_camera") or 0) >= 1.2 or (b.get("motion_camera") or 0) >= 1.2
+            tags = set(a.get("tags_final") or [])
+            moving = bool(tags & {"Whip pan", "Fast camera", "Pan left", "Pan right"}) or (a.get("motion_camera") or 0) >= 1.2
             if moving and since_effect >= 3:
-                name, why = take(WHIPS, "whip"), "A fast camera move: a whip pan keeps it flowing"
+                # Carry the camera's swing on into the next shot: a pan to the right pushes the picture left.
+                name = "Whip left" if "Pan right" in tags else "Whip right" if "Pan left" in tags else take(WHIPS, "whip")
+                why = "A fast camera move: a whip pan keeps it flowing"
+            elif "Zoom in" in tags and since_effect >= 3:
+                name, why = "Zoom punch", "The shot zooms in: punch through into the next one"
             elif cut.hit >= 0.8 and since_effect >= 4:
                 name, why = "Zoom punch", "A big hit in the music"
             else:
                 name, why = HARD_CUT, "Quick cut on the beat"
         elif energy < CALM:
-            name, why = take(CALM_BLENDS, "blend"), "Calm music: a soft blend"
+            if "Zoom in" in (a.get("tags_final") or []):
+                name, why = "Zoom", "The shot zooms in: carry on into the next one"
+            else:
+                name, why = take(CALM_BLENDS, "blend"), "Calm music: a soft blend"
         # Make sure it fits between the two cuts; otherwise a quicker version, or a clean cut.
-        if seconds_of(name, soft_seconds) > cut.room and name in CALM_BLENDS:
+        if seconds_of(name, soft_seconds) > cut.room and name in (*CALM_BLENDS, "Zoom"):
             name, why = HARD_CUT, "Shots too short for a blend: a clean cut"
         if seconds_of(name, soft_seconds) > cut.room:
             quick = "Flash" if name in ("Fade through black", "Dip to white") else "Blur" if STYLES[name].quick is None else name
