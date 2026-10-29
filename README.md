@@ -30,13 +30,16 @@ Nothing is uploaded anywhere.
 4. **People tab:** for each face group, pick a name you already used from the drop-down, or type a new one
    and press Enter. Picking an existing name joins the groups. **Unknown** hides strangers. Faces seen only
    once or twice are listed separately so you can check them, then **Mark all of these as Unknown**.
-5. **Make video tab:** choose transition, photo length, music, then **Make my video**. The file is saved in
+5. **Storyboard tab:** change the order with the arrows, trim videos by dragging the ends of the bar, pick a
+   transition for any cut, and switch day title cards ("Day 2 · Lisbon") on or off.
+6. **Make video tab:** choose transition, photo length, music, then **Make my video**. The file is saved in
    *Movies → Trip Memory*.
 
 Everything runs on your Mac. Nothing is uploaded.
 
 ## What's new
 
+- **0.5:** storyboard with your own order, trims, per-cut transitions and day title cards.
 - **0.4.1:** faster video making: uses the Mac's built-in video encoder, prepares several clips at once,
   and remembers prepared clips so making the video again after a change is much quicker.
 - **0.4:** choose which files of a folder to analyse and use.

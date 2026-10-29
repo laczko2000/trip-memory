@@ -40,6 +40,11 @@ class MediaItem:
     hdr: bool = False
     lat: float | None = None
     lon: float | None = None
+    # Storyboard choices (None = automatic)
+    trim_start: float | None = None
+    trim_end: float | None = None
+    transition: str | None = None  # transition into the next clip
+    title: str | None = None  # for kind "title": the chapter card text, two lines split by "\n"
 
     @property
     def name(self) -> str:

@@ -13,13 +13,16 @@ from pathlib import Path
 from nicegui import app, run, ui
 
 from .catalog import Trip, app_dir
-from .render import TRANSITIONS, RenderSettings, render
+from .media import MediaItem
+from .render import TRANSITIONS, RenderSettings, clip_range, render
 from .scenes import SCENES
 
 OUTPUT_DIR = Path.home() / "Movies" / "Trip Memory"
 RESOLUTIONS = {"Full HD (1080p)": (1920, 1080), "HD (720p, faster)": (1280, 720)}
 PAGE_SIZE = 48
 CHOOSE_PAGE_SIZE = 60
+STORY_PAGE_SIZE = 25
+DEFAULT_TRANSITION = "Default (from Make video)"
 ALL = "All"
 SETTINGS = app_dir() / "settings.json"
 
@@ -76,6 +79,8 @@ class Page:
         self.items: list[dict] = []  # the files you chose for this trip
         self.choose_filters = {"day": ALL, "kind": ALL}
         self.choose_page = 1
+        self.story_page = 1
+        self.chapters = bool(load_settings().get("chapters", True))
         self.dirty = False
         self.last_refresh = 0.0
         self.filters = {"day": ALL, "place": ALL, "scene": ALL, "person": ALL, "show": ALL}
@@ -137,6 +142,7 @@ class Page:
                 self.choose_tab = ui.tab("Choose files", icon="checklist")
                 library_tab = ui.tab("Library", icon="photo_library")
                 people_tab = ui.tab("People", icon="people")
+                story_tab = ui.tab("Storyboard", icon="view_timeline")
                 video_tab = ui.tab("Make video", icon="movie")
             self.library_tab = library_tab
             with ui.tab_panels(tabs, value=self.choose_tab).classes("w-full") as self.panels:
@@ -146,6 +152,8 @@ class Page:
                     self.build_library()
                 with ui.tab_panel(people_tab):
                     self.people_view()
+                with ui.tab_panel(story_tab):
+                    self.storyboard_view()
                 with ui.tab_panel(video_tab):
                     self.build_video()
         ui.timer(1.0, self.tick)
@@ -243,6 +251,7 @@ class Page:
         self.gallery.refresh()
         self.people_view.refresh()
         self.video_summary.refresh()
+        self.storyboard_view.refresh()
 
     # ---------- Choose files ----------
 
@@ -304,6 +313,8 @@ class Page:
     def set_choose_filter(self, key: str, value: str) -> None:
         self.choose_filters[key] = value
         self.choose_page = 1
+        self.story_page = 1
+        self.chapters = bool(load_settings().get("chapters", True))
         self.choose_view.refresh()
 
     def go_to_choose_page(self, page: int) -> None:
@@ -348,6 +359,7 @@ class Page:
         self.reload()
         self.gallery.refresh()
         self.video_summary.refresh()
+        self.storyboard_view.refresh()
 
     @ui.refreshable
     def gallery(self) -> None:
@@ -406,6 +418,7 @@ class Page:
             if it["path"] == path:
                 it["included"] = int(included)
         self.video_summary.refresh()
+        self.storyboard_view.refresh()
 
     # ---------- People ----------
 
@@ -493,6 +506,113 @@ class Page:
         self.trip.restore_person(person_id)
         self.refresh_all()
 
+    # ---------- Storyboard ----------
+
+    def settings_now(self) -> RenderSettings:
+        width, height = RESOLUTIONS[self.resolution.value]
+        return RenderSettings(
+            width=width,
+            height=height,
+            photo_seconds=self.photo_len.value,
+            max_clip_seconds=self.clip_len.value,
+            transition=self.transition.value,
+            transition_seconds=self.t_len.value,
+            keep_clip_sound=self.keep_sound.value,
+            music_volume=self.music_vol.value,
+        )
+
+    @ui.refreshable
+    def storyboard_view(self) -> None:
+        if not self.trip:
+            ui.label("Open a trip first.").classes("text-gray-500")
+            return
+        board = self.trip.storyboard()
+        if not board:
+            ui.label("Nothing is in the video yet. Tick files in the Library.").classes("text-gray-500")
+            return
+        with ui.row().classes("w-full items-center gap-4"):
+            ui.label(f"{len(board)} clips in this order").classes("text-lg font-semibold")
+            ui.switch("Day title cards (\"Day 2 · Lisbon\")", value=self.chapters, on_change=lambda e: self.set_chapters(e.value))
+            ui.button("Back to date order", icon="restart_alt", on_click=self.reset_order).props("flat dense")
+        ui.label(
+            "Use the arrows to change the order. For videos, drag the two ends of the bar to choose which part to keep. "
+            "The transition setting is for the cut after that clip."
+        ).classes("text-sm text-gray-600")
+        pages = max(1, -(-len(board) // STORY_PAGE_SIZE))
+        self.story_page = min(self.story_page, pages)
+        first = (self.story_page - 1) * STORY_PAGE_SIZE
+        previous_day = board[first - 1]["day"] if first else None
+        for n, it in enumerate(board[first : first + STORY_PAGE_SIZE], first + 1):
+            if self.chapters and it["day"] != previous_day:
+                ui.label(f"🎬 Day title: {datetime.fromisoformat(it['day']):%a %d %b}").classes("text-sm text-blue-700 mt-2")
+            previous_day = it["day"]
+            self.story_row(n, it, last=n == len(board))
+        if pages > 1:
+            ui.pagination(1, pages, direction_links=True, value=self.story_page, on_change=lambda e: self.go_to_story_page(e.value))
+
+    def story_row(self, n: int, it: dict, last: bool) -> None:
+        with ui.card().classes("w-full p-2"):
+            with ui.row().classes("w-full items-center no-wrap gap-3"):
+                with ui.column().classes("gap-0 items-center"):
+                    ui.button(icon="arrow_upward", on_click=lambda p=it["path"]: self.move(p, -1)).props("flat dense round size=sm")
+                    ui.label(str(n)).classes("text-xs text-gray-500")
+                    ui.button(icon="arrow_downward", on_click=lambda p=it["path"]: self.move(p, 1)).props("flat dense round size=sm")
+                if it["thumb"]:
+                    ui.image(data_url(it["thumb"])).classes("w-32 h-20 object-cover rounded")
+                with ui.column().classes("flex-grow gap-1"):
+                    place = ", ".join(x for x in (it["place"], it["country"]) if x)
+                    icon = "🎬" if it["kind"] == "video" else "📷"
+                    ui.label(f"{icon} {fmt_time(it['taken_at'])}" + (f" · {place}" if place else "")).classes("text-sm")
+                    if it["kind"] == "video":
+                        self.trim_control(it)
+                    else:
+                        ui.label("Photo").classes("text-xs text-gray-500")
+                with ui.column().classes("gap-1 w-56"):
+                    if not last:
+                        ui.select(
+                            [DEFAULT_TRANSITION, *TRANSITIONS],
+                            value=it["transition"] or DEFAULT_TRANSITION,
+                            label="Transition after",
+                            on_change=lambda e, p=it["path"]: self.trip.set_transition(p, None if e.value == DEFAULT_TRANSITION else e.value),
+                        ).props("dense options-dense").classes("w-full")
+                    ui.button("Leave out", icon="remove_circle_outline", on_click=lambda p=it["path"]: self.leave_out(p)).props("flat dense size=sm")
+
+    def trim_control(self, it: dict) -> None:
+        item = MediaItem(path=Path(it["path"]), kind="video", taken_at=datetime.now(), duration=it["duration"],
+                         trim_start=it["trim_start"], trim_end=it["trim_end"])
+        start, end = clip_range(item, self.settings_now())
+        label = ui.label().classes("text-xs text-gray-600")
+
+        def show(lo: float, hi: float) -> None:
+            label.text = f"Keeping {fmt_length(lo)} to {fmt_length(hi)} ({hi - lo:.1f} s of {fmt_length(it['duration'])})"
+
+        show(start, end)
+        ui.range(
+            min=0, max=round(it["duration"], 1), step=0.1, value={"min": round(start, 1), "max": round(end, 1)},
+            on_change=lambda e, p=it["path"]: (show(e.value["min"], e.value["max"]), self.trip.set_trim(p, e.value["min"], e.value["max"])),
+        ).props("dense").classes("w-full")
+
+    def set_chapters(self, on: bool) -> None:
+        self.chapters = on
+        save_settings(chapters=on)
+        self.storyboard_view.refresh()
+
+    def move(self, path: str, steps: int) -> None:
+        self.trip.move(path, steps)
+        self.storyboard_view.refresh()
+
+    def reset_order(self) -> None:
+        self.trip.reset_order()
+        self.storyboard_view.refresh()
+
+    def leave_out(self, path: str) -> None:
+        self.trip.set_included([path], False)
+        self.refresh_all()
+
+    def go_to_story_page(self, page: int) -> None:
+        self.story_page = page
+        self.storyboard_view.refresh()
+
     # ---------- Make video ----------
 
     def build_video(self) -> None:
@@ -536,8 +656,8 @@ class Page:
         chosen = [it for it in self.items if it["included"]]
         videos = sum(it["kind"] == "video" for it in chosen)
         ui.label(
-            f"The video will use {len(chosen)} items ({videos} videos, {len(chosen) - videos} photos) in the order they were taken. "
-            "Change the selection in the Library."
+            f"The video will use {len(chosen)} items ({videos} videos, {len(chosen) - videos} photos) in the Storyboard order. "
+            "Change the selection in the Library and the order in the Storyboard."
         ).classes("text-gray-700")
 
     async def browse_music(self) -> None:
@@ -549,7 +669,7 @@ class Page:
         r = self.rendering
         if r["busy"] or not self.trip:
             return
-        items = self.trip.media_items(only_included=True)
+        items = self.trip.media_items(chapters=self.chapters)
         if not items:
             ui.notify("Nothing is ticked for the video yet. Pick items in the Library.", type="warning")
             return

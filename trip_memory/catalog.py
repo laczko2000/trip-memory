@@ -58,6 +58,10 @@ CREATE TABLE IF NOT EXISTS items (
     clip BLOB,
     included INTEGER DEFAULT 1,
     chosen INTEGER DEFAULT 1,
+    position REAL,
+    trim_start REAL,
+    trim_end REAL,
+    transition TEXT,
     faces_done INTEGER DEFAULT 0,
     scene_done INTEGER DEFAULT 0
 );
@@ -108,10 +112,11 @@ class Trip:
         self.db = sqlite3.connect(self.dir / "catalog.db", check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
-        try:  # catalogues made before version 0.4 lack this column
-            self.db.execute("ALTER TABLE items ADD COLUMN chosen INTEGER DEFAULT 1")
-        except sqlite3.OperationalError:
-            pass
+        for column in ("chosen INTEGER DEFAULT 1", "position REAL", "trim_start REAL", "trim_end REAL", "transition TEXT"):
+            try:  # catalogues made by older versions lack these columns
+                self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
+            except sqlite3.OperationalError:
+                pass
         (self.dir / "folder.txt").write_text(str(self.folder))
         self.progress = Progress()
 
@@ -193,19 +198,54 @@ class Trip:
         result.sort(key=lambda p: (order[p["status"]], -p["count"], p["label"]))
         return result
 
-    def media_items(self, only_included: bool = True) -> list[MediaItem]:
-        sql = "SELECT * FROM items WHERE chosen = 1" + (" AND included = 1" if only_included else "") + " ORDER BY taken_at, path"
-        return [
-            MediaItem(
-                path=Path(r["path"]),
-                kind=r["kind"],
-                taken_at=datetime.fromisoformat(r["taken_at"]),
-                duration=r["duration"],
-                has_audio=bool(r["has_audio"]),
-                hdr=bool(r["hdr"]),
+    def storyboard(self) -> list[dict]:
+        """The files going into the video, in storyboard order.
+
+        Files you moved keep their place; anything not placed yet follows in date order.
+        """
+        rows = [it for it in self.items() if it["chosen"] and it["included"]]
+        placed = sorted((r for r in rows if r["position"] is not None), key=lambda r: r["position"])
+        return placed + [r for r in rows if r["position"] is None]
+
+    def media_items(self, chapters: bool = False) -> list[MediaItem]:
+        """What the video is made from, in storyboard order, optionally with a title card for each day."""
+        board = self.storyboard()
+        days = sorted({r["day"] for r in self.items() if r["chosen"]})
+        result: list[MediaItem] = []
+        previous_day = None
+        for r in board:
+            if chapters and r["day"] != previous_day:
+                result.append(self._title_card(r, board, days))
+            previous_day = r["day"]
+            result.append(
+                MediaItem(
+                    path=Path(r["path"]),
+                    kind=r["kind"],
+                    taken_at=datetime.fromisoformat(r["taken_at"]),
+                    duration=r["duration"],
+                    has_audio=bool(r["has_audio"]),
+                    hdr=bool(r["hdr"]),
+                    trim_start=r["trim_start"],
+                    trim_end=r["trim_end"],
+                    transition=r["transition"],
+                )
             )
-            for r in self.query(sql)
-        ]
+        return result
+
+    def _title_card(self, first: dict, board: list[dict], days: list[str]) -> MediaItem:
+        """A chapter card such as "Day 2" / "Lisbon · Sat 5 Jul" over a blurred picture of that day."""
+        same_day = [r for r in board if r["day"] == first["day"]]
+        places = [r["place"] or r["country"] for r in same_day if r["place"] or r["country"]]
+        place = max(set(places), key=places.count) if places else None
+        when = datetime.fromisoformat(first["day"]).strftime("%a %-d %b")
+        number = days.index(first["day"]) + 1 if first["day"] in days else 1
+        subtitle = f"{place} · {when}" if place else when
+        return MediaItem(
+            path=Path(first["thumb"] or first["path"]),
+            kind="title",
+            taken_at=datetime.fromisoformat(first["taken_at"]),
+            title=f"Day {number}\n{subtitle}",
+        )
 
     # ---------- changes made by you ----------
 
@@ -219,6 +259,27 @@ class Trip:
         with self._lock:
             self.db.executemany("UPDATE items SET chosen = ? WHERE path = ?", [(int(chosen), p) for p in paths])
             self.db.commit()
+
+    def move(self, path: str, steps: int) -> None:
+        """Move a file earlier (negative steps) or later in the storyboard."""
+        order = [r["path"] for r in self.storyboard()]
+        if path not in order:
+            return
+        i = order.index(path)
+        j = max(0, min(len(order) - 1, i + steps))
+        order.insert(j, order.pop(i))
+        with self._lock:
+            self.db.executemany("UPDATE items SET position = ? WHERE path = ?", list(enumerate(order)))
+            self.db.commit()
+
+    def reset_order(self) -> None:
+        self.execute("UPDATE items SET position = NULL")
+
+    def set_trim(self, path: str, start: float | None, end: float | None) -> None:
+        self.execute("UPDATE items SET trim_start = ?, trim_end = ? WHERE path = ?", (start, end, path))
+
+    def set_transition(self, path: str, transition: str | None) -> None:
+        self.execute("UPDATE items SET transition = ? WHERE path = ?", (transition, path))
 
     def set_scene(self, path: str, scene: str | None) -> None:
         self.execute("UPDATE items SET scene_user = ? WHERE path = ?", (scene, path))

@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 from .media import MediaItem
 from .tools import FFmpegError, has_encoder, has_filter, probe, run_ffmpeg
@@ -43,7 +43,13 @@ AUDIO = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
 ProgressFn = Callable[[float, str], None]
 
 # Bump when the way clips are prepared changes, so old remembered clips are not reused.
-SEGMENT_VERSION = 2
+SEGMENT_VERSION = 3
+TITLE_SECONDS = 3.0
+FONTS = [
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+]
 CACHE_DAYS = 30
 _hardware = {"ok": sys.platform == "darwin"}  # switched off if the Mac's encoder ever fails
 
@@ -104,12 +110,19 @@ def _hdr_to_sdr() -> str:
     )
 
 
+def clip_range(item: MediaItem, s: RenderSettings) -> tuple[float, float]:
+    """The part of a video that is used: your trim if you set one, else the middle part."""
+    if item.trim_start is not None and item.trim_end is not None and item.trim_end > item.trim_start:
+        return item.trim_start, min(item.trim_end, item.duration)
+    if s.max_clip_seconds and item.duration > s.max_clip_seconds:
+        start = (item.duration - s.max_clip_seconds) / 2
+        return start, start + s.max_clip_seconds
+    return 0.0, item.duration
+
+
 def _video_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
-    length = item.duration
-    start = 0.0
-    if s.max_clip_seconds and length > s.max_clip_seconds:
-        start = (length - s.max_clip_seconds) / 2  # keep the middle part
-        length = s.max_clip_seconds
+    start, end = clip_range(item, s)
+    length = end - start
     pre = _hdr_to_sdr() if item.hdr else ""
     graph = f"[0:v]{pre}format=yuv420p[src];" + _fit_with_blur("src", s.width, s.height, "fit")
     graph += f";[fit]fps={FPS},format=yuv420p[v]"
@@ -123,24 +136,54 @@ def _video_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
     return length
 
 
-def _photo_segment(item: MediaItem, s: RenderSettings, out: Path, workdir: Path) -> float:
-    # Pillow turns the photo the right way up and reads iPhone HEIC files, which FFmpeg may not.
-    still = workdir / f"{out.stem}.still.jpg"
-    with Image.open(item.path) as img:
-        img = ImageOps.exif_transpose(img).convert("RGB")
-        img.thumbnail((3840, 3840))
-        img.save(still, quality=92)
+def _font(size: int) -> ImageFont.FreeTypeFont:
+    for path in FONTS:
+        if Path(path).exists():
+            return ImageFont.truetype(path, size)
+    return ImageFont.load_default(size)
 
-    frames = round(s.photo_seconds * FPS)
+
+def _title_still(item: MediaItem, s: RenderSettings, out: Path) -> None:
+    """A chapter card: the title over a dark, blurred picture from that day."""
+    w, h = s.width, s.height
+    try:
+        with Image.open(item.path) as img:
+            bg = ImageOps.fit(ImageOps.exif_transpose(img).convert("RGB"), (w, h))
+        bg = bg.filter(ImageFilter.GaussianBlur(w / 60))
+        bg = Image.blend(bg, Image.new("RGB", (w, h), "black"), 0.55)
+    except OSError:
+        bg = Image.new("RGB", (w, h), (20, 20, 24))
+    draw = ImageDraw.Draw(bg)
+    heading, _, sub = (item.title or "").partition("\n")
+    big, small = _font(h // 8), _font(h // 22)
+    draw.text((w / 2, h / 2 - h / 40), heading, font=big, fill="white", anchor="md")
+    if sub:
+        draw.text((w / 2, h / 2 + h / 40), sub, font=small, fill=(230, 230, 230), anchor="ma")
+    bg.save(out, quality=92)
+
+
+def _photo_segment(item: MediaItem, s: RenderSettings, out: Path, workdir: Path) -> float:
+    still = workdir / f"{out.stem}.still.jpg"
+    seconds = TITLE_SECONDS if item.kind == "title" else s.photo_seconds
+    if item.kind == "title":
+        _title_still(item, s, still)
+    else:
+        # Pillow turns the photo the right way up and reads iPhone HEIC files, which FFmpeg may not.
+        with Image.open(item.path) as img:
+            img = ImageOps.exif_transpose(img).convert("RGB")
+            img.thumbnail((3840, 3840))
+            img.save(still, quality=92)
+
+    frames = round(seconds * FPS)
     w2, h2 = s.width * 2, s.height * 2  # work at double size so the slow zoom stays smooth
     graph = (
         _fit_with_blur("0:v", w2, h2, "fit")
         + f";[fit]zoompan=z='1+0.08*on/{frames}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
         f":d={frames}:s={s.width}x{s.height}:fps={FPS},format=yuv420p[v];[1:a]anull[a]"
     )
-    inputs = ["-i", str(still), "-f", "lavfi", "-t", f"{s.photo_seconds:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
-    _encode_segment(inputs, graph, s.photo_seconds, out, s)
-    return s.photo_seconds
+    inputs = ["-i", str(still), "-f", "lavfi", "-t", f"{seconds:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
+    _encode_segment(inputs, graph, seconds, out, s)
+    return seconds
 
 
 def _encode_segment(inputs: list[str], graph: str, length: float, out: Path, s: RenderSettings) -> None:
@@ -163,11 +206,13 @@ def _encode_segment(inputs: list[str], graph: str, length: float, out: Path, s: 
 def _segment_key(item: MediaItem, s: RenderSettings) -> str:
     """Name a prepared clip by everything that changes how it looks, so it can be reused safely."""
     stat = item.path.stat()
-    parts = [SEGMENT_VERSION, item.path, stat.st_mtime, stat.st_size, s.width, s.height]
+    parts = [SEGMENT_VERSION, item.kind, item.path, stat.st_mtime, stat.st_size, s.width, s.height]
     if item.kind == "photo":
         parts += [s.photo_seconds]
+    elif item.kind == "title":
+        parts += [item.title]
     else:
-        parts += [s.max_clip_seconds, s.keep_clip_sound, s.clip_volume]
+        parts += [clip_range(item, s), s.keep_clip_sound, s.clip_volume]
     return hashlib.sha1(repr(parts).encode()).hexdigest()[:20]
 
 
@@ -234,33 +279,45 @@ def render(
         lengths = [_segment_length(seg) for seg in segments]
 
         report(prep_share, "Joining everything together")
-        _join(segments, lengths, settings, out_path, lambda f: report(prep_share + (1 - prep_share) * f, "Joining everything together"))
+        styles = [_transition_between(items[k - 1], k, settings) for k in range(1, len(items))]
+        _join(segments, lengths, styles, settings, out_path, lambda f: report(prep_share + (1 - prep_share) * f, "Joining everything together"))
         report(1.0, "Done")
         return out_path
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def _join(segments: list[Path], lengths: list[float], s: RenderSettings, out: Path, progress: Callable[[float], None]) -> None:
-    style = TRANSITIONS.get(s.transition, "fade")
-    n = len(segments)
-    # A transition can never be longer than ~40% of the shortest clip.
-    t = min(s.transition_seconds, min(lengths) * 0.4) if style and n > 1 else 0.0
+def _transition_between(before: MediaItem, k: int, s: RenderSettings) -> str | None:
+    """The FFmpeg transition into clip k: the one you picked after the previous clip, else the default."""
+    style = TRANSITIONS.get(before.transition or s.transition, "fade")
+    return MIXED[(k - 1) % len(MIXED)] if style == "mixed" else style
 
+
+def _join(
+    segments: list[Path],
+    lengths: list[float],
+    styles: list[str | None],
+    s: RenderSettings,
+    out: Path,
+    progress: Callable[[float], None],
+) -> None:
+    n = len(segments)
     inputs: list[str] = []
     for seg in segments:
         inputs += ["-i", str(seg)]
 
     parts: list[str] = []
-    if t > 0:
-        v_prev, a_prev, offset = "0:v", "0:a", 0.0
+    if any(styles):
+        v_prev, a_prev, offset, total = "0:v", "0:a", 0.0, lengths[0]
         for k in range(1, n):
-            offset += lengths[k - 1] - t
-            kind = MIXED[(k - 1) % len(MIXED)] if style == "mixed" else style
-            parts.append(f"[{v_prev}][{k}:v]xfade=transition={kind}:duration={t:.3f}:offset={offset:.3f}[v{k}]")
+            style = styles[k - 1]
+            # A transition is never longer than ~40% of either clip; a hard cut is a one-frame fade.
+            t = min(s.transition_seconds, lengths[k - 1] * 0.4, lengths[k] * 0.4) if style else 1 / FPS
+            offset = total - t
+            parts.append(f"[{v_prev}][{k}:v]xfade=transition={style or 'fade'}:duration={t:.3f}:offset={offset:.3f}[v{k}]")
             parts.append(f"[{a_prev}][{k}:a]acrossfade=d={t:.3f}[a{k}]")
             v_prev, a_prev = f"v{k}", f"a{k}"
-        total = sum(lengths) - t * (n - 1)
+            total = offset + lengths[k]
     else:
         streams = "".join(f"[{k}:v][{k}:a]" for k in range(n))
         parts.append(f"{streams}concat=n={n}:v=1:a=1[v{n}][a{n}]")

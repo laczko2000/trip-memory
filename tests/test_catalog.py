@@ -139,3 +139,31 @@ def test_only_chosen_files_are_analysed_and_used(tmp_path, monkeypatch):
     done = {i["path"].split("/")[-1]: bool(i["faces_done"]) for i in trip.items()}
     assert done == {"0.jpg": True, "1.jpg": False, "2.jpg": True}
     assert [m.path.name for m in trip.media_items()] == ["0.jpg", "2.jpg"]
+
+
+def test_storyboard_order_trims_and_day_titles(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    for n, when in enumerate(["2025:07:03 10:00:00", "2025:07:03 12:00:00", "2025:07:04 09:00:00"]):
+        _gps_photo(trip_dir / f"{n}.jpg", when, 38.7, -9.1, "red")
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+
+    names = lambda: [m.path.name for m in trip.media_items()]
+    assert names() == ["0.jpg", "1.jpg", "2.jpg"]
+    trip.move(str(trip_dir / "2.jpg"), -2)
+    assert names() == ["2.jpg", "0.jpg", "1.jpg"]
+
+    with_titles = trip.media_items(chapters=True)
+    assert [m.kind for m in with_titles] == ["title", "photo", "title", "photo", "photo"]
+    assert with_titles[0].title == "Day 2\nLisbon · Fri 4 Jul"
+
+    trip.set_transition(str(trip_dir / "0.jpg"), "Circle")
+    trip.set_trim(str(trip_dir / "1.jpg"), 1.0, 2.0)
+    by_name = {m.path.name: m for m in trip.media_items()}
+    assert by_name["0.jpg"].transition == "Circle" and by_name["1.jpg"].trim_end == 2.0
+
+    trip.reset_order()
+    assert names() == ["0.jpg", "1.jpg", "2.jpg"]
