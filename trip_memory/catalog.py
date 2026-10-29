@@ -24,7 +24,7 @@ from PIL import Image, ImageOps
 
 from .faces import FaceFinder, group_faces
 from .media import MediaItem, scan_folder
-from . import motion, stories
+from . import autoedit, beats, motion, stories
 from .scenes import SceneTagger, mean_vector
 from .tags import Tagger, group_name, look_alike_groups, people_tag
 from .tools import ffmpeg_paths
@@ -78,6 +78,8 @@ CREATE TABLE IF NOT EXISTS items (
     motion_camera REAL,
     motion_shake REAL,
     look_group INTEGER,
+    seconds REAL,
+    curves TEXT,
     faces_done INTEGER DEFAULT 0,
     scene_done INTEGER DEFAULT 0,
     tags_done INTEGER DEFAULT 0
@@ -138,7 +140,7 @@ class Trip:
             "dhash TEXT", "colours BLOB", "sharpness REAL", "story INTEGER", "similar_set INTEGER", "best INTEGER DEFAULT 0",
             "rotation INTEGER DEFAULT 0", "rotation_checked INTEGER DEFAULT 0",
             "tags TEXT", "tags_user TEXT", "motion_action REAL", "motion_camera REAL", "motion_shake REAL",
-            "look_group INTEGER", "tags_done INTEGER DEFAULT 0",
+            "look_group INTEGER", "tags_done INTEGER DEFAULT 0", "seconds REAL", "curves TEXT",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
@@ -271,6 +273,7 @@ class Trip:
                     trim_start=r["trim_start"],
                     trim_end=r["trim_end"],
                     transition=r["transition"],
+                    seconds=r["seconds"],
                 )
             )
         return result
@@ -341,6 +344,52 @@ class Trip:
 
     def reset_order(self) -> None:
         self.execute("UPDATE items SET position = NULL")
+
+    def auto_edit(
+        self,
+        target: float | None,
+        transition_seconds: float,
+        music: str | None = None,
+        title_seconds: float | None = None,
+        on_progress: Callable[[float, str], None] | None = None,
+    ) -> autoedit.Plan:
+        """Make a first cut: choose shots, their best moments and lengths, on the music's beat.
+
+        target: wanted length in seconds (None = use everything, "song" handled by the caller).
+        It replaces the storyboard's choices (what's in, order, trims, transitions)."""
+        report = on_progress or (lambda _f, _m: None)
+        rows = [r for r in self.items() if r["chosen"]]
+        videos = [r for r in rows if r["kind"] == "video"]
+        for n, r in enumerate(v for v in videos if not v["curves"]):
+            report(n / max(1, len(videos)), f"Finding the best moments: {Path(r['path']).name}")
+            moved = motion.measure(r["path"])
+            if moved:
+                curves = _curves_json(moved, Path(r["path"]), r["has_audio"])
+                self.execute("UPDATE items SET curves = ? WHERE path = ?", (curves, r["path"]))
+                r["curves"] = curves
+        scores = {}
+        for r in videos:
+            if r["curves"]:
+                c = json.loads(r["curves"])
+                n = max(len(c["action"]) + 1, int((r["duration"] or 0) * motion.FPS))
+                scores[r["path"]] = autoedit.interest(c["action"], c["shake"], c["loud"], n)
+        beat = None
+        if music:
+            report(0.95, "Listening to the music's beat")
+            beat = beats.find_beat(music)
+        result = autoedit.plan(rows, scores, target, transition_seconds, beat, title_seconds)
+        with self._lock:
+            for shot_no, shot in enumerate(result.shots):
+                trim = (shot.start, shot.start + shot.seconds) if shot.kind == "video" else (None, None)
+                self.db.execute(
+                    "UPDATE items SET included = 1, position = ?, trim_start = ?, trim_end = ?, transition = ?, "
+                    "seconds = ? WHERE path = ?",
+                    (shot_no, *trim, shot.transition, shot.seconds if shot.kind == "photo" else None, shot.path),
+                )
+            self.db.executemany("UPDATE items SET included = 0, position = NULL WHERE path = ?", [(p,) for p in result.left_out])
+            self.db.commit()
+        report(1.0, "Done")
+        return result
 
     def set_trim(self, path: str, start: float | None, end: float | None) -> None:
         self.execute("UPDATE items SET trim_start = ?, trim_end = ? WHERE path = ?", (start, end, path))
@@ -592,7 +641,8 @@ class Trip:
             if row["kind"] == "video" and row["motion_action"] is None:
                 moved = motion.measure(str(path))
                 if moved:
-                    updates.update(motion_action=moved.action, motion_camera=moved.camera, motion_shake=moved.shake)
+                    updates.update(motion_action=moved.action, motion_camera=moved.camera, motion_shake=moved.shake,
+                                   curves=_curves_json(moved, path, row["has_audio"]))
 
             if scenes is not None and not (row["scene_done"] and row["tags_done"]):
                 each = scenes.embed_each(frames)
@@ -670,6 +720,12 @@ def _guess_places(rows: list[dict]) -> None:
                 continue
             row["country"] = same_day[0]["country"]
         row["place_guessed"] = True
+
+
+def _curves_json(moved: motion.Motion, path: Path, has_audio) -> str:
+    """Movement and loudness five times a second, for finding a video's best moment."""
+    loud = autoedit.loudness_steps(str(path)) if has_audio else []
+    return json.dumps({"action": moved.action_steps, "shake": moved.shake_steps, "loud": loud})
 
 
 def rotate_filter(rotation: int) -> str:

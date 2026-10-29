@@ -8,7 +8,7 @@ No AI model is needed.
 from __future__ import annotations
 
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
@@ -17,7 +17,7 @@ from .tools import ffmpeg_paths
 
 WIDTH = 160
 FPS = 5
-MAX_SECONDS = 60
+MAX_SECONDS = 300
 
 # Share of the picture (%) that changes between looks, once the camera's own movement is undone -> label.
 ACTION_LEVELS = [(0.5, "Still"), (3, "Calm"), (12, "Lively")]
@@ -32,6 +32,9 @@ class Motion:
     action: float  # how much of the picture changes because people and things move (%)
     camera: float  # how much the camera itself moves (pans, walks)
     shake: float  # how jittery the camera is
+    # Five times a second: how much changes in the scene (%) and how much the camera jumps.
+    action_steps: list[float] = field(default_factory=list)
+    shake_steps: list[float] = field(default_factory=list)
 
     def tags(self) -> list[str]:
         level = next((name for limit, name in ACTION_LEVELS if self.action < limit), FAST)
@@ -44,7 +47,7 @@ class Motion:
 
 
 def measure(path: str) -> Motion | None:
-    """Measure a video's movement (the first minute at most). Which way up it is doesn't matter here."""
+    """Measure a video's movement (the first five minutes at most). Which way up it is doesn't matter here."""
     cmd = [
         ffmpeg_paths()[0], "-loglevel", "error", "-i", path, "-t", str(MAX_SECONDS),
         "-vf", f"fps={FPS},scale={WIDTH}:-2,format=gray", "-f", "rawvideo", "-",
@@ -95,5 +98,9 @@ def from_frames(frames: np.ndarray) -> Motion | None:
         camera.append(cam.mean(axis=0) if matrix is not None else cam[0])
         camera[-1] = np.append(camera[-1], np.linalg.norm(cam, axis=1).mean())
     camera = np.array(camera)
-    shake = float(np.linalg.norm(np.diff(camera[:, :2], axis=0), axis=1).mean()) if len(camera) > 2 else 0.0
-    return Motion(action=float(np.mean(action)), camera=float(camera[:, 2].mean()), shake=shake)
+    jumps = np.linalg.norm(np.diff(camera[:, :2], axis=0), axis=1) if len(camera) > 1 else np.zeros(0)
+    shake = float(jumps.mean()) if len(camera) > 2 else 0.0
+    return Motion(
+        action=float(np.mean(action)), camera=float(camera[:, 2].mean()), shake=shake,
+        action_steps=[round(a, 2) for a in action], shake_steps=[0.0] + [round(float(j), 2) for j in jumps],
+    )

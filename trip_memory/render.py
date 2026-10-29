@@ -43,7 +43,7 @@ AUDIO = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
 ProgressFn = Callable[[float, str], None]
 
 # Bump when the way clips are prepared changes, so old remembered clips are not reused.
-SEGMENT_VERSION = 3
+SEGMENT_VERSION = 4
 TITLE_SECONDS = 3.0
 FONTS = [
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
@@ -169,7 +169,7 @@ def _title_still(item: MediaItem, s: RenderSettings, out: Path) -> None:
 
 def _photo_segment(item: MediaItem, s: RenderSettings, out: Path, workdir: Path) -> float:
     still = workdir / f"{out.stem}.still.jpg"
-    seconds = TITLE_SECONDS if item.kind == "title" else s.photo_seconds
+    seconds = TITLE_SECONDS if item.kind == "title" else (item.seconds or s.photo_seconds)
     if item.kind == "title":
         _title_still(item, s, still)
     else:
@@ -192,12 +192,16 @@ def _photo_segment(item: MediaItem, s: RenderSettings, out: Path, workdir: Path)
 
 
 def _encode_segment(inputs: list[str], graph: str, length: float, out: Path, s: RenderSettings) -> None:
+    # Exactly the planned number of frames (repeat the last one if the source falls a frame short),
+    # so cuts land where they were planned, e.g. on the music's beat.
+    frames = max(1, round(length * FPS))
+    graph += ";[v]tpad=stop_mode=clone:stop_duration=1[vfull];[a]apad[afull]"
     _run_encode(
         lambda codec: [
             *inputs,
             "-filter_complex", graph,
-            "-map", "[v]", "-map", "[a]",
-            "-t", f"{length:.3f}",
+            "-map", "[vfull]", "-map", "[afull]",
+            "-frames:v", str(frames), "-t", f"{frames / FPS:.4f}",
             *codec, "-pix_fmt", "yuv420p", "-r", str(FPS),
             *AUDIO,
             str(out),
@@ -213,7 +217,7 @@ def _segment_key(item: MediaItem, s: RenderSettings) -> str:
     stat = item.path.stat()
     parts = [SEGMENT_VERSION, item.kind, item.path, stat.st_mtime, stat.st_size, s.width, s.height, item.rotation]
     if item.kind == "photo":
-        parts += [s.photo_seconds]
+        parts += [item.seconds or s.photo_seconds]
     elif item.kind == "title":
         parts += [item.title]
     else:
@@ -243,7 +247,11 @@ def _prepare_segment(item: MediaItem, s: RenderSettings, cache_dir: Path, workdi
 
 
 def _segment_length(path: Path) -> float:
-    return float(probe(str(path))["format"]["duration"])
+    """Length of a prepared clip's picture (its sound can run a few milliseconds longer)."""
+    video = next(st for st in probe(str(path))["streams"] if st["codec_type"] == "video")
+    if video.get("nb_frames", "").isdigit():
+        return int(video["nb_frames"]) / FPS
+    return float(video.get("duration") or probe(str(path))["format"]["duration"])
 
 
 def render(
@@ -312,21 +320,18 @@ def _join(
         inputs += ["-i", str(seg)]
 
     parts: list[str] = []
-    if any(styles):
-        v_prev, a_prev, offset, total = "0:v", "0:a", 0.0, lengths[0]
-        for k in range(1, n):
-            style = styles[k - 1]
-            # A transition is never longer than ~40% of either clip; a hard cut is a one-frame fade.
-            t = min(s.transition_seconds, lengths[k - 1] * 0.4, lengths[k] * 0.4) if style else 1 / FPS
-            offset = total - t
-            parts.append(f"[{v_prev}][{k}:v]xfade=transition={style or 'fade'}:duration={t:.3f}:offset={offset:.3f}[v{k}]")
-            parts.append(f"[{a_prev}][{k}:a]acrossfade=d={t:.3f}[a{k}]")
-            v_prev, a_prev = f"v{k}", f"a{k}"
-            total = offset + lengths[k]
-    else:
-        streams = "".join(f"[{k}:v][{k}:a]" for k in range(n))
-        parts.append(f"{streams}concat=n={n}:v=1:a=1[v{n}][a{n}]")
-        v_prev, a_prev, total = f"v{n}", f"a{n}", sum(lengths)
+    # Every cut overlaps the clips by the transition's length; a hard cut is a one-frame fade. (Joining
+    # all cuts the same way keeps their timing predictable, e.g. for cutting on the music's beat.)
+    v_prev, a_prev, offset, total = "0:v", "0:a", 0.0, lengths[0]
+    for k in range(1, n):
+        style = styles[k - 1]
+        # A transition is never longer than ~40% of either clip.
+        t = min(s.transition_seconds, lengths[k - 1] * 0.4, lengths[k] * 0.4) if style else 1 / FPS
+        offset = total - t
+        parts.append(f"[{v_prev}][{k}:v]xfade=transition={style or 'fade'}:duration={t:.3f}:offset={offset:.3f}[v{k}]")
+        parts.append(f"[{a_prev}][{k}:a]acrossfade=d={t:.3f}[a{k}]")
+        v_prev, a_prev = f"v{k}", f"a{k}"
+        total = offset + lengths[k]
 
     # Gentle fade in from black at the start and out at the end.
     edge = min(1.0, total / 4)

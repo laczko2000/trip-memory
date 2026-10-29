@@ -16,7 +16,8 @@ from nicegui import app, run, ui
 
 from .catalog import Trip, app_dir
 from .media import MediaItem
-from .render import TRANSITIONS, RenderSettings, clip_range, render
+from .beats import song_length
+from .render import TITLE_SECONDS, TRANSITIONS, RenderSettings, clip_range, render
 from .scenes import SCENES
 from .tags import ALL_TAGS, EDITABLE_TAGS, TAG_GROUP
 
@@ -95,6 +96,7 @@ class Page:
         self.story_page = 1
         self.media_route: str | None = None
         self.chapters = bool(load_settings().get("chapters", True))
+        self.auto_length: object = None
         self.dirty = False
         self.last_refresh = 0.0
         self.filters = {"day": ALL, "place": ALL, "scene": ALL, "tag": ALL, "look": ALL, "person": ALL, "show": ALL}
@@ -662,9 +664,10 @@ class Page:
         if not self.trip:
             ui.label("Open a trip first.").classes("text-gray-500")
             return
+        self.auto_edit_card()
         board = self.trip.storyboard()
         if not board:
-            ui.label("Nothing is in the video yet. Tick files in the Library.").classes("text-gray-500")
+            ui.label("Nothing is in the video yet. Tick files in the Library, or let Auto-edit choose.").classes("text-gray-500")
             return
         with ui.row().classes("w-full items-center gap-4"):
             ui.label(f"{len(board)} clips in this order").classes("text-lg font-semibold")
@@ -686,6 +689,77 @@ class Page:
         if pages > 1:
             ui.pagination(1, pages, direction_links=True, value=self.story_page, on_change=lambda e: self.go_to_story_page(e.value))
 
+    def auto_edit_card(self) -> None:
+        music = self.music_path()
+        with ui.card().classes("w-full bg-blue-50"):
+            with ui.row().classes("w-full items-center gap-4"):
+                ui.label("✨ Auto-edit").classes("text-lg font-semibold")
+                lengths = {60: "1 minute", 120: "2 minutes", 180: "3 minutes", 300: "5 minutes", 600: "10 minutes",
+                           "all": "Use everything"}
+                if music:
+                    lengths = {"song": "As long as the song", **lengths}
+                if self.auto_length not in lengths:
+                    self.auto_length = "song" if music else 180
+                ui.select(lengths, value=self.auto_length, label="Length",
+                          on_change=lambda e: setattr(self, "auto_length", e.value)).classes("w-48")
+                ui.button("Make a first cut", icon="auto_fix_high", on_click=self.confirm_auto_edit)
+            ui.label(
+                "Picks the best shots and their best moments, keeps every story, uses short cuts for action and longer "
+                "ones for calm moments. "
+                + (f"Cuts land on the beat of {Path(music).name}." if music
+                   else "Choose music on the Make video tab and the cuts will land on its beat.")
+            ).classes("text-sm text-gray-600")
+
+    def music_changed(self) -> None:
+        self.auto_length = None  # back to the default: as long as the song, if there is one
+        self.storyboard_view.refresh()
+
+    def music_path(self) -> str | None:
+        music = (self.music_input.value or "").strip().strip("'\"") if hasattr(self, "music_input") else ""
+        return music if music and Path(music).expanduser().is_file() else None
+
+    def confirm_auto_edit(self) -> None:
+        with ui.dialog() as dialog, ui.card():
+            ui.label("Make a first cut?").classes("text-lg font-semibold")
+            ui.label("This replaces what's in the storyboard now: which files are in, their order, trims and transitions. "
+                     "Your files, people and tags are not touched.")
+            with ui.row().classes("justify-end w-full"):
+                ui.button("Cancel", on_click=dialog.close).props("flat")
+                async def make_it() -> None:
+                    dialog.close()
+                    await self.run_auto_edit()
+
+                ui.button("Make it", on_click=make_it)
+        dialog.open()
+
+    async def run_auto_edit(self) -> None:
+        music = self.music_path()
+        s = self.settings_now()
+        hard = TRANSITIONS.get(s.transition, "fade") is None
+        target = self.auto_length
+        note = ui.notification("Making a first cut…", spinner=True, timeout=None)
+
+        def work() -> object:
+            length = None if target == "all" else (song_length(music) if target == "song" else float(target))
+            return self.trip.auto_edit(length, 1 / 30 if hard else s.transition_seconds, music,
+                                       TITLE_SECONDS if self.chapters else None,
+                                       lambda _f, message: setattr(note, "message", message))
+
+        try:
+            result = await run.io_bound(work)
+        except Exception as exc:
+            traceback.print_exc()
+            note.dismiss()
+            ui.notify(f"Auto-edit stopped: {exc}", type="negative", multi_line=True)
+            return
+        note.dismiss()
+        beat = result.beat
+        on_beat = f", cuts on the beat ({beat.bpm:.0f} BPM)" if beat and beat.clear else ""
+        ui.notify(f"First cut ready: {len(result.shots)} shots, {fmt_length(result.length)}{on_beat}. "
+                  "Fine-tune it below, then make the video.", type="positive", multi_line=True, timeout=8000)
+        self.story_page = 1
+        self.refresh_all()
+
     def story_row(self, n: int, it: dict, last: bool) -> None:
         with ui.card().classes("w-full p-2"):
             with ui.row().classes("w-full items-center no-wrap gap-3"):
@@ -704,7 +778,7 @@ class Page:
                     if it["kind"] == "video":
                         self.trim_control(it, box)
                     else:
-                        ui.label("Photo").classes("text-xs text-gray-500")
+                        ui.label(f"Photo · {it['seconds']:.1f} s" if it["seconds"] else "Photo").classes("text-xs text-gray-500")
                 with ui.column().classes("gap-1 w-56"):
                     if not last:
                         ui.select(
@@ -784,7 +858,10 @@ class Page:
                     self.clip_len = ui.slider(min=0, max=60, step=1, value=10).props("label-always").classes("mt-8")
                 self.keep_sound = ui.switch("Keep the sound from the videos", value=True)
             with ui.row().classes("w-full items-center"):
-                self.music_input = ui.input("Music (optional)", placeholder="/Users/you/Music/song.mp3").classes("flex-grow")
+                self.music_input = ui.input(
+                    "Music (optional)", placeholder="/Users/you/Music/song.mp3",
+                    on_change=self.music_changed,  # Auto-edit uses the music's beat
+                ).classes("flex-grow")
                 if sys.platform == "darwin":
                     ui.button("Browse…", on_click=self.browse_music).props("outline")
             with ui.column().classes("w-full"):

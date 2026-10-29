@@ -45,6 +45,7 @@ class MediaItem:
     trim_start: float | None = None
     trim_end: float | None = None
     transition: str | None = None  # transition into the next clip
+    seconds: float | None = None  # for photos: how long it is shown (None = the Make video setting)
     title: str | None = None  # for kind "title": the chapter card text, two lines split by "\n"
 
     @property
