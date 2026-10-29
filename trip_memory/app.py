@@ -18,6 +18,7 @@ from nicegui import app, run, ui
 
 from .catalog import Trip, app_dir
 from .media import MediaItem
+from . import director
 from . import music as free_music
 from . import songmap
 from . import taps as song_taps
@@ -47,6 +48,7 @@ def load_settings() -> dict:
 
 def save_settings(**values) -> None:
     SETTINGS.write_text(json.dumps({**load_settings(), **values}))
+    SETTINGS.chmod(0o600)  # it can hold your Claude API key: only you may read it
 
 
 def choose_with_finder(kind: str) -> str | None:
@@ -110,6 +112,8 @@ class Page:
         self.filters = {"day": ALL, "place": ALL, "scene": ALL, "tag": ALL, "look": ALL, "person": ALL, "show": ALL}
         self.page = 1
         self.rendering = {"busy": False, "progress": 0.0, "message": "", "result": None}
+        self.ollama_found: tuple[list[str], list[str]] | None = None  # (models that see pictures, all models)
+        self.ollama_checked = False
 
     # ---------- data ----------
 
@@ -190,6 +194,7 @@ class Page:
                 with ui.tab_panel(music_tab):
                     self.music_tab_view()
                 with ui.tab_panel(stories_tab):
+                    self.director_card()
                     self.stories_view()
                 with ui.tab_panel(story_tab):
                     self.storyboard_view()
@@ -245,6 +250,8 @@ class Page:
         self.progress_bar.set_visibility(True)
         try:
             await run.io_bound(step, self.mark_dirty)
+        except director.DirectorError as exc:
+            ui.notify(str(exc), type="warning", multi_line=True, timeout=10000)
         except Exception as exc:
             traceback.print_exc()
             ui.notify(f"Stopped: {exc}", type="negative")
@@ -293,6 +300,7 @@ class Page:
         self.video_summary.refresh()
         self.storyboard_view.refresh()
         self.stories_view.refresh()
+        self.director_card.refresh()
 
     # ---------- Choose files ----------
 
@@ -514,6 +522,9 @@ class Page:
             with ui.column().classes("p-2 gap-1 w-full"):
                 icon = "🎬 " + fmt_length(it["duration"]) if it["kind"] == "video" else "📷"
                 ui.label(f"{icon} · {fmt_time(it['taken_at'])}").classes("text-xs text-gray-600")
+                if it.get("ai_caption"):
+                    ui.label(f"📝 {it['ai_caption']}" + " ★" * (it["ai_score"] or 0)).classes("text-xs italic") \
+                        .tooltip("The AI director's description, and how much it stands out (1 to 5 stars)")
                 cut_note = ui.label("✂ Selected, but not in the current Auto-edit cut").classes("text-xs text-orange-700")
                 cut_note.visible = bool(it["included"] and it["cut_out"])
                 place = ", ".join(x for x in (it["place"], it["country"]) if x) or "Unknown place"
@@ -790,6 +801,149 @@ class Page:
         ui.run_javascript("tmTapClear()")
 
     # ---------- Stories ----------
+
+    @ui.refreshable
+    def director_card(self) -> None:
+        if not self.trip:
+            return
+        ai = load_settings().get("ai", {})
+        provider = ai.get("provider", "ollama")
+        chosen = [it for it in self.items if it["thumb"]]
+        described = sum(1 for it in chosen if it.get("ai_caption"))
+        with ui.card().classes("w-full bg-indigo-50"):
+            with ui.row().classes("w-full items-center gap-3"):
+                ui.label("🎬 AI director").classes("text-lg font-semibold")
+                ui.label(f"{described} of {len(chosen)} chosen files described").classes("text-sm text-gray-600")
+            ui.label(
+                "The AI looks at your clips, writes what each one shows and how much it stands out (Auto-edit then "
+                "prefers the best moments), and suggests a few ways to tell the trip."
+            ).classes("text-sm text-gray-600")
+            with ui.expansion("Which AI", icon="settings", value=not self.director_ready(ai)).classes("w-full"):
+                ui.select(director.PROVIDERS, value=provider, label="Run it",
+                          on_change=lambda e: self.save_ai(provider=e.value)).classes("w-72")
+                if provider == "ollama":
+                    self.ollama_settings(ai)
+                else:
+                    self.claude_settings(ai)
+            with ui.row().classes("items-center gap-2"):
+                left = len(chosen) - described
+                ui.button(f"Describe clips ({left} to go)" if left else "Describe clips", icon="visibility",
+                          on_click=lambda: self.describe_clips(again=False)).props("" if left else "outline")
+                if described:
+                    ui.button("Describe all again", on_click=lambda: self.describe_clips(again=True)).props("flat dense no-caps")
+                ui.button("Suggest storylines", icon="lightbulb", on_click=self.suggest_storylines)
+            if chosen and not described:
+                ui.label("Tip: describe the clips first, so the storylines know what is in each story.") \
+                    .classes("text-xs text-gray-500")
+            saved = self.trip.saved_storylines()
+            if saved:
+                used = self.trip.storyline_used()
+                names = {s["key"]: s["name"] for s in self.trip.stories()}
+                with ui.row().classes("w-full gap-3 items-stretch"):
+                    for i, line in enumerate(saved["storylines"]):
+                        on = i == used
+                        with ui.card().classes("p-3 flex-1 min-w-60" + (" ring-2 ring-indigo-500" if on else "")):
+                            ui.label(line["title"]).classes("font-semibold")
+                            ui.label(line["idea"]).classes("text-sm text-gray-600")
+                            ui.label(" → ".join(saved["names"].get(k) or names.get(k, "?") for k in line["stories"])) \
+                                .classes("text-xs text-gray-500")
+                            ui.button("Using this" if on else "Use this", icon="check" if on else None,
+                                      on_click=lambda i=i: self.use_storyline(i)).props("dense" + (" outline" if on else ""))
+
+    def director_ready(self, ai: dict) -> bool:
+        if ai.get("provider") == "claude":
+            return bool(ai.get("api_key"))
+        return bool(ai.get("ollama_model"))
+
+    def ollama_settings(self, ai: dict) -> None:
+        if not self.ollama_checked:
+            self.ollama_checked = True
+            ui.timer(0.1, self.check_ollama, once=True)
+        found = self.ollama_found
+        if found is None:
+            ui.markdown(
+                "Free, and your pictures stay on this Mac. **One-time setup:** download Ollama from "
+                "[ollama.com](https://ollama.com/download) and open it. Then in Terminal run "
+                f"`ollama pull {director.OLLAMA_SUGGESTED}` (about 3 GB), and click **Check again**."
+            ).classes("text-sm")
+        elif not found[0]:
+            ui.markdown(
+                "Ollama is running, but none of its models can look at pictures. In Terminal run "
+                f"`ollama pull {director.OLLAMA_SUGGESTED}`, then click **Check again**."
+            ).classes("text-sm")
+        else:
+            model = ai.get("ollama_model") if ai.get("ollama_model") in found[0] else found[0][0]
+            if model != ai.get("ollama_model"):
+                self.save_ai(refresh=False, ollama_model=model)
+            ui.select(found[0], value=model, label="Model",
+                      on_change=lambda e: self.save_ai(ollama_model=e.value)).classes("w-72")
+            ui.label("Ollama is ready. Bigger models describe better but are slower.").classes("text-xs text-green-700")
+        ui.button("Check again", icon="refresh", on_click=self.check_ollama).props("flat dense no-caps")
+
+    async def check_ollama(self) -> None:
+        self.ollama_found = await run.io_bound(director.ollama_models)
+        self.director_card.refresh()
+
+    def claude_settings(self, ai: dict) -> None:
+        ui.markdown(
+            "Very good descriptions and storylines. Costs a little per use, roughly 1 cent per clip described, "
+            "paid to Anthropic. **One-time setup:** at [console.anthropic.com](https://console.anthropic.com) add some "
+            "credit, create an API key, and paste it here. It is kept only on this Mac."
+        ).classes("text-sm")
+        key = ai.get("api_key", "")
+        box = ui.input("API key", password=True, password_toggle_button=True,
+                       placeholder="sk-ant-…" if not key else "saved: …" + key[-4:]).classes("w-96")
+        with ui.row().classes("items-center gap-2"):
+            ui.button("Save key", on_click=lambda: (self.save_ai(api_key=box.value.strip()) if box.value.strip() else None)) \
+                .props("dense")
+            if key:
+                ui.button("Forget key", on_click=lambda: self.save_ai(api_key="")).props("flat dense no-caps")
+        model = ui.input("Model", value=ai.get("claude_model") or director.CLAUDE_MODEL).classes("w-72")
+        model.on("blur", lambda: self.save_ai(refresh=False, claude_model=model.value.strip() or director.CLAUDE_MODEL))
+
+    def save_ai(self, refresh: bool = True, **values) -> None:
+        save_settings(ai={**load_settings().get("ai", {}), **values})
+        if "api_key" in values:
+            ui.notify("Key saved" if values["api_key"] else "Key removed")
+        if refresh:
+            self.director_card.refresh()
+
+    def make_director(self):
+        try:
+            return director.make(load_settings().get("ai", {}))
+        except director.DirectorError as exc:
+            ui.notify(str(exc), type="warning", multi_line=True, timeout=10000)
+            return None
+
+    async def describe_clips(self, again: bool) -> None:
+        if not self.trip or self.trip.progress.running:
+            return
+        ai = self.make_director()
+        if ai:
+            await self.run_step(lambda notify: self.trip.describe_clips(ai, notify, again))
+
+    async def suggest_storylines(self) -> None:
+        if not self.trip or self.trip.progress.running:
+            return
+        ai = self.make_director()
+        if not ai:
+            return
+        note = ui.notification("The AI is thinking about storylines…", spinner=True, timeout=None)
+        try:
+            await run.io_bound(self.trip.suggest_storylines, ai)
+        except director.DirectorError as exc:
+            ui.notify(str(exc), type="warning", multi_line=True, timeout=10000)
+        except Exception as exc:
+            traceback.print_exc()
+            ui.notify(f"Stopped: {exc}", type="negative")
+        finally:
+            note.dismiss()
+        self.director_card.refresh()
+
+    def use_storyline(self, index: int) -> None:
+        self.trip.apply_storyline(index)
+        ui.notify("Stories put in this order. Run Make a first cut in the Storyboard to use it.", type="positive")
+        self.refresh_all()
 
     @ui.refreshable
     def stories_view(self) -> None:
@@ -1091,6 +1245,8 @@ class Page:
                     place = ", ".join(x for x in (it["place"], it["country"]) if x)
                     icon = "🎬" if it["kind"] == "video" else "📷"
                     ui.label(f"{icon} {fmt_time(it['taken_at'])}" + (f" · {place}" if place else "")).classes("text-sm")
+                    if it.get("ai_caption"):
+                        ui.label(f"📝 {it['ai_caption']}").classes("text-xs italic text-gray-600")
                     if it["kind"] == "video":
                         self.trim_control(it, box)
                         with ui.row().classes("items-center gap-4"):

@@ -54,10 +54,12 @@ Nothing is uploaded anywhere.
    free Creative Commons songs online and download one), then **Make my video**. The file is saved in
    *Movies → Trip Memory*.
 
-Everything runs on your Mac. Nothing is uploaded.
+Everything runs on your Mac. Nothing is uploaded, unless you choose Claude for the AI director (then small
+copies of the chosen pictures, and three frames of each video, are sent to Anthropic to be described).
 
 ## What's new
 
+- **0.24:** the **AI director**, at the top of the Stories tab. *Describe clips* has an AI look at each chosen file and write what it shows (📝 in the Library and Storyboard) plus a 1 to 5 ★ "worth remembering" score that Auto-edit uses to prefer the best moments. *Suggest storylines* gives 2 to 4 ways to tell the trip (for example best moments first, day by day, the people), each with the story order and better story names; *Use this* puts the stories in that order and switches off the ones it leaves out. Run it free on your Mac with Ollama (ollama.com, then `ollama pull gemma3:4b`), or with Claude (paid, about a cent per clip, needs an API key from console.anthropic.com).
 - **0.23:** camera-style effects. New *Zoom through* (the shot rushes in, the next one lands zoomed and settles) and *Zoom out reveal* transitions, suggested at story changes, where the music lifts and on big hits. Inside shots: punch-in zooms on big hits and speed ramps (fast through the middle) in lively music, a slow push-in on still shots in calm music. Slow motion now blends frames so it no longer stutters. Each effect shows its reason in the Storyboard with a Remove button; switch them all off with *Camera effects* in Auto-edit.
 - **0.22:** smarter shot picking. Every video is scored five times a second for sharpness, steadiness, camera swing, brightness jumps, movement and sound. Auto-edit never uses the moments when the phone is being raised or lowered, blurred moments or wild swings, picks the best steady stretch of each clip, and prefers clips that have one. (The first Auto-edit after updating measures your videos again, which takes a little longer once.)
 - **0.21.4:** previews made before a file was turned are made again when the trip opens, so the Library shows each file the way it plays and goes into the video. Turned files show a small ↻ 90° label.

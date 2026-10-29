@@ -24,7 +24,7 @@ from PIL import Image, ImageOps
 
 from .faces import FaceFinder, group_faces
 from .media import MediaItem, scan_folder
-from . import autoedit, motion, stories
+from . import autoedit, director, motion, stories
 from .scenes import SceneTagger, mean_vector
 from .tags import TAG_GROUP, Tagger, group_name, look_alike_groups, people_tag, story_subject
 from .tools import ffmpeg_paths, probe
@@ -94,7 +94,9 @@ CREATE TABLE IF NOT EXISTS items (
     speed_why TEXT,
     fps REAL,
     effects TEXT,
-    effects_why TEXT
+    effects_why TEXT,
+    ai_caption TEXT,
+    ai_score INTEGER
 );
 CREATE TABLE IF NOT EXISTS story_info (
     key TEXT PRIMARY KEY,  -- the story's first file
@@ -161,7 +163,7 @@ class Trip:
             "look_group INTEGER", "tags_done INTEGER DEFAULT 0", "seconds REAL", "curves TEXT",
             "clip_sound INTEGER DEFAULT 0", "clip_volume REAL DEFAULT 1.0", "cut_out INTEGER DEFAULT 0", "subjects TEXT",
             "transition_why TEXT", "camera_moves TEXT", "speed REAL DEFAULT 1.0", "speed_why TEXT", "fps REAL",
-            "effects TEXT", "effects_why TEXT",
+            "effects TEXT", "effects_why TEXT", "ai_caption TEXT", "ai_score INTEGER",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
@@ -758,6 +760,118 @@ class Trip:
 
     def reset_story_order(self) -> None:
         self.execute("UPDATE story_info SET position = NULL")
+
+    # ---------- AI director ----------
+
+    def describe_clips(self, ai, on_change: Callable[[], None] | None = None, again: bool = False) -> None:
+        """Let the AI describe each chosen file (and say how much it stands out). Safe to re-run."""
+        self._run(lambda notify: self._describe(ai, notify, again), on_change)
+
+    def _describe(self, ai, notify: Callable[[], None], again: bool) -> None:
+        p = self.progress
+        rows = self.query("SELECT * FROM items WHERE chosen = 1 AND thumb IS NOT NULL"
+                          + ("" if again else " AND ai_caption IS NULL") + " ORDER BY taken_at, path")
+        done = 0
+        for start in range(0, len(rows), ai.batch):
+            batch = rows[start : start + ai.batch]
+            p.fraction = start / len(rows)
+            p.message = f"The AI is looking at {start + 1}–{start + len(batch)} of {len(rows)}: {Path(batch[0]['path']).name}"
+            notify()
+            clips = []
+            for row in batch:
+                try:
+                    clips.append(self._ai_frames(row))
+                except Exception as exc:
+                    clips.append([])
+                    p.notes.append(f"Could not read {Path(row['path']).name} for the AI: {exc}")
+            ready = [(row, frames) for row, frames in zip(batch, clips) if frames]
+            if not ready:
+                continue
+            captions = ai.describe([frames for _, frames in ready])  # a DirectorError stops the whole run
+            with self._lock:
+                for (row, _), caption in zip(ready, captions):
+                    if caption:
+                        self.db.execute("UPDATE items SET ai_caption = ?, ai_score = ? WHERE path = ?",
+                                        (caption.text, caption.highlight, row["path"]))
+                        done += 1
+                self.db.commit()
+        p.message = f"The AI described {done} files."
+
+    def _ai_frames(self, row) -> list[bytes]:
+        """Small pictures for the AI: the photo's preview, or three frames spread through a video."""
+        if row["kind"] == "photo":
+            return [Path(row["thumb"]).read_bytes()]
+        duration = row["duration"] or 0
+        frames = []
+        with tempfile.TemporaryDirectory() as tmp:
+            for i, share in enumerate((0.2, 0.5, 0.8) if duration >= 3 else (0.5,)):
+                out = Path(tmp) / f"{i}.jpg"
+                subprocess.run(
+                    [ffmpeg_paths()[0], "-loglevel", "error", "-y", "-ss", f"{duration * share:.2f}", "-i", row["path"],
+                     "-frames:v", "1", "-vf", rotate_filter(row["rotation"] or 0) + "scale=512:-2", "-q:v", "5", str(out)],
+                    capture_output=True,
+                )
+                if out.exists():
+                    frames.append(out.read_bytes())
+        return frames or [Path(row["thumb"]).read_bytes()]
+
+    def _director_stories(self) -> list[dict]:
+        return [s for s in self.stories() if any(it["chosen"] for it in s["items"])]
+
+    def suggest_storylines(self, ai) -> dict:
+        """Ask the AI for a few ways to tell the trip; they are kept so you can try them one after another."""
+        stories_now = self._director_stories()
+        if not stories_now:
+            raise director.DirectorError("No stories yet. Click Analyse first.")
+        by_time = sorted(stories_now, key=lambda s: s["start"])
+        described = []
+        for s in by_time:
+            members = [it for it in s["items"] if it["chosen"]]
+            places = [it["place"] or it["country"] for it in members if it["place"] or it["country"]]
+            start = datetime.fromisoformat(s["start"]).astimezone()
+            described.append({
+                "name": s["name"], "count": len(members),
+                "when": f"{start:%a %d %b %H:%M}–{datetime.fromisoformat(s['end']).astimezone():%H:%M}",
+                "place": max(set(places), key=places.count) if places else "",
+                "captions": [it["ai_caption"] for it in members if it.get("ai_caption")],
+            })
+        answer = director.clean_storylines(ai.storylines(director.storyline_prompt(described)), len(by_time))
+        if not answer["storylines"]:
+            raise director.DirectorError("The AI did not come up with a usable storyline. Try again.")
+        saved = {
+            "storylines": [{**s, "stories": [by_time[n - 1]["key"] for n in s["stories"]]} for s in answer["storylines"]],
+            "names": {by_time[n - 1]["key"]: name for n, name in answer["names"].items()},
+        }
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('storylines', ?)", (json.dumps(saved),))
+        return saved
+
+    def saved_storylines(self) -> dict | None:
+        rows = self.query("SELECT value FROM meta WHERE key = 'storylines'")
+        return json.loads(rows[0]["value"]) if rows else None
+
+    def apply_storyline(self, index: int) -> None:
+        """Put the stories in this storyline's order, switch off the ones it leaves out, and give stories you
+        haven't named yourself the AI's names."""
+        saved = self.saved_storylines()
+        if not saved or not 0 <= index < len(saved["storylines"]):
+            return
+        keys = [s["key"] for s in self.stories()]
+        chosen = [k for k in saved["storylines"][index]["stories"] if k in keys]
+        rest = [k for k in keys if k not in chosen]
+        info = {r["key"]: dict(r) for r in self.query("SELECT * FROM story_info")}
+        with self._lock:
+            for n, key in enumerate(chosen + rest):
+                self.db.execute("INSERT OR IGNORE INTO story_info (key) VALUES (?)", (key,))
+                self.db.execute("UPDATE story_info SET position = ?, enabled = ? WHERE key = ?", (n, int(key in chosen), key))
+                name = saved["names"].get(key)
+                if name and not info.get(key, {}).get("name"):
+                    self.db.execute("UPDATE story_info SET name = ? WHERE key = ?", (name, key))
+            self.db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('storyline_used', ?)", (str(index),))
+            self.db.commit()
+
+    def storyline_used(self) -> int | None:
+        rows = self.query("SELECT value FROM meta WHERE key = 'storyline_used'")
+        return int(rows[0]["value"]) if rows else None
 
     def _thumb_path(self, path: str, rotation: int = 0) -> Path:
         # The rotation is part of the name so the browser shows the turned picture straight away.

@@ -156,6 +156,8 @@ def shot_value(row: dict) -> float:
     if "Shaky" in tags:
         value -= 0.4
     value += 0.1 * np.log1p(row.get("sharpness") or 0) / 8
+    if row.get("ai_score"):
+        value += 0.25 * (row["ai_score"] - 3)  # the AI director's view: a moment worth remembering, or a dull one
     if row.get("quality") is not None:
         value += 0.8 * min(0.0, row["quality"])  # a clip with no steady, sharp stretch is a poor choice
     return value
