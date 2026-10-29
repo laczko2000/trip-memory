@@ -46,6 +46,9 @@ class Motion:
     move_y: list[float] = field(default_factory=list)
     move_zoom: list[float] = field(default_factory=list)
     move_turn: list[float] = field(default_factory=list)
+    # Picture quality, look by look: sharpness (higher = crisper) and brightness (0-255).
+    sharp_steps: list[float] = field(default_factory=list)
+    bright_steps: list[float] = field(default_factory=list)
 
     def camera_tags(self) -> list[str]:
         """How the camera moves: pans, tilts, zooms, whips, turning all the way round, rolling."""
@@ -161,9 +164,13 @@ def from_frames(frames: np.ndarray) -> Motion | None:
     camera = np.array(camera)
     jumps = np.linalg.norm(np.diff(camera[:, :2], axis=0), axis=1) if len(camera) > 1 else np.zeros(0)
     shake = float(jumps.mean()) if len(camera) > 2 else 0.0
+    # Sharpness and brightness of each later look (so they line up with the steps above).
+    sharp = [float(cv2.Laplacian(f, cv2.CV_32F).var()) for f in frames[1:]]
+    bright = [float(f.mean()) for f in frames[1:]]
     return Motion(
         action=float(np.mean(action)), camera=float(camera[:, 2].mean()), shake=shake,
         action_steps=[round(a, 2) for a in action], shake_steps=[0.0] + [round(float(j), 2) for j in jumps],
         move_x=[round(m[0], 2) for m in moves], move_y=[round(m[1], 2) for m in moves],
         move_zoom=[round(m[2], 4) for m in moves], move_turn=[round(m[3], 2) for m in moves],
+        sharp_steps=[round(v, 1) for v in sharp], bright_steps=[round(v, 1) for v in bright],
     )

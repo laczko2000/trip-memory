@@ -59,22 +59,74 @@ def loudness_steps(path: str) -> list[float]:
     return [round(float(v), 1) for v in 20 * np.log10(rms)]
 
 
-def interest(action: list[float], shake: list[float], loud: list[float], n: int) -> np.ndarray:
-    """A score five times a second for how good that moment looks: movement and sound up, shake down."""
+BAD = -2.0  # a moment that should never be on screen
+
+
+def interest(action: list[float], shake: list[float], loud: list[float], n: int, sharp: list[float] | None = None,
+             camera: list[float] | None = None, bright: list[float] | None = None) -> np.ndarray:
+    """A score five times a second for how good that moment looks.
+
+    Movement in the scene and sound count up. Shake, blur, a camera swinging about and sudden changes in
+    brightness count down, and the moments when the phone is being raised or lowered at the start and end
+    are left out altogether."""
 
     def norm(values: list[float], length: int) -> np.ndarray:
         v = np.zeros(length) if not values else np.resize(np.asarray(values, dtype=float), length)
         spread = v.max() - v.min()
         return (v - v.min()) / spread if spread > 0 else np.zeros(length)
 
+    def fit(values: list[float] | None, length: int) -> np.ndarray | None:
+        if not values:
+            return None
+        v = np.asarray(values, dtype=float)
+        return np.concatenate([v, np.full(max(0, length - len(v)), v[-1])])[:length]
+
     score = 0.5 * norm(np.minimum(action, 30).tolist() if action else [], n)
     score += 0.35 * norm(loud, n)
     score -= 0.3 * norm(shake, n)
-    # The very start and end of a phone video are usually the camera being raised or lowered.
+    bad = np.zeros(n, bool)
+    clear = fit(sharp, n)
+    if clear is not None:
+        # Compared with the moments around it (3 s either way), since some scenes simply have less detail.
+        reach = 3 * STEPS_PER_SECOND
+        around = np.array([np.percentile(clear[max(0, i - reach) : i + reach + 1], 80) for i in range(n)])
+        crisp = clear / np.maximum(around, 1e-6)  # 1 = as sharp as it gets around here
+        score -= 0.6 * np.clip(1 - crisp, 0, 1)
+        bad |= crisp < 0.35  # blurred (moving too fast, or out of focus)
+    swing = fit(camera, n)
+    if swing is not None:
+        score -= 0.4 * np.clip((swing - 4) / 8, 0, 1)  # a calm pan is fine; flailing about is not
+        bad |= swing > 14
+    light = fit(bright, n)
+    if light is not None:
+        bad |= np.abs(np.diff(light, prepend=light[0])) > 25  # the exposure jumping
+    # The start and end of a phone video are usually the camera being raised or lowered: leave out the
+    # first and last moments, and more of them while the camera is still swinging or the picture is blurred.
     edge = min(n // 4, STEPS_PER_SECOND)
     score[:edge] -= 0.3
     score[n - edge :] -= 0.3
+    # (A steady pan that runs through the whole clip is meant: only movement well beyond the clip's usual counts.)
+    usual = float(np.median(swing[n // 4 : n - n // 4])) if swing is not None and n >= 4 else 0.0
+    for order in (range(n), range(n - 1, -1, -1)):
+        for k, i in enumerate(order):
+            if k >= min(n // 3, 3 * STEPS_PER_SECOND):
+                break
+            settling = (swing is not None and swing[i] > max(3.0, 2 * usual)) or bad[i]
+            if not settling and k >= STEPS_PER_SECOND // 2:
+                break
+            bad[i] = True
+    score[bad] = BAD
     return score
+
+
+def quality(score: np.ndarray, seconds: float = 2.0) -> float:
+    """How good a clip's best stretch of the given length is (about -2 bad .. 1 great)."""
+    window = max(1, int(round(seconds * STEPS_PER_SECOND)))
+    if len(score) == 0:
+        return 0.0
+    if window >= len(score):
+        return float(score.mean())
+    return float(np.convolve(score, np.ones(window) / window, mode="valid").max())
 
 
 def best_start(score: np.ndarray, duration: float, seconds: float) -> float:
@@ -102,6 +154,8 @@ def shot_value(row: dict) -> float:
     if "Shaky" in tags:
         value -= 0.4
     value += 0.1 * np.log1p(row.get("sharpness") or 0) / 8
+    if row.get("quality") is not None:
+        value += 0.8 * min(0.0, row["quality"])  # a clip with no steady, sharp stretch is a poor choice
     return value
 
 
@@ -406,7 +460,9 @@ def fill_slots(slots: list[Slot], candidates: list[dict], limits: Limits) -> lis
             if best_prev <= neg / 2:
                 continue
             if c["kind"] == "video":
-                if (c["duration"] or 0) < slot.seconds - 0.05 or slot.seconds > limits.max_video * 1.03 + 0.05:
+                # Fits in the clip's longest good stretch (or, if that is very short, the clip as a whole).
+                room = c.get("usable") if (c.get("usable") or 0) >= limits.min_shot else c["duration"]
+                if (room or 0) < slot.seconds - 0.05 or slot.seconds > limits.max_video * 1.03 + 0.05:
                     continue
             elif slot.seconds > limits.max_photo * 1.03 + 0.05:
                 continue
@@ -438,6 +494,11 @@ def plan_to_music(
     for r in rows:
         if r["path"] in curves and len(curves[r["path"]]):
             r["peak"] = float(np.clip(np.percentile(curves[r["path"]], 90), 0, 1))
+            r["quality"] = quality(curves[r["path"]])
+            good = np.concatenate([[False], curves[r["path"]] > BAD, [False]]).astype(int)
+            edges = np.flatnonzero(np.diff(good))
+            runs = edges[1::2] - edges[::2]
+            r["usable"] = float(runs.max()) / STEPS_PER_SECOND if len(runs) else 0.0  # longest good stretch
     candidates = arrange(choose(rows), limits.storyline)
     end = song.duration if target is None or target >= song.duration else target
     if target is not None and target < song.duration:

@@ -436,7 +436,8 @@ class Trip:
 
     def _video_scores(self, rows: list[dict], report) -> dict:
         videos = [r for r in rows if r["kind"] == "video"]
-        for n, r in enumerate(v for v in videos if not v["curves"]):
+        # Videos measured by older versions lack the sharpness and camera curves: measure those again.
+        for n, r in enumerate(v for v in videos if not v["curves"] or '"sharp"' not in v["curves"]):
             report(n / max(1, len(videos)), f"Finding the best moments: {Path(r['path']).name}")
             moved = motion.measure(r["path"])
             if moved:
@@ -454,7 +455,8 @@ class Trip:
             if r["curves"]:
                 c = json.loads(r["curves"])
                 n = max(len(c["action"]) + 1, int((r["duration"] or 0) * motion.FPS))
-                scores[r["path"]] = autoedit.interest(c["action"], c["shake"], c["loud"], n)
+                scores[r["path"]] = autoedit.interest(c["action"], c["shake"], c["loud"], n, c.get("sharp"),
+                                                      c.get("camera"), c.get("bright"))
         return scores
 
     def _apply_plan(self, result: autoedit.Plan) -> None:
@@ -942,7 +944,9 @@ def _with_camera(tags: list[str], camera: list[str]) -> list[str]:
 def _curves_json(moved: motion.Motion, path: Path, has_audio) -> str:
     """Movement and loudness five times a second, for finding a video's best moment."""
     loud = autoedit.loudness_steps(str(path)) if has_audio else []
-    return json.dumps({"action": moved.action_steps, "shake": moved.shake_steps, "loud": loud})
+    camera = [round(float(np.hypot(x, y)), 2) for x, y in zip(moved.move_x, moved.move_y)]
+    return json.dumps({"action": moved.action_steps, "shake": moved.shake_steps, "loud": loud,
+                       "sharp": moved.sharp_steps, "bright": moved.bright_steps, "camera": camera})
 
 
 def story_name(members: list[dict]) -> str:

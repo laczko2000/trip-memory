@@ -176,3 +176,16 @@ def test_speed_effects():
                                                                      storyline="date", speed_effects=False),
                                  None, 0.8, "Fade")
     assert all(s.speed == 1.0 for s in off.shots)
+
+
+def test_the_shaky_blurred_ends_of_a_clip_are_never_used():
+    n = 60  # 12 s at five steps a second
+    camera = [12.0] * 8 + [1.0] * 40 + [15.0] * 12  # raising the phone, a steady stretch, swinging it down
+    sharp = [20.0] * 8 + [200.0] * 40 + [30.0] * 12
+    action = [3.0] * n
+    action[50:56] = [25.0] * 6  # the "action" is in the blurred, swinging end: must not win
+    score = autoedit.interest(action, [0.2] * n, [], n, sharp, camera, [120.0] * n)
+    assert (score[:8] == autoedit.BAD).all() and (score[48:] == autoedit.BAD).all()
+    start = autoedit.best_start(score, 12.0, 3.0)
+    assert 1.6 <= start and start + 3.0 <= 9.6
+    assert autoedit.quality(score) >= 0  # its best stretch is a clean one
