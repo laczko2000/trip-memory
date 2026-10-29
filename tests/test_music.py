@@ -65,3 +65,10 @@ def test_one_slow_library_is_fine(monkeypatch):
     monkeypatch.setattr(music, "search_openverse", slow)
     monkeypatch.setattr(music, "search_ccmixter", lambda *_: music.parse_ccmixter(CCMIXTER))
     assert [s.title for s in music.search("road")] == ["Road Song"]
+
+
+def test_credit_remembered_for_songs_you_download_yourself(tmp_path):
+    song = music.parse_ccmixter(CCMIXTER)[0]
+    name = music.remember_credit(song, tmp_path / "music")
+    assert name == "road.mp3"
+    assert music.credit_for(tmp_path / "Downloads" / "road.mp3", tmp_path / "music") == song.credit

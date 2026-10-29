@@ -176,10 +176,23 @@ def download(song: Song, folder: Path) -> Path:
     return path
 
 
-def credit_for(music_path: str | Path) -> str | None:
-    """The credit line for a downloaded song, if the music is one."""
+def remember_credit(song: Song, folder: Path) -> str:
+    """For a song you download yourself on its website: remember its credit under the file's usual name,
+    so the credits file is still written when you pick that file with Browse. Returns that file name."""
+    name = Path(song.url.split("?")[0]).name
+    folder.mkdir(parents=True, exist_ok=True)
+    credits = _load_credits(folder)
+    credits[name] = asdict(song) | {"credit": song.credit, "downloaded_by_you": True}
+    (folder / "credits.json").write_text(json.dumps(credits, indent=1))
+    return name
+
+
+def credit_for(music_path: str | Path, registry: Path | None = None) -> str | None:
+    """The credit line for a song found with Find free music, if the music is one."""
     path = Path(music_path)
     entry = _load_credits(path.parent).get(path.name)
+    if not entry and registry:
+        entry = _load_credits(registry).get(path.name)
     return entry["credit"] if entry else None
 
 

@@ -713,7 +713,7 @@ class Page:
 
     def music_changed(self) -> None:
         if hasattr(self, "music_credit"):
-            credit = free_music.credit_for(self.music_input.value) if self.music_input.value else None
+            credit = free_music.credit_for(self.music_input.value, app_dir() / "music") if self.music_input.value else None
             self.music_credit.text = f"Free song: {credit}. A credits file is saved next to your video." if credit else ""
         self.auto_length = None  # back to the default: as long as the song, if there is one
         self.storyboard_view.refresh()
@@ -959,7 +959,18 @@ class Page:
                 except Exception as exc:
                     traceback.print_exc()
                     note.dismiss()
-                    ui.notify(f"Could not download it: {exc}", type="negative", multi_line=True)
+                    if "403" in str(exc) and song.page:
+                        # Some sites (like ccMixter) only allow downloads from their own web page.
+                        name = free_music.remember_credit(song, app_dir() / "music")
+                        ui.navigate.to(song.page, new_tab=True)
+                        ui.notify(
+                            f"{song.source or 'This site'} only allows downloading from its own page, which is now open "
+                            f"in a new tab. Download the song there, then pick {name} with Browse. "
+                            "The app still remembers its credit.",
+                            type="warning", multi_line=True, timeout=20000, close_button=True,
+                        )
+                    else:
+                        ui.notify(f"Could not download it: {exc}", type="negative", multi_line=True)
                     return
                 note.dismiss()
                 self.music_input.value = str(path)
@@ -1014,7 +1025,7 @@ class Page:
         try:
             result = await run.io_bound(render, items, settings, out, on_progress, app_dir() / "clip-cache")
             self.render_status.text = f"Saved to {result}"
-            credit = free_music.credit_for(settings.music_path) if settings.music_path else None
+            credit = free_music.credit_for(settings.music_path, app_dir() / "music") if settings.music_path else None
             if credit:
                 credits = result.with_name(result.stem + " - music credits.txt")
                 credits.write_text(f"Music: {credit}\n")
