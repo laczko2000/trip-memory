@@ -41,3 +41,27 @@ def test_download_and_credit(tmp_path, monkeypatch):
         assert music.credit_for(tmp_path / "other.mp3") is None
     finally:
         server.shutdown()
+
+
+CCMIXTER = [
+    {"upload_id": 7, "upload_name": "Road Song", "user_name": "bob", "user_real_name": "Bob B",
+     "file_page_url": "http://ccmixter.org/files/bob/7", "license_name": "Attribution (3.0)",
+     "license_url": "http://creativecommons.org/licenses/by/3.0/",
+     "files": [{"download_url": "http://ccmixter.org/content/bob/road.mp3", "file_format_info": {"ps": "3:05"}}]},
+    {"upload_id": 8, "upload_name": "No Edits", "user_name": "x", "license_url": "http://creativecommons.org/licenses/by-nd/3.0/",
+     "files": [{"download_url": "http://ccmixter.org/content/x/a.mp3", "file_format_info": {"ps": "2:00"}}]},
+]
+
+
+def test_parse_ccmixter():
+    songs = music.parse_ccmixter(CCMIXTER)
+    assert [(s.title, s.artist, s.seconds) for s in songs] == [("Road Song", "Bob B", 185.0)]
+
+
+def test_one_slow_library_is_fine(monkeypatch):
+    def slow(*_args):
+        raise TimeoutError("The read operation timed out")
+
+    monkeypatch.setattr(music, "search_openverse", slow)
+    monkeypatch.setattr(music, "search_ccmixter", lambda *_: music.parse_ccmixter(CCMIXTER))
+    assert [s.title for s in music.search("road")] == ["Road Song"]

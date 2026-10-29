@@ -1,7 +1,8 @@
-"""Find free music online (Creative Commons songs from Jamendo, ccMixter and others, via Openverse).
+"""Find free music online: Creative Commons songs from Openverse (Jamendo, Freesound and others) and ccMixter.
 
-Openverse is a free search engine for openly licensed media run by the WordPress Foundation; it needs no
-account. Only songs whose licence allows using them in your own video are shown. Most ask you to credit
+Both need no account. Openverse is a free search engine for openly licensed media run by the WordPress
+Foundation; ccMixter is a long-running community music site. Both are asked at once, and whatever answers
+in time is shown. Only songs whose licence allows using them in your own video are shown. Most ask you to credit
 the artist, so the app saves a credits file next to every video that uses one.
 """
 
@@ -15,6 +16,8 @@ from pathlib import Path
 import httpx
 
 API = "https://api.openverse.org/v1/audio/"
+CCMIXTER = "https://ccmixter.org/api/query"
+TIMEOUT = httpx.Timeout(45, connect=15)
 HEADERS = {"User-Agent": "TripMemory/1.0 (personal holiday video app)"}
 MOODS = ["Happy", "Summer", "Chill", "Acoustic", "Upbeat", "Cinematic", "Piano", "Tropical", "Road trip", "Epic"]
 
@@ -37,7 +40,30 @@ class Song:
 
 
 def search(words: str, page: int = 1) -> list[Song]:
-    """Songs matching the words, long enough for a video, whose licence allows using them in it."""
+    """Songs matching the words, long enough for a video, whose licence allows using them in it.
+
+    Asks both libraries at once; fails only if neither answers."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(2) as pool:
+        jobs = [pool.submit(search_openverse, words, page), pool.submit(search_ccmixter, words, page)]
+        found, errors = [], []
+        for job in jobs:
+            try:
+                found.append(job.result())
+            except Exception as exc:  # one library being slow or down is fine
+                errors.append(exc)
+    if not found:
+        raise errors[0]
+    # Mix the two lists so both libraries show near the top.
+    mixed = [song for pair in zip(*found) for song in pair] if len(found) == 2 else found[0]
+    if len(found) == 2:
+        n = min(len(found[0]), len(found[1]))
+        mixed += found[0][n:] + found[1][n:]
+    return mixed
+
+
+def search_openverse(words: str, page: int = 1) -> list[Song]:
     params = {
         "q": words or "happy",
         "category": "music",
@@ -46,9 +72,62 @@ def search(words: str, page: int = 1) -> list[Song]:
         "page": page,
         "mature": "false",
     }
-    response = httpx.get(API, params=params, headers=HEADERS, timeout=20, follow_redirects=True)
-    response.raise_for_status()
+    response = _get(API, params)
     return parse(response.json())
+
+
+def search_ccmixter(words: str, page: int = 1) -> list[Song]:
+    params = {"f": "json", "search": words or "happy", "search_type": "any", "sort": "rank", "limit": 20,
+              "offset": 20 * (page - 1), "type": "instrumentals"}
+    return parse_ccmixter(_get(CCMIXTER, params).json())
+
+
+def _get(url: str, params: dict) -> httpx.Response:
+    for attempt in range(2):
+        try:
+            response = httpx.get(url, params=params, headers=HEADERS, timeout=TIMEOUT, follow_redirects=True)
+            response.raise_for_status()
+            return response
+        except (httpx.TimeoutException, httpx.HTTPStatusError) as exc:
+            if attempt or (isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code < 500):
+                raise
+    raise RuntimeError("unreachable")
+
+
+def parse_ccmixter(data: list) -> list[Song]:
+    songs = []
+    for r in data if isinstance(data, list) else []:
+        files = [f for f in r.get("files") or [] if str(f.get("download_url", "")).lower().endswith(".mp3")]
+        licence_url = r.get("license_url") or ""
+        if not files or "-nd" in licence_url or "/nd" in licence_url:
+            continue  # no mp3, or a licence that forbids putting it to pictures
+        f = files[0]
+        seconds = _minutes(((f.get("file_format_info") or {}).get("ps")) or "")
+        if seconds and seconds < 45:
+            continue
+        songs.append(Song(
+            id=f"ccmixter-{r.get('upload_id')}",
+            title=r.get("upload_name") or "Untitled",
+            artist=r.get("user_real_name") or r.get("user_name") or "Unknown artist",
+            seconds=seconds,
+            url=f["download_url"],
+            page=r.get("file_page_url") or f["download_url"],
+            licence=r.get("license_name") or "Creative Commons",
+            licence_url=licence_url,
+            source="ccmixter",
+        ))
+    return songs
+
+
+def _minutes(text: str) -> float:
+    try:
+        parts = [float(p) for p in text.split(":")]
+    except ValueError:
+        return 0.0
+    total = 0.0
+    for p in parts:
+        total = total * 60 + p
+    return total
 
 
 def parse(data: dict) -> list[Song]:
@@ -84,7 +163,8 @@ def download(song: Song, folder: Path) -> Path:
     path = folder / f"{safe or 'song'} [{hashlib.sha1(song.id.encode()).hexdigest()[:6]}]{suffix}"
     if not path.exists():
         part = path.with_suffix(path.suffix + ".part")
-        with httpx.stream("GET", song.url, headers=HEADERS, timeout=60, follow_redirects=True) as response:
+        with httpx.stream("GET", song.url, headers=HEADERS, timeout=httpx.Timeout(60, connect=15),
+                          follow_redirects=True) as response:
             response.raise_for_status()
             with open(part, "wb") as f:
                 for chunk in response.iter_bytes():

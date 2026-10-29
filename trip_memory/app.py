@@ -901,7 +901,7 @@ class Page:
         with ui.dialog().props("maximized=false") as dialog, ui.card().classes("w-full max-w-3xl"):
             ui.label("Find free music").classes("text-lg font-semibold")
             ui.label(
-                "Creative Commons songs from Jamendo, ccMixter and others (found with Openverse). Only songs you may "
+                "Creative Commons songs from Openverse (Jamendo, Freesound and others) and ccMixter. Only songs you may "
                 "use in your own video are shown. Most ask you to credit the artist: the app saves a credits file next "
                 "to your video."
             ).classes("text-sm text-gray-600")
@@ -915,7 +915,9 @@ class Page:
             @ui.refreshable
             def results() -> None:
                 if state["busy"]:
-                    ui.spinner(size="lg")
+                    with ui.row().classes("items-center"):
+                        ui.spinner(size="lg")
+                        ui.label("Searching the free music libraries… this can take up to a minute.").classes("text-gray-500")
                     return
                 if state["error"]:
                     ui.label(state["error"]).classes("text-red-600")

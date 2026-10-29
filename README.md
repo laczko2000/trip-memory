@@ -57,6 +57,7 @@ Everything runs on your Mac. Nothing is uploaded.
 
 ## What's new
 
+- **0.11.1:** free music search also asks ccMixter and waits longer, so a slow library no longer stops it.
 - **0.11:** Find free music: search and download Creative Commons songs (via Openverse); a credits file is saved next to the video.
 - **0.10:** ✨ Auto-edit in the Storyboard: a first cut at the length you want, best moments, cuts on the music's beat.
 - **0.9.1:** Storyboard previews play with sound.
