@@ -11,25 +11,36 @@ Nothing is uploaded anywhere.
 2. Your browser opens the Trip Memory page. If not, go to <http://localhost:8765>.
 3. To stop the app, close the Terminal window.
 
-## Make a video
+## Use it
 
-1. **Choose your trip folder** with *Browse…*. The app lists every video and photo, sorted by when it was taken.
-2. **Choose the style:** transition, how long photos show, how much of each video to keep, and optional music.
-3. **Make my video.** When it's done you can watch it right there. The file is saved in
+1. **Choose your trip folder** with *Browse…*. The app looks through every video and photo and works out:
+   - **when** each was taken (sorted by day),
+   - **where**: the place name from the phone's GPS, looked up offline,
+   - **what**: a suggested scene type such as Beach, City, Food or Group photo,
+   - **who**: faces grouped by person.
+
+   The first time, it downloads the free AI models (about 650 MB). Each trip is analysed once and remembered;
+   adding new files later only analyses the new ones.
+2. **Library tab:** browse the thumbnails, filter by day, place, scene or person, correct a scene if it's wrong,
+   and tick or untick what goes into the video.
+3. **People tab:** type a name under each face group and press Enter. Give two groups the same name to merge
+   them; use the crossed-out eye to hide a group.
+4. **Make video tab:** choose transition, photo length, music, then **Make my video**. The file is saved in
    *Movies → Trip Memory*.
 
-## What it does today (milestone 2)
+Everything runs on your Mac. Nothing is uploaded.
 
-- Reads videos (MOV, MP4 and more) and photos (JPG, HEIC, PNG and more), including subfolders.
-- Sorts everything by the date and time stored in the files.
-- Vertical videos and photos get a soft blurred background instead of black bars.
-- Photos get a slow zoom so they don't look static.
-- iPhone HDR videos are converted so colours don't look washed out.
-- Joins everything with the transition you pick, fades in and out, and mixes in music.
+## What's new
+
+- **0.3 (milestone 3):** trip catalogue with places, scene suggestions, people, filters and picking.
+- **0.2 (milestone 2):** basic stitcher: date order, blurred background for vertical shots, slow zoom on photos,
+  HDR fix, transitions, music.
 
 ## For the engineer
 
-- Python engine in `trip_memory/` (`media.py` finds and dates files, `render.py` builds the video with FFmpeg,
-  `app.py` is the NiceGUI screen).
+- Python engine in `trip_memory/`: `media.py` finds and dates files, `catalog.py` keeps the per-trip SQLite
+  catalogue (in ~/Library/Application Support/TripMemory), `faces.py` (InsightFace buffalo_l via onnxruntime),
+  `scenes.py` (CLIP via fastembed), `render.py` builds the video with FFmpeg, `app.py` is the NiceGUI screen.
+- Face models are InsightFace's, licensed for non-commercial use only.
 - Run with `uv run trip-memory`. Tests: `uv run pytest`.
 - FFmpeg comes from the system if installed, otherwise the `static-ffmpeg` package downloads a free build once.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,8 @@ EXIF_IFD = 0x8769
 DATETIME_ORIGINAL = 36867
 OFFSET_TIME_ORIGINAL = 36881
 DATETIME = 306
+GPS_IFD = 0x8825
+ISO6709 = re.compile(r"([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)")
 
 
 @dataclass
@@ -35,6 +38,8 @@ class MediaItem:
     duration: float = 0.0  # seconds, videos only
     has_audio: bool = False
     hdr: bool = False
+    lat: float | None = None
+    lon: float | None = None
 
     @property
     def name(self) -> str:
@@ -61,7 +66,18 @@ def _parse_iso(text: str) -> datetime | None:
         return None
 
 
-def photo_taken_at(path: Path) -> datetime:
+def _gps_degrees(value, ref) -> float | None:
+    try:
+        d, m, s = (float(v) for v in value)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    deg = d + m / 60 + s / 3600
+    return -deg if str(ref).upper().startswith(("S", "W")) else deg
+
+
+def read_photo(path: Path) -> MediaItem:
+    taken = None
+    lat = lon = None
     try:
         with Image.open(path) as img:
             exif = img.getexif()
@@ -72,10 +88,19 @@ def photo_taken_at(path: Path) -> datetime:
                 offset = sub.get(OFFSET_TIME_ORIGINAL)
                 if offset:
                     dt = _parse_iso(dt.isoformat() + str(offset).strip()) or dt
-                return _local(dt)
+                taken = _local(dt)
+            gps = exif.get_ifd(GPS_IFD)
+            if gps.get(2) and gps.get(4):
+                lat, lon = _gps_degrees(gps[2], gps.get(1, "N")), _gps_degrees(gps[4], gps.get(3, "E"))
     except (OSError, ValueError):
         pass
-    return _file_time(path)
+    if lat == 0 and lon == 0:  # cameras without a GPS fix sometimes write 0,0
+        lat = lon = None
+    return MediaItem(path=path, kind="photo", taken_at=taken or _file_time(path), lat=lat, lon=lon)
+
+
+def photo_taken_at(path: Path) -> datetime:
+    return read_photo(path).taken_at
 
 
 def read_video(path: Path) -> MediaItem:
@@ -94,6 +119,12 @@ def read_video(path: Path) -> MediaItem:
             if taken:
                 break
     duration = float(info.get("format", {}).get("duration") or video.get("duration") or 0)
+    lat = lon = None
+    for key in ("com.apple.quicktime.location.iso6709", "location"):
+        match = ISO6709.match(fmt_tags.get(key, ""))
+        if match:
+            lat, lon = float(match.group(1)), float(match.group(2))
+            break
     return MediaItem(
         path=path,
         kind="video",
@@ -101,6 +132,8 @@ def read_video(path: Path) -> MediaItem:
         duration=duration,
         has_audio=any(s.get("codec_type") == "audio" for s in streams),
         hdr=video.get("color_transfer") in ("arib-std-b67", "smpte2084"),
+        lat=lat,
+        lon=lon,
     )
 
 
@@ -121,7 +154,7 @@ def scan_folder(folder: str | Path) -> tuple[list[MediaItem], list[str]]:
                     if item.duration > 0.2:
                         items.append(item)
                 elif ext in PHOTO_EXTS:
-                    items.append(MediaItem(path=path, kind="photo", taken_at=photo_taken_at(path)))
+                    items.append(read_photo(path))
             except (FFmpegError, OSError) as exc:
                 problems.append(f"Skipped {filename}: {exc}")
     items.sort(key=lambda i: (i.taken_at, i.name))

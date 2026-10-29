@@ -2,33 +2,36 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path
 
 from nicegui import app, run, ui
 
-from .media import MediaItem, scan_folder
+from .catalog import Trip, app_dir
 from .render import TRANSITIONS, RenderSettings, render
+from .scenes import SCENES
 
 OUTPUT_DIR = Path.home() / "Movies" / "Trip Memory"
 RESOLUTIONS = {"Full HD (1080p)": (1920, 1080), "HD (720p, faster)": (1280, 720)}
+PAGE_SIZE = 48
+ALL = "All"
+SETTINGS = app_dir() / "settings.json"
 
 
-class State:
-    folder: str = ""
-    items: list[MediaItem] = []
-    problems: list[str] = []
-    progress: float = 0.0
-    message: str = ""
-    busy: bool = False
-    result: Path | None = None
-    error: str = ""
+def load_settings() -> dict:
+    try:
+        return json.loads(SETTINGS.read_text())
+    except (OSError, ValueError):
+        return {}
 
 
-state = State()
+def save_settings(**values) -> None:
+    SETTINGS.write_text(json.dumps({**load_settings(), **values}))
 
 
 def choose_with_finder(kind: str) -> str | None:
@@ -47,176 +50,394 @@ def choose_with_finder(kind: str) -> str | None:
     return result.stdout.strip() or None
 
 
-def fmt_date(dt: datetime) -> str:
-    return dt.astimezone().strftime("%d %b %Y, %H:%M")
+def data_url(path: str | None) -> str:
+    """Web address for a thumbnail stored in the app's data folder."""
+    if not path:
+        return ""
+    return "/data/" + str(Path(path).relative_to(app_dir()))
 
 
-def fmt_length(item: MediaItem) -> str:
-    if item.kind == "photo":
-        return "photo"
-    m, s = divmod(round(item.duration), 60)
+def fmt_time(iso: str) -> str:
+    return datetime.fromisoformat(iso).astimezone().strftime("%a %d %b, %H:%M")
+
+
+def fmt_length(seconds: float) -> str:
+    m, s = divmod(round(seconds), 60)
     return f"{m}:{s:02d}"
 
 
-def summary(items: list[MediaItem]) -> str:
-    videos = sum(i.kind == "video" for i in items)
-    photos = len(items) - videos
-    if not items:
-        return "No videos or photos found in this folder."
-    first, last = items[0].taken_at.astimezone(), items[-1].taken_at.astimezone()
-    span = first.strftime("%d %b %Y") if first.date() == last.date() else f"{first:%d %b} to {last:%d %b %Y}"
-    return f"Found {videos} videos and {photos} photos, taken {span}."
+class Page:
+    """Everything on the screen for one browser tab."""
 
+    def __init__(self) -> None:
+        self.trip: Trip | None = None
+        self.items: list[dict] = []
+        self.dirty = False
+        self.last_refresh = 0.0
+        self.filters = {"day": ALL, "place": ALL, "scene": ALL, "person": ALL, "show": ALL}
+        self.page = 1
+        self.rendering = {"busy": False, "progress": 0.0, "message": "", "result": None}
 
-def build_page() -> None:
-    ui.colors(primary="#2563eb")
-    with ui.column().classes("w-full max-w-4xl mx-auto p-4 gap-4"):
-        ui.label("Trip Memory").classes("text-3xl font-bold")
-        ui.label("Turn a folder of holiday videos and photos into one memory video.").classes("text-gray-500")
+    # ---------- data ----------
 
-        # 1. Folder
+    def reload(self) -> None:
+        self.items = self.trip.items() if self.trip else []
+        self.dirty = False
+        self.last_refresh = time.time()
+
+    def shown(self) -> list[dict]:
+        f = self.filters
+        out = []
+        for it in self.items:
+            if f["day"] != ALL and it["day"] != f["day"]:
+                continue
+            if f["place"] != ALL and (it["place"] or "Unknown place") != f["place"]:
+                continue
+            if f["scene"] != ALL and (it["scene_final"] or "Not sorted yet") != f["scene"]:
+                continue
+            if f["person"] != ALL and f["person"] not in it["people"]:
+                continue
+            if f["show"] == "In the video" and not it["included"]:
+                continue
+            if f["show"] == "Left out" and it["included"]:
+                continue
+            out.append(it)
+        return out
+
+    def options(self) -> dict[str, dict]:
+        days = sorted({it["day"] for it in self.items})
+        day_opts = {ALL: "All days"}
+        for n, d in enumerate(days, 1):
+            day_opts[d] = f"Day {n} · {datetime.fromisoformat(d):%a %d %b}"
+        places = sorted({it["place"] or "Unknown place" for it in self.items})
+        scenes = sorted({it["scene_final"] or "Not sorted yet" for it in self.items})
+        people = sorted({p for it in self.items for p in it["people"]})
+        return {
+            "day": day_opts,
+            "place": {ALL: "All places", **{p: p for p in places}},
+            "scene": {ALL: "All scenes", **{s: s for s in scenes}},
+            "person": {ALL: "Everyone", **{p: p for p in people}},
+            "show": {ALL: "In and out of the video", "In the video": "Only in the video", "Left out": "Only left out"},
+        }
+
+    # ---------- building the screen ----------
+
+    def build(self) -> None:
+        ui.colors(primary="#2563eb")
+        ui.add_css(".thumb { height: 150px; object-fit: cover; }")
+        with ui.column().classes("w-full max-w-6xl mx-auto p-4 gap-3"):
+            ui.label("Trip Memory").classes("text-3xl font-bold")
+            self.build_folder_row()
+            with ui.tabs().classes("w-full") as tabs:
+                library_tab = ui.tab("Library", icon="photo_library")
+                people_tab = ui.tab("People", icon="people")
+                video_tab = ui.tab("Make video", icon="movie")
+            with ui.tab_panels(tabs, value=library_tab).classes("w-full"):
+                with ui.tab_panel(library_tab):
+                    self.build_library()
+                with ui.tab_panel(people_tab):
+                    self.people_view()
+                with ui.tab_panel(video_tab):
+                    self.build_video()
+        ui.timer(1.0, self.tick)
+        last = load_settings().get("folder")
+        if last and Path(last).is_dir():
+            self.folder_input.value = last
+            ui.timer(0.1, lambda: self.open_trip(analyse=False), once=True)
+
+    def build_folder_row(self) -> None:
         with ui.card().classes("w-full"):
-            ui.label("1. Choose your trip folder").classes("text-lg font-semibold")
             with ui.row().classes("w-full items-center"):
-                folder_input = ui.input("Folder", placeholder="/Users/you/Pictures/Lisbon 2025").classes("flex-grow")
+                self.folder_input = ui.input("Trip folder", placeholder="/Users/you/Pictures/Lisbon 2025").classes("flex-grow")
                 if sys.platform == "darwin":
-                    async def browse_folder() -> None:
-                        path = await run.io_bound(choose_with_finder, "folder")
-                        if path:
-                            folder_input.value = path
-                            await scan()
+                    ui.button("Browse…", on_click=self.browse_folder).props("outline")
+                self.analyse_button = ui.button("Open and analyse", icon="auto_awesome", on_click=lambda: self.open_trip(True))
+            self.progress_bar = ui.linear_progress(value=0, show_value=False).classes("w-full")
+            self.progress_label = ui.label("Choose a trip folder. The app finds places, scenes and people for you.").classes("text-gray-600")
+            self.notes_label = ui.label("").classes("text-orange-600 text-sm whitespace-pre-line")
+            self.progress_bar.set_visibility(False)
 
-                    ui.button("Browse…", on_click=browse_folder).props("outline")
-                scan_button = ui.button("Find videos and photos")
-            summary_label = ui.label("")
-            problems_label = ui.label("").classes("text-orange-600 text-sm whitespace-pre-line")
-            table = ui.table(
-                columns=[
-                    {"name": "n", "label": "#", "field": "n", "align": "left"},
-                    {"name": "kind", "label": "Type", "field": "kind", "align": "left"},
-                    {"name": "name", "label": "File", "field": "name", "align": "left"},
-                    {"name": "date", "label": "Taken", "field": "date", "align": "left"},
-                    {"name": "length", "label": "Length", "field": "length", "align": "left"},
-                ],
-                rows=[],
-                pagination=10,
-            ).classes("w-full")
-            table.set_visibility(False)
+    async def browse_folder(self) -> None:
+        path = await run.io_bound(choose_with_finder, "folder")
+        if path:
+            self.folder_input.value = path
+            await self.open_trip(True)
 
-        async def scan() -> None:
-            folder = (folder_input.value or "").strip().strip("'\"")
-            if not folder or not Path(folder).expanduser().is_dir():
-                ui.notify("Please choose a folder that exists.", type="warning")
-                return
-            state.folder = str(Path(folder).expanduser())
-            summary_label.text = "Looking through the folder…"
-            scan_button.disable()
+    async def open_trip(self, analyse: bool = True) -> None:
+        folder = (self.folder_input.value or "").strip().strip("'\"")
+        if not folder or not Path(folder).expanduser().is_dir():
+            ui.notify("Please choose a folder that exists.", type="warning")
+            return
+        if self.trip and self.trip.progress.running:
+            ui.notify("Still analysing, please wait.", type="warning")
+            return
+        self.trip = Trip(folder)
+        save_settings(folder=str(self.trip.folder))
+        self.filters = {k: ALL for k in self.filters}
+        self.refresh_all()
+        if analyse or not self.items:
+            self.analyse_button.disable()
+            self.progress_bar.set_visibility(True)
             try:
-                state.items, state.problems = await run.io_bound(scan_folder, state.folder)
+                await run.io_bound(self.trip.analyse, self.mark_dirty)
+            except Exception as exc:
+                traceback.print_exc()
+                ui.notify(f"Analysis stopped: {exc}", type="negative")
             finally:
-                scan_button.enable()
-            summary_label.text = summary(state.items)
-            problems_label.text = "\n".join(state.problems[:10])
-            table.rows = [
-                {"n": i + 1, "kind": item.kind, "name": item.name, "date": fmt_date(item.taken_at), "length": fmt_length(item)}
-                for i, item in enumerate(state.items)
-            ]
-            table.set_visibility(bool(state.items))
+                self.analyse_button.enable()
+            self.refresh_all()
 
-        scan_button.on_click(scan)
+    def mark_dirty(self) -> None:
+        self.dirty = True
 
-        # 2. Style
+    def tick(self) -> None:
+        if self.trip:
+            p = self.trip.progress
+            if p.running:
+                self.progress_bar.set_visibility(True)
+                self.progress_bar.value = p.fraction
+                self.progress_label.text = p.message
+                if self.dirty and time.time() - self.last_refresh > 8:
+                    self.refresh_all()
+            else:
+                self.progress_bar.set_visibility(False)
+                self.progress_label.text = f"{self.trip.folder.name}: {len(self.items)} videos and photos."
+            self.notes_label.text = "\n".join(p.notes[:8])
+        r = self.rendering
+        if r["busy"]:
+            self.render_progress.value = r["progress"]
+            self.render_status.text = r["message"]
+
+    def refresh_all(self) -> None:
+        self.reload()
+        self.filters_view.refresh()
+        self.gallery.refresh()
+        self.people_view.refresh()
+        self.video_summary.refresh()
+
+    # ---------- Library ----------
+
+    def build_library(self) -> None:
+        self.filters_view()
+        self.gallery()
+
+    @ui.refreshable
+    def filters_view(self) -> None:
+        if not self.items:
+            return
+        opts = self.options()
+        with ui.row().classes("w-full items-end gap-3"):
+            for key, label in (("day", "Day"), ("place", "Place"), ("scene", "Scene"), ("person", "Person"), ("show", "Show")):
+                if self.filters[key] not in opts[key]:
+                    self.filters[key] = ALL
+                ui.select(opts[key], value=self.filters[key], label=label, on_change=lambda e, k=key: self.set_filter(k, e.value)).classes("min-w-36")
+        with ui.row().classes("items-center gap-2"):
+            ui.button("Put all shown in the video", icon="check_box", on_click=lambda: self.include_shown(True)).props("flat dense")
+            ui.button("Leave all shown out", icon="check_box_outline_blank", on_click=lambda: self.include_shown(False)).props("flat dense")
+
+    def set_filter(self, key: str, value: str) -> None:
+        self.filters[key] = value
+        self.page = 1
+        self.gallery.refresh()
+
+    def include_shown(self, included: bool) -> None:
+        self.trip.set_included([it["path"] for it in self.shown()], included)
+        self.reload()
+        self.gallery.refresh()
+        self.video_summary.refresh()
+
+    @ui.refreshable
+    def gallery(self) -> None:
+        if not self.items:
+            if self.trip:
+                ui.label("Nothing to show yet.").classes("text-gray-500")
+            return
+        shown = self.shown()
+        in_video = sum(it["included"] for it in self.items)
+        ui.label(f"Showing {len(shown)} of {len(self.items)} · {in_video} in the video").classes("text-sm text-gray-500")
+        pages = max(1, -(-len(shown) // PAGE_SIZE))
+        self.page = min(self.page, pages)
+        with ui.grid().classes("w-full gap-3 grid-cols-2 sm:grid-cols-3 md:grid-cols-4"):
+            for it in shown[(self.page - 1) * PAGE_SIZE : self.page * PAGE_SIZE]:
+                self.card(it)
+        if pages > 1:
+            ui.pagination(1, pages, direction_links=True, value=self.page, on_change=lambda e: self.go_to_page(e.value))
+
+    def go_to_page(self, page: int) -> None:
+        self.page = page
+        self.gallery.refresh()
+
+    def card(self, it: dict) -> None:
+        with ui.card().tight().classes("w-full" + ("" if it["included"] else " opacity-50")):
+            if it["thumb"]:
+                ui.image(data_url(it["thumb"])).classes("w-full thumb")
+            else:
+                ui.label("Analysing…").classes("w-full thumb flex items-center justify-center bg-gray-100 text-gray-400")
+            with ui.column().classes("p-2 gap-1 w-full"):
+                icon = "🎬 " + fmt_length(it["duration"]) if it["kind"] == "video" else "📷"
+                ui.label(f"{icon} · {fmt_time(it['taken_at'])}").classes("text-xs text-gray-600")
+                place = ", ".join(x for x in (it["place"], it["country"]) if x) or "Unknown place"
+                ui.label(f"📍 {place}").classes("text-xs")
+                ui.select(
+                    [*SCENES],
+                    value=it["scene_final"],
+                    label="Scene",
+                    on_change=lambda e, path=it["path"]: self.trip.set_scene(path, e.value),
+                ).props("dense options-dense").classes("w-full text-xs")
+                if it["people"]:
+                    with ui.row().classes("gap-1"):
+                        for name in it["people"]:
+                            ui.badge(name).props("outline")
+                ui.checkbox(
+                    "In the video",
+                    value=bool(it["included"]),
+                    on_change=lambda e, path=it["path"]: self.toggle(path, e.value),
+                ).props("dense")
+
+    def toggle(self, path: str, included: bool) -> None:
+        self.trip.set_included([path], included)
+        for it in self.items:
+            if it["path"] == path:
+                it["included"] = int(included)
+        self.video_summary.refresh()
+
+    # ---------- People ----------
+
+    @ui.refreshable
+    def people_view(self) -> None:
+        if not self.trip:
+            ui.label("Open a trip first.").classes("text-gray-500")
+            return
+        people = self.trip.people()
+        if not people:
+            ui.label("No faces found yet.").classes("text-gray-500")
+            return
+        ui.label(
+            "Type a name and press Enter. If the same person shows up twice, give both the same name and they are merged."
+        ).classes("text-sm text-gray-600")
+        with ui.grid().classes("w-full gap-3 grid-cols-1 sm:grid-cols-2 md:grid-cols-3"):
+            for person in people:
+                with ui.card().classes("w-full"):
+                    with ui.row().classes("gap-1"):
+                        for crop in person["faces"]:
+                            ui.image(data_url(crop)).classes("w-14 h-14 rounded")
+                    ui.label(f"In {person['count']} photos and videos").classes("text-xs text-gray-500")
+                    with ui.row().classes("w-full items-center no-wrap"):
+                        name = ui.input("Name", value=person["name"], placeholder=person["label"]).classes("flex-grow")
+                        name.on("keydown.enter", lambda _e, field=name: field.run_method("blur"))
+                        name.on("blur", lambda _e, pid=person["id"], field=name, old=person["name"]: self.rename(pid, field.value, old))
+                        ui.button(icon="visibility_off", on_click=lambda pid=person["id"]: self.hide(pid)).props("flat dense").tooltip("Not a person, or someone to ignore")
+
+    def rename(self, person_id: int, name: str, old: str) -> None:
+        if (name or "").strip() == (old or ""):
+            return
+        self.trip.name_person(person_id, name)
+        ui.notify(f"Saved: {name}" if name.strip() else "Name removed")
+        self.refresh_all()
+
+    def hide(self, person_id: int) -> None:
+        self.trip.hide_person(person_id)
+        self.refresh_all()
+
+    # ---------- Make video ----------
+
+    def build_video(self) -> None:
+        self.video_summary()
         with ui.card().classes("w-full"):
-            ui.label("2. Choose the style").classes("text-lg font-semibold")
+            ui.label("Style").classes("text-lg font-semibold")
             with ui.grid(columns=2).classes("w-full gap-4"):
-                transition = ui.select(list(TRANSITIONS), value="Fade", label="Transition")
-                resolution = ui.select(list(RESOLUTIONS), value="Full HD (1080p)", label="Video size")
+                self.transition = ui.select(list(TRANSITIONS), value="Fade", label="Transition")
+                self.resolution = ui.select(list(RESOLUTIONS), value="Full HD (1080p)", label="Video size")
                 with ui.column():
                     ui.label("Transition length (seconds)").classes("text-sm text-gray-500")
-                    t_len = ui.slider(min=0.3, max=2.0, step=0.1, value=0.8).props("label-always").classes("mt-8")
+                    self.t_len = ui.slider(min=0.3, max=2.0, step=0.1, value=0.8).props("label-always").classes("mt-8")
                 with ui.column():
                     ui.label("Each photo shows for (seconds)").classes("text-sm text-gray-500")
-                    photo_len = ui.slider(min=2, max=8, step=0.5, value=4).props("label-always").classes("mt-8")
+                    self.photo_len = ui.slider(min=2, max=8, step=0.5, value=4).props("label-always").classes("mt-8")
                 with ui.column():
                     ui.label("Longest part of each video (seconds, 0 = whole video)").classes("text-sm text-gray-500")
-                    clip_len = ui.slider(min=0, max=60, step=1, value=10).props("label-always").classes("mt-8")
-                keep_sound = ui.switch("Keep the sound from the videos", value=True)
+                    self.clip_len = ui.slider(min=0, max=60, step=1, value=10).props("label-always").classes("mt-8")
+                self.keep_sound = ui.switch("Keep the sound from the videos", value=True)
             with ui.row().classes("w-full items-center"):
-                music_input = ui.input("Music (optional)", placeholder="/Users/you/Music/song.mp3").classes("flex-grow")
+                self.music_input = ui.input("Music (optional)", placeholder="/Users/you/Music/song.mp3").classes("flex-grow")
                 if sys.platform == "darwin":
-                    async def browse_music() -> None:
-                        path = await run.io_bound(choose_with_finder, "music")
-                        if path:
-                            music_input.value = path
-
-                    ui.button("Browse…", on_click=browse_music).props("outline")
+                    ui.button("Browse…", on_click=self.browse_music).props("outline")
             with ui.column().classes("w-full"):
                 ui.label("Music volume").classes("text-sm text-gray-500")
-                music_vol = ui.slider(min=0.1, max=1.0, step=0.05, value=0.5).props("label-always").classes("mt-8")
+                self.music_vol = ui.slider(min=0.1, max=1.0, step=0.05, value=0.5).props("label-always").classes("mt-8")
 
-        # 3. Make it
         with ui.card().classes("w-full"):
-            ui.label("3. Make the video").classes("text-lg font-semibold")
-            name_input = ui.input("Video name", placeholder="My trip").classes("w-full")
-            make_button = ui.button("Make my video", icon="movie").props("size=lg")
-            progress = ui.linear_progress(value=0, show_value=False).classes("w-full")
-            status = ui.label("")
-            result_box = ui.column().classes("w-full")
-            progress.set_visibility(False)
+            self.name_input = ui.input("Video name", placeholder="My trip").classes("w-full")
+            self.make_button = ui.button("Make my video", icon="movie", on_click=self.make).props("size=lg")
+            self.render_progress = ui.linear_progress(value=0, show_value=False).classes("w-full")
+            self.render_status = ui.label("")
+            self.result_box = ui.column().classes("w-full")
+            self.render_progress.set_visibility(False)
 
-        def refresh() -> None:
-            progress.value = state.progress
-            status.text = state.error or state.message
+    @ui.refreshable
+    def video_summary(self) -> None:
+        if not self.items:
+            ui.label("Open a trip first, then pick what goes in the video in the Library.").classes("text-gray-500")
+            return
+        chosen = [it for it in self.items if it["included"]]
+        videos = sum(it["kind"] == "video" for it in chosen)
+        ui.label(
+            f"The video will use {len(chosen)} items ({videos} videos, {len(chosen) - videos} photos) in the order they were taken. "
+            "Change the selection in the Library."
+        ).classes("text-gray-700")
 
-        ui.timer(0.5, refresh)
+    async def browse_music(self) -> None:
+        path = await run.io_bound(choose_with_finder, "music")
+        if path:
+            self.music_input.value = path
 
-        async def make() -> None:
-            if state.busy:
-                return
-            if not state.items:
-                ui.notify("First choose a folder and find the videos and photos.", type="warning")
-                return
-            music = (music_input.value or "").strip().strip("'\"") or None
-            if music and not Path(music).expanduser().is_file():
-                ui.notify("The music file was not found.", type="warning")
-                return
-            width, height = RESOLUTIONS[resolution.value]
-            settings = RenderSettings(
-                width=width,
-                height=height,
-                photo_seconds=photo_len.value,
-                max_clip_seconds=clip_len.value,
-                transition=transition.value,
-                transition_seconds=t_len.value,
-                keep_clip_sound=keep_sound.value,
-                music_path=str(Path(music).expanduser()) if music else None,
-                music_volume=music_vol.value,
-            )
-            title = (name_input.value or "").strip() or Path(state.folder).name or "My trip"
-            safe = "".join(c for c in title if c.isalnum() or c in " -_").strip() or "My trip"
-            out = OUTPUT_DIR / f"{safe} {datetime.now():%Y-%m-%d %H%M}.mp4"
+    async def make(self) -> None:
+        r = self.rendering
+        if r["busy"] or not self.trip:
+            return
+        items = self.trip.media_items(only_included=True)
+        if not items:
+            ui.notify("Nothing is ticked for the video yet. Pick items in the Library.", type="warning")
+            return
+        music = (self.music_input.value or "").strip().strip("'\"") or None
+        if music and not Path(music).expanduser().is_file():
+            ui.notify("The music file was not found.", type="warning")
+            return
+        width, height = RESOLUTIONS[self.resolution.value]
+        settings = RenderSettings(
+            width=width,
+            height=height,
+            photo_seconds=self.photo_len.value,
+            max_clip_seconds=self.clip_len.value,
+            transition=self.transition.value,
+            transition_seconds=self.t_len.value,
+            keep_clip_sound=self.keep_sound.value,
+            music_path=str(Path(music).expanduser()) if music else None,
+            music_volume=self.music_vol.value,
+        )
+        title = (self.name_input.value or "").strip() or self.trip.folder.name or "My trip"
+        safe = "".join(c for c in title if c.isalnum() or c in " -_").strip() or "My trip"
+        out = OUTPUT_DIR / f"{safe} {datetime.now():%Y-%m-%d %H%M}.mp4"
 
-            def on_progress(fraction: float, message: str) -> None:
-                state.progress, state.message = fraction, message
+        def on_progress(fraction: float, message: str) -> None:
+            r["progress"], r["message"] = fraction, message
 
-            state.busy, state.error, state.progress = True, "", 0.0
-            make_button.disable()
-            progress.set_visibility(True)
-            result_box.clear()
-            try:
-                state.result = await run.io_bound(render, state.items, settings, out, on_progress)
-                state.message = f"Saved to {state.result}"
-                with result_box:
-                    ui.video(f"/videos/{state.result.name}").classes("w-full")
-                    ui.button("Show in Finder", icon="folder", on_click=lambda: reveal(state.result)).props("outline")
-            except Exception as exc:  # show any problem on screen instead of failing silently
-                traceback.print_exc()
-                state.error = f"Something went wrong: {exc}"
-            finally:
-                state.busy = False
-                make_button.enable()
-
-        make_button.on_click(make)
+        r.update(busy=True, progress=0.0, message="Starting…")
+        self.make_button.disable()
+        self.render_progress.set_visibility(True)
+        self.result_box.clear()
+        try:
+            result = await run.io_bound(render, items, settings, out, on_progress)
+            self.render_status.text = f"Saved to {result}"
+            with self.result_box:
+                ui.video(f"/videos/{result.name}").classes("w-full")
+                ui.button("Show in Finder", icon="folder", on_click=lambda: reveal(result)).props("outline")
+        except Exception as exc:  # show any problem on screen instead of failing silently
+            traceback.print_exc()
+            self.render_status.text = f"Something went wrong: {exc}"
+        finally:
+            r["busy"] = False
+            self.make_button.enable()
 
 
 def reveal(path: Path | None) -> None:
@@ -227,7 +448,8 @@ def reveal(path: Path | None) -> None:
 def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     app.add_media_files("/videos", OUTPUT_DIR)
-    ui.page("/")(build_page)
+    app.add_static_files("/data", app_dir())
+    ui.page("/")(lambda: Page().build())
     print("\nTrip Memory is running. Your browser should open by itself.")
     print("If it does not, open http://localhost:8765 . Close this window to stop the app.\n")
     ui.run(title="Trip Memory", host="127.0.0.1", port=8765, reload=False, show=True, favicon="🎬")

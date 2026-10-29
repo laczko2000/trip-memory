@@ -1,13 +1,19 @@
 [project]
 name = "trip-memory"
-version = "0.2.0"
+version = "0.3.0"
 description = "Turn a folder of holiday videos and photos into one memory video."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "fastembed>=0.9.1",
     "nicegui>=3.0,<4",
+    "numpy>=2.4.6",
+    "onnxruntime>=1.31.1",
+    "opencv-python-headless>=5.0.0.93",
     "pillow>=10.0",
     "pillow-heif>=0.18",
+    "pycountry>=26.2.16",
+    "reverse-geocoder>=1.5.1",
     "static-ffmpeg>=3.0",
 ]
 
