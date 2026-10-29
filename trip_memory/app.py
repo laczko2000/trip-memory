@@ -581,7 +581,7 @@ class Page:
         self.render_progress.set_visibility(True)
         self.result_box.clear()
         try:
-            result = await run.io_bound(render, items, settings, out, on_progress)
+            result = await run.io_bound(render, items, settings, out, on_progress, app_dir() / "clip-cache")
             self.render_status.text = f"Saved to {result}"
             with self.result_box:
                 ui.video(f"/videos/{result.name}").classes("w-full")

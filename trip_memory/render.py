@@ -7,16 +7,21 @@ mixed in, and the result is saved as one MP4.
 
 from __future__ import annotations
 
+import hashlib
+import os
 import shutil
+import sys
 import tempfile
+import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image, ImageOps
 
 from .media import MediaItem
-from .tools import has_filter, probe, run_ffmpeg
+from .tools import FFmpegError, has_encoder, has_filter, probe, run_ffmpeg
 
 # Friendly name -> FFmpeg xfade transition. None means a hard cut.
 TRANSITIONS: dict[str, str | None] = {
@@ -36,6 +41,32 @@ FPS = 30
 AUDIO = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
 
 ProgressFn = Callable[[float, str], None]
+
+# Bump when the way clips are prepared changes, so old remembered clips are not reused.
+SEGMENT_VERSION = 2
+CACHE_DAYS = 30
+_hardware = {"ok": sys.platform == "darwin"}  # switched off if the Mac's encoder ever fails
+
+
+def _codec(width: int, height: int, final: bool) -> list[str]:
+    """Use the Mac's built-in video chip when available: several times faster than the CPU."""
+    if _hardware["ok"] and has_encoder("h264_videotoolbox"):
+        bitrate = width * height * (6 if final else 10)  # about 12 Mbit/s final at 1080p
+        return ["-c:v", "h264_videotoolbox", "-b:v", str(bitrate), "-allow_sw", "1"]
+    if final:
+        return ["-c:v", "libx264", "-preset", "faster", "-crf", "20"]
+    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18"]
+
+
+def _run_encode(args_for: Callable[[list[str]], list[str]], width: int, height: int, final: bool, **kwargs) -> None:
+    """Encode with the best codec; if the Mac's encoder fails, fall back to the CPU for good."""
+    try:
+        run_ffmpeg(args_for(_codec(width, height, final)), **kwargs)
+    except FFmpegError:
+        if not _hardware["ok"] or not has_encoder("h264_videotoolbox"):
+            raise
+        _hardware["ok"] = False
+        run_ffmpeg(args_for(_codec(width, height, final)), **kwargs)
 
 
 @dataclass
@@ -88,13 +119,13 @@ def _video_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
     else:
         inputs += ["-f", "lavfi", "-t", f"{length:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
         graph += ";[1:a]anull[a]"
-    _encode_segment(inputs, graph, length, out)
+    _encode_segment(inputs, graph, length, out, s)
     return length
 
 
 def _photo_segment(item: MediaItem, s: RenderSettings, out: Path, workdir: Path) -> float:
     # Pillow turns the photo the right way up and reads iPhone HEIC files, which FFmpeg may not.
-    still = workdir / f"{out.stem}.jpg"
+    still = workdir / f"{out.stem}.still.jpg"
     with Image.open(item.path) as img:
         img = ImageOps.exif_transpose(img).convert("RGB")
         img.thumbnail((3840, 3840))
@@ -108,22 +139,57 @@ def _photo_segment(item: MediaItem, s: RenderSettings, out: Path, workdir: Path)
         f":d={frames}:s={s.width}x{s.height}:fps={FPS},format=yuv420p[v];[1:a]anull[a]"
     )
     inputs = ["-i", str(still), "-f", "lavfi", "-t", f"{s.photo_seconds:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
-    _encode_segment(inputs, graph, s.photo_seconds, out)
+    _encode_segment(inputs, graph, s.photo_seconds, out, s)
     return s.photo_seconds
 
 
-def _encode_segment(inputs: list[str], graph: str, length: float, out: Path) -> None:
-    run_ffmpeg(
-        [
+def _encode_segment(inputs: list[str], graph: str, length: float, out: Path, s: RenderSettings) -> None:
+    _run_encode(
+        lambda codec: [
             *inputs,
             "-filter_complex", graph,
             "-map", "[v]", "-map", "[a]",
             "-t", f"{length:.3f}",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-r", str(FPS),
+            *codec, "-pix_fmt", "yuv420p", "-r", str(FPS),
             *AUDIO,
             str(out),
-        ]
+        ],
+        s.width,
+        s.height,
+        final=False,
     )
+
+
+def _segment_key(item: MediaItem, s: RenderSettings) -> str:
+    """Name a prepared clip by everything that changes how it looks, so it can be reused safely."""
+    stat = item.path.stat()
+    parts = [SEGMENT_VERSION, item.path, stat.st_mtime, stat.st_size, s.width, s.height]
+    if item.kind == "photo":
+        parts += [s.photo_seconds]
+    else:
+        parts += [s.max_clip_seconds, s.keep_clip_sound, s.clip_volume]
+    return hashlib.sha1(repr(parts).encode()).hexdigest()[:20]
+
+
+def _prune(cache_dir: Path) -> None:
+    cutoff = time.time() - CACHE_DAYS * 86400
+    for f in cache_dir.glob("*.mp4"):
+        if f.stat().st_mtime < cutoff:
+            f.unlink(missing_ok=True)
+
+
+def _prepare_segment(item: MediaItem, s: RenderSettings, cache_dir: Path, workdir: Path) -> Path:
+    seg = cache_dir / f"{_segment_key(item, s)}.mp4"
+    if seg.exists():
+        os.utime(seg)  # mark as recently used
+        return seg
+    tmp = workdir / f"{seg.stem}.mp4"
+    if item.kind == "video":
+        _video_segment(item, s, tmp)
+    else:
+        _photo_segment(item, s, tmp, workdir)
+    shutil.move(tmp, seg)
+    return seg
 
 
 def _segment_length(path: Path) -> float:
@@ -135,28 +201,37 @@ def render(
     settings: RenderSettings,
     out_path: str | Path,
     on_progress: ProgressFn | None = None,
+    cache_dir: str | Path | None = None,
 ) -> Path:
-    """Build the memory video. Progress is reported as (0..1, message)."""
+    """Build the memory video. Progress is reported as (0..1, message).
+
+    Prepared clips are kept in cache_dir (when given), so making the video again after a small change
+    only prepares what is new.
+    """
     if not items:
         raise ValueError("There are no videos or photos to use.")
     report = on_progress or (lambda _f, _m: None)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     workdir = Path(tempfile.mkdtemp(prefix="trip-memory-"))
+    cache = Path(cache_dir) if cache_dir else workdir / "segments"
+    cache.mkdir(parents=True, exist_ok=True)
+    _prune(cache)
     prep_share = 0.7  # rough share of the total time spent preparing clips
+    workers = max(2, min(6, (os.cpu_count() or 4) // 2))
 
     try:
-        segments: list[Path] = []
-        lengths: list[float] = []
-        for i, item in enumerate(items):
-            report(prep_share * i / len(items), f"Preparing {i + 1} of {len(items)}: {item.name}")
-            seg = workdir / f"seg_{i:04d}.mp4"
-            if item.kind == "video":
-                _video_segment(item, settings, seg)
-            else:
-                _photo_segment(item, settings, seg, workdir)
-            segments.append(seg)
-            lengths.append(_segment_length(seg))
+        # The same file used twice is prepared once.
+        unique = {_segment_key(item, settings): item for item in items}
+        ready: dict[str, Path] = {}
+        report(0.0, f"Preparing {len(unique)} clips")
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            jobs = {pool.submit(_prepare_segment, item, settings, cache, workdir): key for key, item in unique.items()}
+            for done, job in enumerate(as_completed(jobs), 1):
+                ready[jobs[job]] = job.result()
+                report(prep_share * done / len(unique), f"Prepared {done} of {len(unique)} clips")
+        segments = [ready[_segment_key(item, settings)] for item in items]
+        lengths = [_segment_length(seg) for seg in segments]
 
         report(prep_share, "Joining everything together")
         _join(segments, lengths, settings, out_path, lambda f: report(prep_share + (1 - prep_share) * f, "Joining everything together"))
@@ -208,16 +283,19 @@ def _join(segments: list[Path], lengths: list[float], s: RenderSettings, out: Pa
     else:
         parts.append(f"{sound}[aout]")
 
-    run_ffmpeg(
-        [
+    _run_encode(
+        lambda codec: [
             *inputs,
             "-filter_complex", ";".join(parts),
             "-map", "[vout]", "-map", "[aout]",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
+            *codec, "-pix_fmt", "yuv420p",
             *AUDIO,
             "-movflags", "+faststart",
             str(out),
         ],
+        s.width,
+        s.height,
+        final=True,
         total_seconds=total,
         on_progress=progress,
     )

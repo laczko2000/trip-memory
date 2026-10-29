@@ -37,6 +37,8 @@ Everything runs on your Mac. Nothing is uploaded.
 
 ## What's new
 
+- **0.4.1:** faster video making: uses the Mac's built-in video encoder, prepares several clips at once,
+  and remembers prepared clips so making the video again after a change is much quicker.
 - **0.4:** choose which files of a folder to analyse and use.
 - **0.3.2:** missing places are guessed from photos taken around the same time.
 - **0.3.1:** name drop-down, one-click Unknown, review list for faces seen only once or twice.

@@ -29,6 +29,12 @@ def has_filter(name: str) -> bool:
     return any(line.split()[1:2] == [name] for line in out.splitlines() if line.strip())
 
 
+@functools.cache
+def has_encoder(name: str) -> bool:
+    out = subprocess.run([ffmpeg_paths()[0], "-hide_banner", "-encoders"], capture_output=True, text=True).stdout
+    return any(line.split()[1:2] == [name] for line in out.splitlines() if line.strip())
+
+
 def probe(path: str) -> dict:
     import json
 

@@ -40,3 +40,23 @@ def test_builds_video_in_date_order(tmp_path):
     assert any(s["codec_type"] == "audio" for s in info["streams"])
     expected = 4 + 3 + 2 - 2 * 0.5
     assert abs(float(info["format"]["duration"]) - expected) < 0.3
+
+
+def test_prepared_clips_are_reused(tmp_path):
+    trip = tmp_path / "trip"
+    trip.mkdir()
+    make_clip(trip / "a.mp4", "640x360", 2, "2025-07-03T10:00:00Z")
+    Image.new("RGB", (400, 300), "blue").save(trip / "b.jpg")
+    items, _ = scan_folder(trip)
+    cache = tmp_path / "cache"
+    settings = RenderSettings(width=640, height=360, photo_seconds=2)
+
+    render(items, settings, tmp_path / "one.mp4", cache_dir=cache)
+    first = {p.name: p.stat().st_mtime_ns for p in cache.glob("*.mp4")}
+    assert len(first) == 2
+    render(items, settings, tmp_path / "two.mp4", cache_dir=cache)
+    assert {p.name for p in cache.glob("*.mp4")} == set(first)
+
+    # A different photo length needs a new photo clip, but the video clip is reused.
+    render(items, RenderSettings(width=640, height=360, photo_seconds=3), tmp_path / "three.mp4", cache_dir=cache)
+    assert len(list(cache.glob("*.mp4"))) == 3
