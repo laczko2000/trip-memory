@@ -101,21 +101,12 @@ def shot_value(row: dict) -> float:
     return value
 
 
-def choose(rows: list[dict]) -> tuple[list[dict], list[dict]]:
-    """The shots to choose from (one per set of look-alike shots, in date order) and the rest."""
-    # One shot per set of look-alike shots: the one marked best.
-    sets: dict = {}
-    for r in rows:
-        sets.setdefault(r.get("similar_set"), []).append(r)
-    keep = []
-    for key, members in sets.items():
-        if key is None or len(members) == 1:
-            keep += members
-        else:
-            keep.append(([m for m in members if m.get("best")] or [max(members, key=shot_value)])[0])
-    kept = {id(r) for r in keep}
-    keep.sort(key=lambda r: (r["taken_at"], r["path"]))
-    return keep, [r for r in rows if id(r) not in kept]
+def choose(rows: list[dict]) -> list[dict]:
+    """The shots to choose from: everything you ticked, in the order it was taken.
+
+    (Choose files already ticks only the best of each set of look-alike shots for you; anything else you
+    ticked yourself, you want in.)"""
+    return sorted(rows, key=lambda r: (r["taken_at"], r["path"]))
 
 
 # ---------- music-driven editing ----------
@@ -188,6 +179,23 @@ def music_slots(song, limits: Limits, end: float, longest: float | None = None) 
     return result
 
 
+def merge_slots(slots: list[Slot], count: int, longest: float) -> list[Slot]:
+    """With fewer shots than pieces of music, join neighbouring pieces (in the same part of the song, and
+    never longer than allowed) so the shots you have stretch further."""
+    slots = list(slots)
+    while len(slots) > count:
+        pairs = [
+            (slots[k].seconds + slots[k + 1].seconds, k)
+            for k in range(len(slots) - 1)
+            if slots[k].energy == slots[k + 1].energy and slots[k].seconds + slots[k + 1].seconds <= longest * 1.03
+        ]
+        if not pairs:
+            break
+        _, k = min(pairs)
+        slots[k : k + 2] = [Slot(slots[k].start, slots[k + 1].end, slots[k].energy)]
+    return slots
+
+
 def pace_of(row: dict) -> tuple[float, bool]:
     """How lively a shot is (0 still .. 1 fast action) and whether it is a smooth, cinematic camera move."""
     if row["kind"] != "video":
@@ -254,7 +262,7 @@ def plan_to_music(
     for r in rows:
         if r["path"] in curves and len(curves[r["path"]]):
             r["peak"] = float(np.clip(np.percentile(curves[r["path"]], 90), 0, 1))
-    candidates, _ = choose(rows)
+    candidates = choose(rows)
     end = song.duration if target is None or target >= song.duration else target
     if target is not None and target < song.duration:
         bars = song.bar_starts()
@@ -263,6 +271,7 @@ def plan_to_music(
     best: tuple[list[Slot], list[int]] = ([], [])
     for longest in (None, limits.max_photo, max(limits.min_shot, limits.max_photo / 2)):
         slots = music_slots(song, limits, end, longest)
+        slots = merge_slots(slots, len(candidates), longest or max(limits.max_video, limits.max_photo))
         picks = fill_slots(slots, candidates, limits)
         if len(picks) == len(slots):
             best = (slots, picks)

@@ -829,8 +829,11 @@ class Page:
         on_beat = f", cuts on the beat ({beat.bpm:.0f} BPM)" if music and beat and beat.clear else ""
         song = self.song_maps.get(music) if music else None
         wanted = song.duration if song and target == "song" else (float(target) if target not in ("song", "all") else None)
-        short = (f" There weren't enough shots for {fmt_length(wanted)}, so the video ends there; tick more files "
-                 "or allow longer clips." if wanted and result.length < wanted - 3 else "")
+        ticked = [it for it in self.trip.items() if it["chosen"]]
+        photos = sum(it["kind"] == "photo" for it in ticked)
+        short = (f" There weren't enough shots for {fmt_length(wanted)}: it used the {len(ticked)} files ticked in "
+                 f"Choose files ({len(ticked) - photos} videos, {photos} photos). Tick more there, or allow longer "
+                 "clips and photos." if wanted and result.length < wanted - 3 else "")
         ui.notify(f"First cut ready: {len(result.shots)} shots, {fmt_length(result.length)}{on_beat}. "
                   f"Fine-tune it below, then make the video.{short}", type="positive", multi_line=True, timeout=10000)
         self.story_page = 1

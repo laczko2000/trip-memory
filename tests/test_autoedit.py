@@ -21,11 +21,9 @@ def test_best_moment_is_found():
     assert 6.0 <= start <= 7.0
 
 
-def test_one_shot_per_set_of_look_alikes():
-    rows = [_row(0, similar=7, best=False), _row(1, similar=7, best=True), _row(2, similar=7)]
-    keep, rest = autoedit.choose(rows)
-    assert [r["path"] for r in keep] == ["/trip/01.mov"] and len(rest) == 2
-
+def test_everything_you_ticked_is_used_in_time_order():
+    rows = [_row(2, similar=7), _row(0, similar=7, best=True), _row(1, similar=7)]
+    assert [r["path"] for r in autoedit.choose(rows)] == ["/trip/00.mov", "/trip/01.mov", "/trip/02.mov"]
 
 def _song():
     # 120 BPM: calm for 16 s, lively for 16 s, calm again for 8 s.
@@ -81,3 +79,23 @@ def test_photos_respect_their_maximum():
     plan = autoedit.plan_to_music(rows, {}, _song(), limits, 20.0, 0.8, "Fade")
     assert plan.shots and all(s.seconds <= 2.0 + 0.8 for s in plan.shots)
     assert 18 <= plan.length <= 22
+
+
+def test_a_trip_of_photos_fills_a_minute():
+    # Lots of photos (and a few videos) taken after the videos: the photos must be used, not just the videos.
+    rows = [_clip(n, 5.0) for n in range(4)] + [_clip(10 + n, 0.0, kind="photo") for n in range(40)]
+    for n, r in enumerate(rows):
+        r["similar_set"] = 1  # even if they all look alike
+    limits = autoedit.Limits(max_video=4.0, max_photo=2.5, min_shot=1.0)
+    long_song = SongMap(duration=90.0, bpm=120, period=0.5, first_beat=0.0, clear_beat=True, downbeat=0,
+                        sections=[Section(0, 32, 0.1, "Calm"), Section(32, 90, 0.9, "Lively")])
+    plan = autoedit.plan_to_music(rows, {}, long_song, limits, 60.0, 0.8, "Fade")
+    assert 58 <= plan.length <= 62
+    assert sum(s.kind == "photo" for s in plan.shots) >= 25
+
+
+def test_few_shots_stretch_further():
+    rows = [_clip(n, 5.0) for n in range(6)]
+    limits = autoedit.Limits(max_video=4.0, max_photo=2.5, min_shot=1.0)
+    plan = autoedit.plan_to_music(rows, {}, _song(), limits, None, 0.8, "Fade")
+    assert len(plan.shots) == 6 and plan.length > 6 * 2.0  # longer pieces, not 6 quick ones
