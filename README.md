@@ -17,8 +17,8 @@ Nothing is uploaded anywhere.
 2. **Choose files tab:** files are grouped into **stories** (taken close together in time and place). Shots
    that look nearly the same sit together in a blue box; the app ticks the ⭐ best one (sharpest, best
    exposed) for a new trip. Tick or untick a whole story, keep only the ⭐ of a set, or pick by hand.
-   Hover over a video to play it. The ↻ button under a picture turns it 90° clockwise (click again to keep
-   turning); the turn is used everywhere, including the final video. **Suggest best shots** re-applies the suggestion. Then click
+   Hover over a video to play it. The ↺ and ↻ buttons under a picture turn it a quarter turn anti-clockwise or
+   clockwise; the turn is used everywhere, including the final video. **Suggest best shots** re-applies the suggestion. Then click
    **Analyse the chosen files**. Only those files are analysed and used.
    The analysis works out:
    - **when** each was taken (sorted by day),
@@ -45,6 +45,7 @@ Everything runs on your Mac. Nothing is uploaded.
 
 ## What's new
 
+- **0.7.1:** turn buttons both ways, the whole picture is shown in previews, and a message confirms each turn.
 - **0.7:** rotate button in Choose files and the Library, automatic upright fix for shots with faces.
 - **0.6:** Choose files grouped into stories and sets of similar shots, best-shot suggestion, hover-to-play.
 - **0.5:** storyboard with your own order, trims, per-cut transitions and day title cards.

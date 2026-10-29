@@ -71,8 +71,14 @@ def fmt_length(seconds: float) -> str:
     return f"{m}:{s:02d}"
 
 
-def rotate_button(on_click) -> None:
-    ui.button(icon="rotate_right", on_click=on_click).props("flat dense round size=sm").tooltip("Turn 90° clockwise")
+def rotate_buttons(on_turn) -> None:
+    """Two small buttons that turn a picture a quarter turn either way."""
+    ui.button(icon="rotate_left", on_click=lambda: on_turn(-90)).props("flat dense round size=sm").tooltip(
+        "Turn 90° anti-clockwise"
+    )
+    ui.button(icon="rotate_right", on_click=lambda: on_turn(90)).props("flat dense round size=sm").tooltip(
+        "Turn 90° clockwise"
+    )
 
 
 def video_turn(rotation: int) -> str:
@@ -355,21 +361,21 @@ class Page:
                 src = f"{self.media_route}/{quote(str(Path(it['path']).relative_to(self.trip.folder)))}#t={start:.1f}"
                 ui.html(
                     f'<div class="tm-hover" style="position:relative;width:144px;height:96px">'
-                    f'<img src="{thumb}" style="width:144px;height:96px;object-fit:cover;border-radius:4px">'
+                    f'<img src="{thumb}" style="width:144px;height:96px;object-fit:contain;background:#222;border-radius:4px">'
                     f'<video data-src="{src}" muted loop playsinline preload="none" '
-                    f'style="display:none;position:absolute;{video_turn(it.get("rotation") or 0)}object-fit:cover;border-radius:4px"></video>'
+                    f'style="display:none;position:absolute;{video_turn(it.get("rotation") or 0)}object-fit:contain;background:#222;border-radius:4px"></video>'
                     f'<span style="position:absolute;left:4px;bottom:2px;color:white;font-size:11px;text-shadow:0 0 3px black">'
                     f'▶ {fmt_length(it["duration"])}</span></div>',
                     sanitize=False,
                 )
             elif thumb:
-                ui.image(thumb).classes("w-36 h-24 object-cover rounded")
+                ui.image(thumb).props('fit=contain').classes("w-36 h-24 rounded bg-gray-800")
             with ui.row().classes("items-center gap-0 no-wrap"):
                 ui.checkbox(
                     value=bool(it["chosen"]),
                     on_change=lambda e, path=it["path"]: self.choose_paths([path], e.value),
                 ).props("dense size=xs")
-                rotate_button(lambda path=it["path"]: self.rotate(path))
+                rotate_buttons(lambda degrees, path=it["path"]: self.rotate(path, degrees))
                 star = "⭐ " if in_set and it["best"] else ""
                 ui.label(f"{star}{datetime.fromisoformat(it['taken_at']).astimezone():%H:%M:%S}").classes("text-xs text-gray-600")
 
@@ -383,9 +389,16 @@ class Page:
         self.trip.set_chosen([m["path"] for m in members if m["best"]], True)
         self.refresh_all()
 
-    def rotate(self, path: str) -> None:
-        self.trip.rotate(path)
-        self.refresh_all()
+    async def rotate(self, path: str, degrees: int) -> None:
+        try:
+            await run.io_bound(self.trip.rotate, path, degrees)
+        except Exception as exc:
+            traceback.print_exc()
+            ui.notify(f"Could not turn {Path(path).name}: {exc}", type="negative", multi_line=True)
+            return
+        way = "clockwise" if degrees > 0 else "anti-clockwise"
+        ui.notify(f"Turned {Path(path).name} {way}.", timeout=1500)
+        self.refresh_all()  # last: this rebuilds the tile the button sits on
 
     def choose_paths(self, paths: list[str], chosen: bool) -> None:
         self.trip.set_chosen(paths, chosen)
@@ -463,7 +476,7 @@ class Page:
     def card(self, it: dict) -> None:
         with ui.card().tight().classes("w-full" + ("" if it["included"] else " opacity-50")):
             if it["thumb"]:
-                ui.image(data_url(it["thumb"])).classes("w-full thumb")
+                ui.image(data_url(it["thumb"])).props("fit=contain").classes("w-full thumb bg-gray-800")
             else:
                 ui.label("Analysing…").classes("w-full thumb flex items-center justify-center bg-gray-100 text-gray-400")
             with ui.column().classes("p-2 gap-1 w-full"):
@@ -490,7 +503,8 @@ class Page:
                         value=bool(it["included"]),
                         on_change=lambda e, path=it["path"]: self.toggle(path, e.value),
                     ).props("dense")
-                    rotate_button(lambda path=it["path"]: self.rotate(path))
+                    with ui.row().classes("gap-0 no-wrap"):
+                        rotate_buttons(lambda degrees, path=it["path"]: self.rotate(path, degrees))
 
     def toggle(self, path: str, included: bool) -> None:
         self.trip.set_included([path], included)
