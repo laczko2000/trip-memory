@@ -52,6 +52,7 @@ Everything runs on your Mac. Nothing is uploaded.
 
 ## What's new
 
+- **0.9.1:** Storyboard previews play with sound.
 - **0.9:** movement tags for videos, many tags per file (place, activity, light, people), look-alike groups. Click **Analyse** again on a trip you already did to add them; people are not redone.
 - **0.8.1:** fixed hover-to-play for videos you have turned.
 - **0.8:** hover-to-play in the Library and Storyboard too. In the Storyboard the preview plays only the part you keep, and moving the trim bar plays the new part straight away.

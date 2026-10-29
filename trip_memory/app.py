@@ -368,7 +368,8 @@ class Page:
                 star = "⭐ " if in_set and it["best"] else ""
                 ui.label(f"{star}{datetime.fromisoformat(it['taken_at']).astimezone():%H:%M:%S}").classes("text-xs text-gray-600")
 
-    def preview(self, it: dict, size: str, start: float = 0, end: float | None = None, view: str = "") -> str:
+    def preview(self, it: dict, size: str, start: float = 0, end: float | None = None, view: str = "",
+                sound: bool = False) -> str:
         """A preview picture; for a video, hovering plays it (only the part from start to end).
 
         Returns the element id so the storyboard can change the part being played."""
@@ -384,7 +385,7 @@ class Page:
             f'<div id="{box}" class="tm-hover" data-start="{start:.2f}" data-end="{end:.2f}" data-rot="{it.get("rotation") or 0}" '
             f'style="position:relative;overflow:hidden;border-radius:4px;background:#222;{size}">'
             f'<img src="{thumb}" style="width:100%;height:100%;object-fit:contain">'
-            f'<video data-src="{src}" muted playsinline preload="none" '
+            f'<video data-src="{src}" {"" if sound else "muted "}playsinline preload="none" '
             f'style="display:none;position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#222"></video>'
             f'<span style="position:absolute;left:4px;bottom:2px;color:white;font-size:11px;text-shadow:0 0 3px black">'
             f'▶ {fmt_length(it["duration"])}</span></div>',
@@ -695,7 +696,7 @@ class Page:
                 box = None
                 if it["thumb"]:
                     start, end = self.kept_part(it) if it["kind"] == "video" else (0, None)
-                    box = self.preview(it, "width:160px;height:100px;flex:none", start, end, view="story")
+                    box = self.preview(it, "width:160px;height:100px;flex:none", start, end, view="story", sound=True)
                 with ui.column().classes("flex-grow gap-1"):
                     place = ", ".join(x for x in (it["place"], it["country"]) if x)
                     icon = "🎬" if it["kind"] == "video" else "📷"
@@ -892,7 +893,8 @@ function tmVideo(box) {
 }
 function tmPlayFrom(box, from) {
   const v = tmVideo(box);
-  const go = () => { v.currentTime = from; v.play().catch(() => {}); };
+  // With sound if allowed; the browser only allows sound after a first click on the page.
+  const go = () => { v.currentTime = from; v.play().catch(() => { v.muted = true; v.play().catch(() => {}); }); };
   if (v.readyState >= 1) go(); else v.addEventListener('loadedmetadata', go, {once: true});
 }
 function tmStop(box) {
