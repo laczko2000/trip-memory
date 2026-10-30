@@ -119,6 +119,16 @@ def rotate_buttons(on_turn) -> None:
     )
 
 
+
+def app_version() -> str:
+    """The version you are running (it says which download you started)."""
+    try:
+        from importlib.metadata import version
+
+        return version("trip-memory")
+    except Exception:
+        return "?"
+
 class Page:
     """Everything on the screen for one browser tab."""
 
@@ -233,7 +243,9 @@ class Page:
         ui.on("tm_dictation", self.dictation)
         ui.add_css(".thumb { height: 150px; object-fit: cover; }")
         with ui.column().classes("w-full max-w-6xl mx-auto p-4 gap-3"):
-            ui.label("Trip Memory").classes("text-3xl font-bold")
+            with ui.row().classes("items-baseline gap-2"):
+                ui.label("Trip Memory").classes("text-3xl font-bold")
+                ui.label(f"version {app_version()}").classes("text-sm text-gray-500")
             self.build_folder_row()
             with ui.tabs().classes("w-full") as tabs:
                 # The path to a video, left to right; then the extra tabs for looking things up.
@@ -2142,27 +2154,43 @@ class Page:
         old = self.trip.storyline().get("story") or {}
         before = (old.get("before") or []) + ([old["title"]] if again and old.get("title") else []) if again else []
         story = None
+        failed = ""
         try:
             ai = director.make(load_settings().get("ai", {}))
-        except director.DirectorError:
-            ai = None
+        except director.DirectorError as exc:
+            ai, failed = None, str(exc)
         if ai is not None:
             self.ai_busy = True
-            note = ui.notification("The AI is arranging your themes into a story… On a MacBook Air this can take a "
-                                   "minute or two.", spinner=True, timeout=None, multi_line=True)
+            note = ui.notification("", spinner=True, timeout=None, multi_line=True, close_button="Hide")
+            started = time.time()
+
+            def thinking() -> None:
+                gone = int(time.time() - started)
+                note.message = (f"🤖 The AI is working on your story: {gone // 60}:{gone % 60:02d} so far. On a MacBook "
+                                "Air it usually takes 1 to 3 minutes (longer the first time, while the model loads). "
+                                "Stop is next to the story buttons.")
+
+            thinking()
+            ticker = ui.timer(1.0, thinking)
             if self.story_stop is not None:
                 self.story_stop.set_visibility(True)
+            print(f"My story: asking the AI ({type(ai).__name__})…", flush=True)
             try:
                 prompt = director.story_prompt(idea, self._story_blocks_info(blocks), before[-4:] or None)
                 answer = await self.stoppable(ai.story, prompt)
+                print(f"My story: the AI answered after {time.time() - started:.0f} s." if answer is not None else
+                      "My story: stopped.", flush=True)
                 if answer is None:
-                    return  # stopped: nothing changes
+                    ui.notify("Stopped: your story stays as it was. Press Make my story to try again.")
+                    return
                 story = themes.story_keys(director.clean_story(answer, len(blocks)), blocks)
                 story["by"] = "ai"
             except Exception as exc:  # Ollama not running, a bad answer...: your words still work
-                print(f"The AI couldn't make a story ({exc}); following your words instead.")
+                print(f"My story: the AI couldn't make a story ({exc}); following your words instead.", flush=True)
+                failed = str(exc)
             finally:
                 self.ai_busy = False
+                ticker.cancel()
                 note.dismiss()
                 if self.story_stop is not None:
                     self.story_stop.set_visibility(False)
@@ -2178,8 +2206,8 @@ class Page:
                 ui.notify("None of your themes were named. Use their names, e.g. \"boat first, then food\".",
                           type="warning", multi_line=True)
                 return
-            ui.notify("The AI isn't running (start Ollama for a smarter story), so the app followed the order you "
-                      "named your themes in.", type="info", multi_line=True)
+            ui.notify(f"The AI couldn't make the story ({failed or 'no answer'}), so the app followed the order "
+                      "you named your themes in.", type="warning", multi_line=True, timeout=15000)
         else:
             ui.notify(f"Your story is ready: {story['title'] or 'have a look'}. Change anything below, then Make the "
                       "first cut.", type="positive", multi_line=True)
