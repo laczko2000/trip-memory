@@ -7,6 +7,7 @@ Each trip folder gets its own small database (SQLite) plus thumbnail pictures, s
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import sqlite3
 import subprocess
@@ -16,6 +17,7 @@ import time
 import threading
 import traceback
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -785,19 +787,38 @@ class Trip:
             traceback.print_exc()  # the old preview picture stays
 
     def filmstrip(self, path: str, frames: int = 12) -> Path | None:
-        """A row of small pictures from through a video, to show under the handles when you cut it."""
-        row = self.query("SELECT duration, rotation FROM items WHERE path = ?", (path,))[0]
-        rotation, duration = row["rotation"] or 0, row["duration"] or 0
-        out = self.dir / "thumbs" / f"{hashlib.sha1(path.encode()).hexdigest()[:16]}_{rotation}_strip.jpg"
-        if out.exists() or duration <= 0:
+        """A row of small pictures from through a video (the part you kept, if you cut it), to show under the
+        handles when you cut it. Each picture is a quick jump into the file, so even a long 4K clip takes a moment."""
+        row = dict(self.query("SELECT * FROM items WHERE path = ?", (path,))[0])
+        rotation = row["rotation"] or 0
+        start, end = kept_part(row) or (0.0, row["duration"] or 0)
+        name = f"{hashlib.sha1(path.encode()).hexdigest()[:16]}_{rotation}_{start:.1f}-{end:.1f}_strip.jpg"
+        out = self.dir / "thumbs" / name
+        if out.exists() or end <= start:
             return out if out.exists() else None
-        subprocess.run(
-            [ffmpeg_paths()[0], "-loglevel", "error", "-y", "-i", path, "-vf",
-             rotate_filter(rotation) + f"fps={frames / duration:.4f},scale=-2:60,tile={frames}x1", "-frames:v", "1",
-             "-q:v", "5", str(out)],
-            capture_output=True,
-        )
-        return out if out.exists() else None
+
+        def grab(t: float) -> Image.Image | None:
+            done = subprocess.run(
+                [ffmpeg_paths()[0], "-loglevel", "error", "-ss", f"{t:.2f}", "-i", path, "-frames:v", "1",
+                 "-vf", rotate_filter(rotation) + "scale=-2:60", "-f", "image2pipe", "-c:v", "mjpeg", "-"],
+                capture_output=True,
+            )
+            try:
+                return Image.open(io.BytesIO(done.stdout)).convert("RGB") if done.stdout else None
+            except OSError:
+                return None
+
+        step = (end - start) / frames
+        with ThreadPoolExecutor(4) as pool:
+            pictures = [p for p in pool.map(grab, [start + step * (k + 0.5) for k in range(frames)]) if p]
+        if not pictures:
+            return None
+        width = pictures[0].width
+        strip = Image.new("RGB", (width * len(pictures), 60))
+        for k, picture in enumerate(pictures):
+            strip.paste(picture.resize((width, 60)), (k * width, 0))
+        strip.save(out, quality=80)
+        return out
 
     def set_trim(self, path: str, start: float | None, end: float | None) -> None:
         self.execute("UPDATE items SET trim_start = ?, trim_end = ? WHERE path = ?", (start, end, path))
