@@ -109,3 +109,41 @@ def test_look_alikes_are_described_once(trip, tmp_path):
     trip.describe_clips(ai)
     assert sum(looked) == 3  # four files, but the double shares its set's description
     assert {i["ai_caption"] for i in trip.items() if Path(i["path"]).name.startswith("a")} == {"Waves on a sandy beach"}
+
+
+class FakePlanner(FakeDirector):
+    def plan(self, prompt):
+        self.prompts.append(prompt)
+        return {"theme": "Beach and pool", "idea": "Start calm, end on the waves.",
+                "parts": [{"role": "opening", "shots": [2], "note": "wide"},
+                          {"role": "highlight", "shots": [1, 2, 7], "note": "the waves"}]}  # a repeat, a made-up shot
+
+
+def test_stories_are_planned_and_auto_edit_follows_the_plan(trip):
+    from trip_memory import autoedit
+
+    trip.link_story(0, to_next=True)  # a and b: one story of two shots
+    trip.describe_clips(FakeDirector())
+    ai = FakePlanner()
+    trip.plan_stories(ai)
+    assert "Waves on a sandy beach" in ai.prompts[0]
+    story = trip.stories()[0]
+    assert story["theme"] == "Beach and pool" and story["name"] == "Beach and pool" and story["planned"]
+    roles = {Path(it["path"]).name: (it["plan_role"], it["plan_pos"]) for it in story["items"]}
+    assert roles == {"b.jpg": ("opening", 0), "a.jpg": ("highlight", 1)}
+
+    order = [Path(r["path"]).name for r in autoedit.choose(trip.auto_edit_pool())]
+    assert order[:2] == ["b.jpg", "a.jpg"]  # the plan's order, not the time order
+
+    trip.move_in_plan(str(trip.folder / "a.jpg"), -1)
+    assert [Path(r["path"]).name for r in autoedit.choose(trip.auto_edit_pool())][:2] == ["a.jpg", "b.jpg"]
+    trip.forget_plan(story["key"])
+    assert not trip.stories()[0]["planned"] and trip.stories()[0]["theme"] is None
+
+
+def test_montage_and_slow_moments_set_the_pace():
+    from trip_memory import autoedit
+
+    photo = {"kind": "photo"}
+    assert autoedit.pace_of({**photo, "plan_role": "montage"})[0] > 0.8
+    assert autoedit.pace_of({**photo, "plan_role": "slow moment"}) == (0.15, True)

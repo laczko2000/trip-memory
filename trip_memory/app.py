@@ -118,6 +118,7 @@ class Page:
         self.choose_whole: dict[int, list[dict]] = {}
         self.joined: set[int] = set()
         self.last_story = 0
+        self.open_plans: set[str] = set()  # stories whose plan is shown in the Stories tab
         self.media_route: str | None = None
         self.auto_length: object = None
         self.auto_limits = AutoLimits(**load_settings().get("limits", {}))
@@ -1157,6 +1158,9 @@ class Page:
                           on_click=lambda: self.describe_clips(again=False)).props("" if left else "outline")
                 if described:
                     ui.button("Describe all again", on_click=lambda: self.describe_clips(again=True)).props("flat dense no-caps")
+                ui.button("Plan the stories", icon="movie_filter", on_click=lambda: self.plan_stories(None)) \
+                    .tooltip("For every story: a theme, and its shots in order as opening, montage, highlight, "
+                             "slow moment and ending. Auto-edit then cuts each story that way.")
                 ui.button("Suggest storylines", icon="lightbulb", on_click=self.suggest_storylines)
             if chosen and not described:
                 ui.label("Tip: describe the clips first, so the storylines know what is in each story.") \
@@ -1273,6 +1277,24 @@ class Page:
         if now > before or again:
             ui.notify(f"The AI described {now if again else now - before} files.", type="positive")
 
+    async def plan_stories(self, keys: list[str] | None) -> None:
+        if self.busy():
+            return
+        ai = self.make_director()
+        if not ai:
+            return
+        self.ai_busy = True
+        self.ai_bar.set_visibility(True)
+        self.ai_label.text = "The AI is reading the stories…"
+        try:
+            await self.run_step(lambda notify: self.trip.plan_stories(ai, keys, notify))
+        finally:
+            self.ai_busy = False
+        if keys:
+            self.open_plans.update(keys)
+        ui.notify("Plans ready: open a story's plan below to see or change it. Make a first cut in the Storyboard "
+                  "to use them.", type="positive", multi_line=True)
+
     async def suggest_storylines(self) -> None:
         if self.busy():
             return
@@ -1358,6 +1380,89 @@ class Page:
                         ui.label(f"The app's name: {story['auto_name']}").classes("text-xs text-gray-400")
                 ui.switch("In the video", value=story["enabled"],
                           on_change=lambda e, k=story["key"]: self.set_story_enabled(k, e.value))
+            self.story_plan(story, members)
+
+    def story_plan(self, story: dict, members: list[dict]) -> None:
+        """The story director's plan for a story: what each shot does, in the order Auto-edit will use."""
+        key = story["key"]
+        with ui.row().classes("w-full items-center gap-2 pl-10"):
+            if not story["planned"]:
+                ui.label("No plan yet.").classes("text-xs text-gray-500")
+                ui.button("Plan this story", icon="movie_filter", on_click=lambda: self.plan_stories([key])) \
+                    .props("flat dense size=sm")
+                return
+            is_open = key in self.open_plans
+            ui.button(icon="expand_less" if is_open else "expand_more", on_click=lambda: self.toggle_plan(key)) \
+                .props("flat dense round size=sm")
+            ui.label(f"🎬 {story['theme'] or 'Plan'}").classes("text-sm font-semibold text-indigo-800")
+            if story["idea"]:
+                ui.label(story["idea"]).classes("text-xs text-gray-600")
+            ui.space()
+            ui.button("Plan again", on_click=lambda: self.plan_stories([key])).props("flat dense size=sm")
+            ui.button("Forget plan", on_click=lambda: self.forget_plan(key)).props("flat dense size=sm")
+        if key not in self.open_plans:
+            return
+        planned = sorted((it for it in members if it["plan_role"]), key=lambda it: it["plan_pos"])
+        parts: list[tuple[str, list[dict]]] = []
+        for it in planned:
+            if parts and parts[-1][0] == it["plan_role"]:
+                parts[-1][1].append(it)
+            else:
+                parts.append((it["plan_role"], [it]))
+        with ui.row().classes("w-full gap-2 pl-10 items-start"):
+            for role, shots in parts:
+                with ui.card().tight().classes("p-1 bg-indigo-50 border border-indigo-200"):
+                    ui.label(director.ROLES.get(role, role)).classes("text-xs font-semibold text-indigo-800 px-1")
+                    if story["notes"].get(role):
+                        ui.label(story["notes"][role]).classes("text-xs text-gray-600 px-1 max-w-80")
+                    with ui.row().classes("gap-1 no-wrap"):
+                        for it in shots:
+                            self.plan_tile(it)
+        left_out = [it for it in members if not it["plan_role"]]
+        if left_out:
+            with ui.row().classes("w-full items-center gap-2 pl-10"):
+                ui.label(f"Left out of the plan ({len(left_out)}; Auto-edit uses them only if the song needs more):") \
+                    .classes("text-xs text-gray-500")
+            with ui.row().classes("w-full gap-1 pl-10"):
+                for it in left_out[:24]:
+                    self.plan_tile(it)
+
+    def plan_tile(self, it: dict) -> None:
+        with ui.column().classes("gap-0 items-center" + ("" if it["plan_role"] else " opacity-60")):
+            self.preview(it, "width:96px;height:64px;flex:none", view="plan")
+            with ui.row().classes("gap-0 no-wrap items-center"):
+                if it["plan_role"]:
+                    ui.button(icon="chevron_left", on_click=lambda p=it["path"]: self.move_in_plan(p, -1)) \
+                        .props("flat dense round size=xs").tooltip("Earlier")
+                with ui.button(icon="edit").props("flat dense round size=xs").tooltip("What this shot does"):
+                    with ui.menu():
+                        for role, label in director.ROLES.items():
+                            ui.menu_item(label, on_click=lambda p=it["path"], r=role: self.set_plan_role(p, r))
+                        if it["plan_role"]:
+                            ui.menu_item("Leave out of the plan", on_click=lambda p=it["path"]: self.set_plan_role(p, None))
+                if it["plan_role"]:
+                    ui.button(icon="chevron_right", on_click=lambda p=it["path"]: self.move_in_plan(p, 1)) \
+                        .props("flat dense round size=xs").tooltip("Later")
+            if it.get("ai_caption"):
+                ui.label(it["ai_caption"]).classes("text-[10px] leading-tight text-gray-500 w-24 line-clamp-2")
+
+    def toggle_plan(self, key: str) -> None:
+        self.open_plans ^= {key}
+        self.stories_view.refresh()
+
+    def set_plan_role(self, path: str, role: str | None) -> None:
+        self.trip.set_plan_role(path, role)
+        self.reload()
+        self.stories_view.refresh()
+
+    def move_in_plan(self, path: str, steps: int) -> None:
+        self.trip.move_in_plan(path, steps)
+        self.stories_view.refresh()
+
+    def forget_plan(self, key: str) -> None:
+        self.trip.forget_plan(key)
+        self.reload()
+        self.stories_view.refresh()
 
     def rename_story(self, key: str, name: str) -> None:
         current = next((s for s in self.trip.stories() if s["key"] == key), None)

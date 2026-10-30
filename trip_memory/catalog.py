@@ -168,9 +168,15 @@ class Trip:
             "clip_sound INTEGER DEFAULT 0", "clip_volume REAL DEFAULT 1.0", "cut_out INTEGER DEFAULT 0", "subjects TEXT",
             "transition_why TEXT", "camera_moves TEXT", "speed REAL DEFAULT 1.0", "speed_why TEXT", "fps REAL",
             "effects TEXT", "effects_why TEXT", "ai_caption TEXT", "ai_score INTEGER", "removed INTEGER DEFAULT 0", "features BLOB",
+            "plan_role TEXT", "plan_pos REAL",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
+            except sqlite3.OperationalError:
+                pass
+        for column in ("theme TEXT", "idea TEXT", "plan_notes TEXT"):
+            try:
+                self.db.execute(f"ALTER TABLE story_info ADD COLUMN {column}")
             except sqlite3.OperationalError:
                 pass
         (self.dir / "folder.txt").write_text(str(self.folder))
@@ -849,7 +855,10 @@ class Trip:
             auto = story_name(members)
             result.append({
                 "key": key, "number": number, "items": members, "auto_name": auto,
-                "name": saved.get("name") or auto, "renamed": bool(saved.get("name")),
+                "name": saved.get("name") or saved.get("theme") or auto, "renamed": bool(saved.get("name")),
+                "theme": saved.get("theme"), "idea": saved.get("idea"),
+                "notes": json.loads(saved["plan_notes"]) if saved.get("plan_notes") else {},
+                "planned": any(m["plan_role"] for m in members),
                 "enabled": saved.get("enabled", 1) != 0, "position": saved.get("position"),
                 "start": members[0]["taken_at"], "end": members[-1]["taken_at"],
             })
@@ -966,6 +975,94 @@ class Trip:
                     frames.append(out.read_bytes())
         return frames or [Path(row["thumb"]).read_bytes()]
 
+    # ---------- story director: a plan for each story ----------
+
+    PLAN_MAX_SHOTS = 120  # a very long story: the AI sees its best shots only
+
+    def plan_stories(self, ai, keys: list[str] | None = None, on_change: Callable[[], None] | None = None) -> None:
+        """Let the AI plan each story (or just these): a theme, and its shots in order as opening, montage,
+        highlight... Auto-edit then cuts the story that way."""
+        self._run(lambda notify: self._plan_stories(ai, notify, keys), on_change)
+
+    def _plan_stories(self, ai, notify: Callable[[], None], keys: list[str] | None) -> None:
+        p = self.progress
+        todo = [s for s in self._director_stories() if keys is None or s["key"] in keys]
+        started = time.monotonic()
+        for k, story in enumerate(todo):
+            p.fraction = k / max(1, len(todo))
+            left = ""
+            if k:
+                minutes = (time.monotonic() - started) / k * (len(todo) - k) / 60
+                left = f" · about {minutes:.0f} min left" if minutes >= 1 else " · less than a minute left"
+            p.message = f"The AI is planning story {k + 1} of {len(todo)}: {story['name']}{left}"
+            notify()
+            self._plan_story(ai, story)
+        p.message = f"The AI planned {len(todo)} stories."
+
+    def _plan_story(self, ai, story: dict) -> None:
+        shots = [it for it in story["items"] if it["chosen"]]
+        if len(shots) > self.PLAN_MAX_SHOTS:
+            keep = sorted(shots, key=lambda it: (-(it.get("ai_score") or 3), -bool(it["best"])))[: self.PLAN_MAX_SHOTS]
+            shots = [it for it in shots if it in keep]
+        if not shots:
+            return
+        places = [it["place"] or it["country"] for it in shots if it["place"] or it["country"]]
+        start, end = (datetime.fromisoformat(story[k]).astimezone() for k in ("start", "end"))
+        prompt = director.plan_prompt(
+            {"name": story["name"], "when": f"{start:%a %d %b %H:%M}–{end:%H:%M}",
+             "place": max(set(places), key=places.count) if places else ""},
+            [{"caption": it.get("ai_caption"), "highlight": it.get("ai_score"), "kind": it["kind"],
+              "seconds": it["duration"] or 0, "time": f"{datetime.fromisoformat(it['taken_at']).astimezone():%H:%M}"}
+             for it in shots])
+        plan = director.clean_plan(ai.plan(prompt), len(shots))  # a DirectorError stops the whole run
+        if not plan["parts"]:
+            return
+        notes = {}
+        rows = []
+        pos = 0
+        for part in plan["parts"]:
+            notes[part["role"]] = part["note"]
+            for n in part["shots"]:
+                rows.append((part["role"], pos, shots[n - 1]["path"]))
+                pos += 1
+        with self._lock:
+            self.db.executemany("UPDATE items SET plan_role = NULL, plan_pos = NULL WHERE path = ?",
+                                [(it["path"],) for it in story["items"]])
+            self.db.executemany("UPDATE items SET plan_role = ?, plan_pos = ? WHERE path = ?", rows)
+            self.db.execute("INSERT OR IGNORE INTO story_info (key) VALUES (?)", (story["key"],))
+            self.db.execute("UPDATE story_info SET theme = ?, idea = ?, plan_notes = ? WHERE key = ?",
+                            (plan["theme"] or None, plan["idea"] or None, json.dumps(notes), story["key"]))
+            self.db.commit()
+
+    def set_plan_role(self, path: str, role: str | None) -> None:
+        """Change what one shot does in its story's plan (None: leave it out of the plan)."""
+        if role is None:
+            self.execute("UPDATE items SET plan_role = NULL, plan_pos = NULL WHERE path = ?", (path,))
+            return
+        self.execute("UPDATE items SET plan_role = ?, plan_pos = COALESCE(plan_pos, "
+                     "(SELECT COALESCE(MAX(plan_pos), 0) + 1 FROM items)) WHERE path = ?", (role, path))
+
+    def move_in_plan(self, path: str, steps: int) -> None:
+        """Move a shot earlier (negative) or later in its story's plan."""
+        rows = self.query("SELECT story FROM items WHERE path = ?", (path,))
+        if not rows:
+            return
+        order = [r["path"] for r in self.query("SELECT path FROM items WHERE story = ? AND plan_role IS NOT NULL "
+                                               "ORDER BY plan_pos", (rows[0]["story"],))]
+        if path not in order:
+            return
+        i = order.index(path)
+        order.insert(max(0, min(len(order) - 1, i + steps)), order.pop(i))
+        self.db_write_many("UPDATE items SET plan_pos = ? WHERE path = ?", [(n, p) for n, p in enumerate(order)])
+
+    def forget_plan(self, key: str) -> None:
+        story = next((s for s in self.stories() if s["key"] == key), None)
+        if story is None:
+            return
+        self.db_write_many("UPDATE items SET plan_role = NULL, plan_pos = NULL WHERE path = ?",
+                           [(it["path"],) for it in story["items"]])
+        self.execute("UPDATE story_info SET theme = NULL, idea = NULL, plan_notes = NULL WHERE key = ?", (key,))
+
     def _director_stories(self) -> list[dict]:
         return [s for s in self.stories() if any(it["chosen"] for it in s["items"])]
 
@@ -985,6 +1082,7 @@ class Trip:
                 "when": f"{start:%a %d %b %H:%M}–{datetime.fromisoformat(s['end']).astimezone():%H:%M}",
                 "place": max(set(places), key=places.count) if places else "",
                 "captions": [it["ai_caption"] for it in members if it.get("ai_caption")],
+                "idea": s.get("idea"),
             })
         answer = director.clean_storylines(ai.storylines(director.storyline_prompt(described)), len(by_time))
         if not answer["storylines"]:

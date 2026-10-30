@@ -159,6 +159,10 @@ def shot_value(row: dict) -> float:
     value += 0.1 * np.log1p(row.get("sharpness") or 0) / 8
     if row.get("ai_score"):
         value += 0.25 * (row["ai_score"] - 3)  # the AI director's view: a moment worth remembering, or a dull one
+    if row.get("plan_role") == "highlight":
+        value += 1.0
+    elif row.get("plan_pos") is None and row.get("planned_story"):
+        value -= 1.0  # the story's plan left this shot out: used only if the song needs more shots
     if row.get("quality") is not None:
         value += 0.8 * min(0.0, row["quality"])  # a clip with no steady, sharp stretch is a poor choice
     return value
@@ -175,7 +179,7 @@ TEASER_SHOTS = 4
 
 def excitement(row: dict) -> float:
     pace, _ = pace_of(row)
-    return pace + 0.5 * (row.get("peak") or 0.0) + 0.2 * shot_value(row)
+    return pace + 0.5 * (row.get("peak") or 0.0) + 0.2 * shot_value(row) + (0.5 if row.get("plan_role") == "highlight" else 0)
 
 
 def _establishing(row: dict) -> float:
@@ -212,11 +216,22 @@ def arrange(candidates: list[dict], style: str) -> list[dict]:
             r["must"] = True
     shaped: list[dict] = []
     for st in stories:
+        if any(r.get("plan_role") for r in st):  # the story director's plan sets the order
+            for r in st:
+                r["must"] = r["must"] or (r.get("plan_role") == "highlight")
+            opening = next((r for r in st if r.get("plan_role") == "opening"), None)
+            if opening is not None:
+                opening["must"] = True
+            shaped += st
+            continue
         if len(st) >= 4:
             opener = max(st[: max(2, len(st) // 3)], key=_establishing)  # from the early part of the story
             st = [opener, *[r for r in st if r is not opener]]
         shaped += _spread_look_alikes(st)
-    if len(shaped) >= 4:
+    if stories and any(r.get("plan_role") for r in stories[-1]):
+        for r in stories[-1]:
+            r["must"] = r["must"] or r.get("plan_role") == "ending"  # the plan's own ending closes the video
+    elif len(shaped) >= 4:
         # End on a calm, steady shot from the last story.
         last_story = shaped[-max(2, len(stories[-1])):]
         closer = max(last_story, key=_establishing)
@@ -251,7 +266,12 @@ def choose(rows: list[dict]) -> list[dict]:
 
     (Choose files already ticks only the best of each set of look-alike shots for you; anything else you
     ticked yourself, you want in.)"""
-    return sorted(rows, key=lambda r: (r.get("story_rank", 0), r["taken_at"], r["path"]))
+    planned = {(r.get("story_rank", 0), r.get("story")) for r in rows if r.get("plan_role")}
+    for r in rows:
+        r["planned_story"] = (r.get("story_rank", 0), r.get("story")) in planned
+    # In a planned story, the plan's order first; shots the plan left out after it, as taken.
+    return sorted(rows, key=lambda r: (r.get("story_rank", 0), r.get("plan_pos") is None,
+                                       r.get("plan_pos") or 0, r["taken_at"], r["path"]))
 
 
 # ---------- music-driven editing ----------
@@ -417,6 +437,14 @@ def merge_slots(slots: list[Slot], count: int, longest: float) -> list[Slot]:
 
 def pace_of(row: dict) -> tuple[float, bool]:
     """How lively a shot is (0 still .. 1 fast action) and whether it is a smooth, cinematic camera move."""
+    role = row.get("plan_role")
+    if role == "montage":
+        return 0.9, False  # cut quickly on the beat: goes to the lively parts of the song, in short shots
+    if role == "slow moment":
+        return 0.15, True  # goes to calm music: slow motion or a slow push-in
+    if role in ("opening", "ending"):
+        pace, cinematic = pace_of({**row, "plan_role": None})
+        return min(pace, 0.35), cinematic
     if row["kind"] != "video":
         return 0.15, False
     action, camera, shake = row.get("motion_action"), row.get("motion_camera"), row.get("motion_shake")

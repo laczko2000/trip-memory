@@ -95,6 +95,56 @@ STORYLINE_SCHEMA = {
 }
 
 
+ROLES = {  # what a group of shots does in a story, and how Auto-edit cuts it
+    "opening": "Opening: sets the scene",
+    "build-up": "Build-up",
+    "montage": "Quick montage on the beat",
+    "highlight": "Highlight",
+    "slow moment": "Slow, cinematic moment",
+    "ending": "Ending",
+}
+
+PLAN_PROMPT = """You are the editor of a holiday memory video set to music. This is one story of the trip: shots
+taken at the same time and place, in the order they were taken.
+
+Story: "{name}" · {when}{place}
+{shots}
+
+Plan how this story is told in the video, like a short scene with a beginning, middle and end:
+- theme: a short, evocative title for the story (2 to 5 words, e.g. "Lost in the forest").
+- idea: one sentence on how the scene should feel and flow.
+- parts: the scene in order. Each part has a role, the shot numbers it uses (in the order to show them), and a short
+  note on why. Roles:
+  opening (one or two wide, calm shots that set the scene), build-up, montage (several similar or related shots,
+  especially photos, cut quickly one after another on the beat, e.g. five forest pictures), highlight (the best
+  moment), slow moment (a calm, beautiful shot to let breathe), ending (a calm shot that closes the story).
+  Use each shot at most once. Leave out dull, blurry or repeated shots. Not every role is needed.
+Answer in JSON."""
+
+PLAN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "theme": {"type": "string"},
+        "idea": {"type": "string"},
+        "parts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "role": {"type": "string", "enum": list(ROLES)},
+                    "shots": {"type": "array", "items": {"type": "integer"}},
+                    "note": {"type": "string"},
+                },
+                "required": ["role", "shots", "note"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["theme", "idea", "parts"],
+    "additionalProperties": False,
+}
+
+
 class DirectorError(Exception):
     """Something the person can fix (no key, Ollama not running...), with a plain explanation."""
 
@@ -166,6 +216,9 @@ class Ollama:
     def storylines(self, prompt: str) -> dict:
         return self._ask(prompt, STORYLINE_SCHEMA)
 
+    def plan(self, prompt: str) -> dict:
+        return self._ask(prompt, PLAN_SCHEMA)
+
 
 # ---------- Claude ----------
 
@@ -235,6 +288,9 @@ class Claude:
     def storylines(self, prompt: str) -> dict:
         return self._ask([{"type": "text", "text": prompt}], STORYLINE_SCHEMA, self.story_model)
 
+    def plan(self, prompt: str) -> dict:
+        return self._ask([{"type": "text", "text": prompt}], PLAN_SCHEMA, self.story_model)
+
 
 def make(settings: dict):
     """The director to use, from the app's settings ({"provider", "ollama_model", "claude_model", "api_key"})."""
@@ -278,6 +334,8 @@ def storyline_prompt(stories: list[dict]) -> str:
         captions = [c for c in s["captions"] if c][:10]
         lines.append(f"Story {n}: \"{s['name']}\" · {s['when']}" + (f" · {s['place']}" if s.get("place") else "")
                      + f" · {s['count']} clips")
+        if s.get("idea"):
+            lines.append(f"  Plan: {s['idea']}")
         lines.extend(f"  - {c}" for c in captions)
     return STORYLINE_PROMPT.format(stories="\n".join(lines))
 
@@ -298,3 +356,31 @@ def clean_storylines(answer: dict, count: int) -> dict:
         if isinstance(n, int) and 1 <= n <= count and name:
             names[n] = name
     return {"storylines": storylines[:4], "names": names}
+
+
+def plan_prompt(story: dict, shots: list[dict]) -> str:
+    """The question for planning one story. shots: in time order, each with caption, highlight, kind, seconds, time."""
+    lines = []
+    for n, shot in enumerate(shots, 1):
+        what = f"video {shot['seconds']:.0f} s" if shot["kind"] == "video" else "photo"
+        score = f", highlight {shot['highlight']}/5" if shot.get("highlight") else ""
+        lines.append(f"{n}. {shot['time']} · {what}{score}: {shot.get('caption') or '(not described)'}")
+    return PLAN_PROMPT.format(name=story["name"], when=story["when"],
+                              place=f" · {story['place']}" if story.get("place") else "", shots="\n".join(lines))
+
+
+def clean_plan(answer: dict, count: int) -> dict:
+    """Keep valid roles and shot numbers (1..count, each shot once); drop empty parts."""
+    used: set[int] = set()
+    parts = []
+    for part in answer.get("parts", []):
+        role = part.get("role")
+        shots = []
+        for n in part.get("shots", []):
+            if isinstance(n, int) and 1 <= n <= count and n not in used:
+                used.add(n)
+                shots.append(n)
+        if role in ROLES and shots:
+            parts.append({"role": role, "shots": shots, "note": " ".join(str(part.get("note", "")).split())[:200]})
+    theme = " ".join(str(answer.get("theme", "")).split())[:40]
+    return {"theme": theme, "idea": " ".join(str(answer.get("idea", "")).split())[:300], "parts": parts}

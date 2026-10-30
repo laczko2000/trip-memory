@@ -244,3 +244,23 @@ def test_camera_effects_suit_the_music():
                                    None, 0.8, "Fade")
     assert not any(s.effects for s in plain.shots)
     assert not any(s.transition in ("Zoom through", "Zoom out reveal") for s in plain.shots)
+
+
+def test_a_planned_montage_is_cut_quickly_in_the_lively_music():
+    rows = [_clip(n, 0.0, kind="photo") for n in range(30)]
+    roles = ["opening"] + ["build-up"] * 7 + ["montage"] * 8 + ["build-up"] * 13 + ["ending"]
+    for n, (r, role) in enumerate(zip(rows, roles)):
+        r.update(plan_role=role, plan_pos=n, similar_set=n)
+    limits = autoedit.Limits(max_video=4.0, max_photo=4.0, min_shot=1.0, storyline="stories")
+    plan = autoedit.plan_to_music(rows, {}, _song(), limits, None, 0.8, "Fade")
+    begin, montage = 0.0, []
+    by_path = {r["path"]: r for r in rows}
+    for k, shot in enumerate(plan.shots):
+        lap = 0 if k == len(plan.shots) - 1 else transitions.seconds_of(shot.transition, 0.8)
+        if by_path[shot.path]["plan_role"] == "montage":
+            montage.append((begin, shot.seconds))
+        begin += shot.seconds - lap
+    assert len(montage) >= 6
+    assert all(16 <= start + 0.1 < 32 for start, _ in montage)  # in the lively part
+    assert np.mean([s for _, s in montage]) < 2.5  # quick
+    assert by_path[plan.shots[0].path]["plan_role"] == "opening"
