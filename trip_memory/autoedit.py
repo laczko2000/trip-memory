@@ -163,6 +163,7 @@ def shot_value(row: dict) -> float:
         value += 1.0
     elif row.get("plan_pos") is None and row.get("planned_story"):
         value -= 1.0  # the story's plan left this shot out: used only if the song needs more shots
+    value += 0.9 * (row.get("wish") or 0.0)  # the people and things you asked for when typing your video
     if row.get("quality") is not None:
         value += 0.8 * min(0.0, row["quality"])  # a clip with no steady, sharp stretch is a poor choice
     return value

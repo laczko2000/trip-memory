@@ -1510,6 +1510,7 @@ class Page:
         if not self.trip:
             ui.label("Open a trip first.").classes("text-gray-500")
             return
+        self.wish_card()
         self.auto_edit_card()
         board = self.trip.storyboard()
         if not board:
@@ -1531,6 +1532,85 @@ class Page:
 
     def more_board(self) -> None:
         self.board_limit += STORY_ROWS
+        self.storyboard_view.refresh()
+
+    WISH_EXAMPLES = ["2 minutes, beach and kids, energetic",
+                     "A calm 3-minute film of the whole trip, with slow motion",
+                     "1 minute for Instagram: only the best moments, very lively"]
+    PACES = {  # what "calm", "medium" and "lively" mean for Auto-edit
+        "calm": {"cut_on": "changes", "max_video": 6.0, "max_photo": 4.0, "min_shot": 1.5},
+        "medium": {"cut_on": "strong", "max_video": 4.0, "max_photo": 2.5, "min_shot": 1.0},
+        "lively": {"cut_on": "strong", "max_video": 2.5, "max_photo": 1.5, "min_shot": 0.5},
+    }
+
+    def wish_card(self) -> None:
+        """Type the video you want: the AI picks the stories, people, pace and length, then Auto-edit makes it."""
+        wish = self.trip.wish()
+        with ui.card().classes("w-full bg-amber-50"):
+            ui.label("🎬 Tell the app the video you want").classes("text-lg font-semibold")
+            box = ui.textarea(placeholder="For example: " + self.WISH_EXAMPLES[0],
+                              value=(wish or {}).get("wish", "")).props("outlined autogrow").classes("w-full")
+            with ui.row().classes("gap-2 items-center"):
+                for example in self.WISH_EXAMPLES:
+                    ui.chip(example, on_click=lambda e=example: box.set_value(e)).props("outline clickable dense")
+            with ui.row().classes("items-center gap-3"):
+                ui.button("Make this video", icon="movie_filter", on_click=lambda: self.make_wish(box.value))
+                ui.label("The AI chooses the stories, who and what to show more of, the pace and the length; then "
+                         "Auto-edit makes the first cut (below, with your song if you chose one). Describe the clips "
+                         "first, so it knows what is in them.").classes("text-sm text-gray-600 flex-1")
+            if wish:
+                with ui.column().classes("gap-1 w-full mt-1"):
+                    ui.label(f"Last time: {wish['summary']}" if wish.get("summary") else "Your last wish:").classes("text-sm")
+                    bits = []
+                    if wish.get("story_names"):
+                        bits.append("Stories: " + " → ".join(wish["story_names"]))
+                    if wish.get("people") or wish.get("focus"):
+                        bits.append("More of: " + ", ".join(wish.get("people", []) + wish.get("focus", [])))
+                    bits.append(f"Pace: {wish.get('pace', 'medium')}" +
+                                (f" · {fmt_length(wish['length_seconds'])}" if wish.get("length_seconds") else ""))
+                    ui.label(" · ".join(bits)).classes("text-xs text-gray-600")
+                    if wish.get("people") or wish.get("focus"):
+                        ui.button("Stop showing more of these", icon="close", on_click=self.forget_wish) \
+                            .props("flat dense size=sm")
+
+    async def make_wish(self, text: str) -> None:
+        if not (text or "").strip():
+            ui.notify("Type the video you want first, or click one of the examples.", type="warning")
+            return
+        if self.busy():
+            return
+        ai = self.make_director()
+        if not ai:
+            return
+        music = self.music_path()
+        song = self.song_maps.get(music) if music else None
+        note = ui.notification("The AI is reading your wish…", spinner=True, timeout=None)
+        self.ai_busy = True
+        try:
+            wish = await run.io_bound(self.trip.make_wish, ai, text, song.duration if song else None)
+        except director.DirectorError as exc:
+            ui.notify(str(exc), type="warning", multi_line=True, timeout=10000)
+            return
+        except Exception as exc:
+            traceback.print_exc()
+            ui.notify(f"Stopped: {exc}", type="negative")
+            return
+        finally:
+            note.dismiss()
+            self.ai_busy = False
+        for key, value in self.PACES[wish["pace"]].items():
+            setattr(self.auto_limits, key, value)
+        self.auto_limits.storyline = "teaser" if wish["teaser"] else "stories"
+        self.auto_limits.speed_effects = wish["slow_motion"]
+        self.auto_limits.camera_effects = wish["camera_effects"]
+        save_settings(limits=asdict(self.auto_limits))
+        self.auto_length = wish["length_seconds"] or ("song" if music else 180)
+        ui.notify(wish["summary"] or "Got it. Making the first cut…", type="info", multi_line=True)
+        await self.run_auto_edit()
+
+    def forget_wish(self) -> None:
+        self.trip.forget_wish()
+        ui.notify("Auto-edit no longer favours those people and things.")
         self.storyboard_view.refresh()
 
     def auto_edit_card(self) -> None:
@@ -1594,6 +1674,8 @@ class Page:
                 if music:
                     lengths = {"song": "As long as the song", **lengths}
                     lengths.pop("all")
+                if isinstance(self.auto_length, (int, float)) and self.auto_length not in lengths:
+                    lengths[self.auto_length] = fmt_length(self.auto_length)  # a length you typed in your wish
                 if self.auto_length not in lengths:
                     self.auto_length = "song" if music else 180
                 ui.select(lengths, value=self.auto_length, label="Length",

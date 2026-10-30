@@ -145,6 +145,50 @@ PLAN_SCHEMA = {
 }
 
 
+WISH_PROMPT = """You are the editor of a holiday memory video set to music. The person typed the video they want:
+
+"{wish}"
+
+The trip is split into stories (shots taken at the same time and place), in date order:
+
+{stories}
+
+People they have named: {people}.
+{song}
+Turn their words into settings for the app:
+- summary: one friendly sentence saying what video you will make.
+- length_seconds: how long the video should be (0 if they did not say: it then lasts as long as the song).
+- stories: the story numbers to use, in the order to tell them; leave out stories that don't fit the wish.
+  An empty list keeps the stories as they are now.
+- people: names (only from the list above) to show more of; empty if they named nobody.
+- focus: a few short words for what to show more of (e.g. "beach", "kids", "boat"); empty if nothing special.
+- pace: "calm", "medium" or "lively".
+- teaser: true to open with a quick teaser of the most exciting shots.
+- slow_motion: true for slow motion in calm moments.
+- camera_effects: true for zooms, punch-ins and speed ramps.
+- title: the opening title if they asked for one or the wish suggests a good one; else empty.
+Answer in JSON."""
+
+WISH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "length_seconds": {"type": "integer"},
+        "stories": {"type": "array", "items": {"type": "integer"}},
+        "people": {"type": "array", "items": {"type": "string"}},
+        "focus": {"type": "array", "items": {"type": "string"}},
+        "pace": {"type": "string", "enum": ["calm", "medium", "lively"]},
+        "teaser": {"type": "boolean"},
+        "slow_motion": {"type": "boolean"},
+        "camera_effects": {"type": "boolean"},
+        "title": {"type": "string"},
+    },
+    "required": ["summary", "length_seconds", "stories", "people", "focus", "pace", "teaser", "slow_motion",
+                 "camera_effects", "title"],
+    "additionalProperties": False,
+}
+
+
 class DirectorError(Exception):
     """Something the person can fix (no key, Ollama not running...), with a plain explanation."""
 
@@ -219,6 +263,9 @@ class Ollama:
     def plan(self, prompt: str) -> dict:
         return self._ask(prompt, PLAN_SCHEMA)
 
+    def wish(self, prompt: str) -> dict:
+        return self._ask(prompt, WISH_SCHEMA)
+
 
 # ---------- Claude ----------
 
@@ -290,6 +337,9 @@ class Claude:
 
     def plan(self, prompt: str) -> dict:
         return self._ask([{"type": "text", "text": prompt}], PLAN_SCHEMA, self.story_model)
+
+    def wish(self, prompt: str) -> dict:
+        return self._ask([{"type": "text", "text": prompt}], WISH_SCHEMA, self.story_model)
 
 
 def make(settings: dict):
@@ -384,3 +434,37 @@ def clean_plan(answer: dict, count: int) -> dict:
             parts.append({"role": role, "shots": shots, "note": " ".join(str(part.get("note", "")).split())[:200]})
     theme = " ".join(str(answer.get("theme", "")).split())[:40]
     return {"theme": theme, "idea": " ".join(str(answer.get("idea", "")).split())[:300], "parts": parts}
+
+
+def wish_prompt(wish: str, stories: list[dict], people: list[str], song_seconds: float | None) -> str:
+    """The question for "type the video you want". stories: as for storyline_prompt, plus the people in each."""
+    lines = []
+    for n, s in enumerate(stories, 1):
+        lines.append(f"Story {n}: \"{s['name']}\" · {s['when']}" + (f" · {s['place']}" if s.get("place") else "")
+                     + f" · {s['count']} clips" + (f" · with {', '.join(s['people'])}" if s.get("people") else ""))
+        lines.extend(f"  - {c}" for c in [c for c in s["captions"] if c][:6])
+    song = (f"The chosen song lasts {song_seconds / 60:.1f} minutes.\n" if song_seconds
+            else "No song is chosen yet.\n")
+    return WISH_PROMPT.format(wish=" ".join(wish.split())[:1000], stories="\n".join(lines),
+                              people=", ".join(people) or "nobody yet", song=song)
+
+
+def clean_wish(answer: dict, count: int, people: list[str]) -> dict:
+    """Keep valid story numbers and known names; keep the numbers sensible."""
+    order: list[int] = []
+    for n in answer.get("stories", []):
+        if isinstance(n, int) and 1 <= n <= count and n not in order:
+            order.append(n)
+    known = {p.lower(): p for p in people}
+    who = [known[str(p).strip().lower()] for p in answer.get("people", []) if str(p).strip().lower() in known]
+    focus = [w for w in (" ".join(str(f).split()).lower()[:30] for f in answer.get("focus", [])) if w][:6]
+    seconds = answer.get("length_seconds")
+    seconds = int(min(max(seconds, 15), 1200)) if isinstance(seconds, (int, float)) and seconds > 0 else 0
+    return {
+        "summary": " ".join(str(answer.get("summary", "")).split())[:300],
+        "length_seconds": seconds, "stories": order, "people": list(dict.fromkeys(who)), "focus": focus,
+        "pace": answer.get("pace") if answer.get("pace") in ("calm", "medium", "lively") else "medium",
+        "teaser": bool(answer.get("teaser")), "slow_motion": bool(answer.get("slow_motion", True)),
+        "camera_effects": bool(answer.get("camera_effects", True)),
+        "title": " ".join(str(answer.get("title", "")).split())[:60],
+    }

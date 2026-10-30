@@ -205,3 +205,37 @@ def test_storyline_names_saved_by_older_versions_become_the_ais(trip):
     again = catalog.Trip(trip.folder)
     story = next(s for s in again.stories() if s["key"] == key)
     assert story["name"] == "Morning at the beach" and not story["renamed"]
+
+
+class FakeWisher(FakeDirector):
+    def wish(self, prompt):
+        self.prompts.append(prompt)
+        return {"summary": "A lively minute at the beach.", "length_seconds": 60, "stories": [3, 1, 3, 8],
+                "people": ["anna", "Zoe"], "focus": ["Beaches", ""], "pace": "lively", "teaser": False,
+                "slow_motion": False, "camera_effects": True, "title": "Sun and sand"}
+
+
+def test_type_the_video_you_want(trip):
+    trip.describe_clips(FakeDirector())
+    trip.execute("INSERT INTO people (name) VALUES ('Anna')")
+    ai = FakeWisher()
+    wish = trip.make_wish(ai, "  a lively minute,\n beach only ", 95.0)
+    assert '"a lively minute, beach only"' in ai.prompts[0] and "Anna" in ai.prompts[0] and "1.6 minutes" in ai.prompts[0]
+    assert wish["stories"] == [3, 1] and wish["people"] == ["Anna"] and wish["focus"] == ["beaches"]
+    assert wish["length_seconds"] == 60 and wish["pace"] == "lively" and not wish["slow_motion"]
+    assert trip.title_settings()["trip_title"] == "Sun and sand"
+    stories = trip.stories()
+    assert [Path(s["items"][0]["path"]).name for s in stories if s["enabled"]] == ["c.jpg", "a.jpg"]
+    assert trip.wish()["summary"] == "A lively minute at the beach."
+
+    # The beach shots (the AI called them sandy beaches) are favoured; the pool shot would lose points.
+    assert {Path(r["path"]).name: r["wish"] for r in trip.auto_edit_pool()} == {"c.jpg": 1.0, "a.jpg": 1.0}
+    pool_row = next(r for r in trip.items() if r["path"].endswith("b.jpg"))
+    assert trip.wish_match(pool_row, trip.wish()) == -0.5
+    trip.forget_wish()
+    assert trip.wish() is None and trip.wish_match(pool_row, trip.wish()) == 0.0
+
+
+def test_a_wish_with_nothing_usable_keeps_things_as_they_are():
+    w = director.clean_wish({"length_seconds": -5, "pace": "wild", "stories": ["1", 0]}, 2, [])
+    assert w["length_seconds"] == 0 and w["pace"] == "medium" and w["stories"] == [] and w["slow_motion"]

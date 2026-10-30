@@ -536,11 +536,13 @@ class Trip:
         items = self.items()
         stories = self.stories(items)
         left_out = self._left_out_by_plan(stories)
+        wish = self.wish()
         pool = []
         for rank, story in enumerate(stories):
             if story["enabled"]:
                 for r in story["items"]:
                     if r["chosen"] and r["included"] and r["path"] not in left_out:
+                        r = r | {"wish": self.wish_match(r, wish)}
                         pool.append(r | {"story_rank": rank, "story_name": story["name"]})
         return pool
 
@@ -1256,18 +1258,84 @@ class Trip:
         saved = self.saved_storylines()
         if not saved or not 0 <= index < len(saved["storylines"]):
             return
+        self._use_stories(saved["storylines"][index]["stories"], saved["names"])
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('storyline_used', ?)", (str(index),))
+
+    def _use_stories(self, chosen: list[str], names: dict[str, str] | None = None) -> None:
+        """Tell these stories (keys) in this order and switch the others off; the storyboard starts again from them
+        (the last first cut's order and left-outs go). names: the AI's names for stories (None keeps them)."""
         keys = [s["key"] for s in self.stories()]
-        chosen = [k for k in saved["storylines"][index]["stories"] if k in keys]
+        chosen = [k for k in chosen if k in keys]
         rest = [k for k in keys if k not in chosen]
         with self._lock:
             for n, key in enumerate(chosen + rest):
                 self.db.execute("INSERT OR IGNORE INTO story_info (key) VALUES (?)", (key,))
-                self.db.execute("UPDATE story_info SET position = ?, enabled = ?, ai_name = ? WHERE key = ?",
-                                (n, int(key in chosen), saved["names"].get(key), key))
-            self.db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('storyline_used', ?)", (str(index),))
-            # The storyboard starts again from this storyline: the last first cut's order and left-outs go.
+                self.db.execute("UPDATE story_info SET position = ?, enabled = ? WHERE key = ?", (n, int(key in chosen), key))
+                if names is not None:
+                    self.db.execute("UPDATE story_info SET ai_name = ? WHERE key = ?", (names.get(key), key))
             self.db.execute("UPDATE items SET position = NULL, cut_out = 0")
             self.db.commit()
+
+    # ---------- the video you want ----------
+
+    def _wish_stories(self) -> tuple[list[dict], list[str]]:
+        """The trip for the AI: each story with its clips' captions and the people in it; and the named people."""
+        stories = sorted(self._director_stories(), key=lambda s: s["start"])
+        described = []
+        for s in stories:
+            members = [it for it in s["items"] if it["chosen"]]
+            places = [it["place"] or it["country"] for it in members if it["place"] or it["country"]]
+            start = datetime.fromisoformat(s["start"]).astimezone()
+            described.append({
+                "key": s["key"], "name": s["name"], "count": len(members),
+                "when": f"{start:%a %d %b %H:%M}–{datetime.fromisoformat(s['end']).astimezone():%H:%M}",
+                "place": max(set(places), key=places.count) if places else "",
+                "captions": [it["ai_caption"] for it in members if it.get("ai_caption")],
+                "people": sorted({p for it in members for p in it["people"] if not p.startswith("Person ")}),
+            })
+        return described, self.person_names()
+
+    def make_wish(self, ai, wish: str, song_seconds: float | None = None) -> dict:
+        """Ask the AI to turn the video you typed into settings, and use its choice of stories, focus and title.
+        The rest (length, pace, effects) is in the answer, for Auto-edit."""
+        stories, people = self._wish_stories()
+        if not stories:
+            raise director.DirectorError("No stories yet. Click Analyse first.")
+        answer = director.clean_wish(ai.wish(director.wish_prompt(wish, stories, people, song_seconds)),
+                                     len(stories), people)
+        if answer["stories"]:
+            self._use_stories([stories[n - 1]["key"] for n in answer["stories"]])
+        if answer["title"]:
+            self.set_title_settings(trip_title=answer["title"])
+        saved = {"wish": " ".join(wish.split()), **answer,
+                 "story_names": [stories[n - 1]["name"] for n in answer["stories"]]}
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('wish', ?)", (json.dumps(saved),))
+        return saved
+
+    def wish(self) -> dict | None:
+        """The last video you asked for (it steers Auto-edit until you forget it)."""
+        rows = self.query("SELECT value FROM meta WHERE key = 'wish'")
+        return json.loads(rows[0]["value"]) if rows else None
+
+    def forget_wish(self) -> None:
+        self.execute("DELETE FROM meta WHERE key = 'wish'")
+
+    @staticmethod
+    def wish_match(row: dict, wish: dict | None) -> float:
+        """How well a shot fits the people and things you asked for: 0 when you asked for none,
+        else -0.5 for a shot without any of them, up to +2 for one with both."""
+        if not wish or not (wish.get("people") or wish.get("focus")):
+            return 0.0
+        score = 0.0
+        if set(wish.get("people") or []) & set(row.get("people") or []):
+            score += 1.0
+        words = " ".join([row.get("ai_caption") or "", row.get("scene_final") or "", row.get("place") or "",
+                          " ".join(row.get("tags_final") or [])]).lower()
+        forms = {f for w in wish.get("focus") or [] for f in (w, w[:-1] if w.endswith("s") else w,
+                                                                 w[:-2] if w.endswith("es") else w) if len(f) > 2}
+        if any(f in words for f in forms):  # "beaches" finds "beach", "kids" finds "kid"
+            score += 1.0
+        return score or -0.5
 
     def storyline_used(self) -> int | None:
         rows = self.query("SELECT value FROM meta WHERE key = 'storyline_used'")
