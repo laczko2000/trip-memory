@@ -19,6 +19,7 @@ from nicegui import app, run, ui
 from .catalog import Trip, app_dir
 from .media import MediaItem
 from . import director
+from . import titles
 from . import stories
 from . import music as free_music
 from . import songmap
@@ -67,6 +68,16 @@ def choose_with_finder(kind: str) -> str | None:
         text=True,
     )
     return result.stdout.strip() or None
+
+
+def pil_data_url(picture) -> str:
+    """A Pillow picture as an address the page can show directly."""
+    import base64
+    import io
+
+    out = io.BytesIO()
+    picture.save(out, "JPEG", quality=85)
+    return "data:image/jpeg;base64," + base64.b64encode(out.getvalue()).decode()
 
 
 def data_url(path: str | None) -> str:
@@ -321,6 +332,7 @@ class Page:
         self.gallery.refresh()
         self.people_view.refresh()
         self.video_summary.refresh()
+        self.titles_card.refresh()
         self.storyboard_view.refresh()
         self.stories_view.refresh()
         self.director_card.refresh()
@@ -1506,6 +1518,7 @@ class Page:
             "Use the arrows to change the order. For videos, drag the two ends of the bar to choose which part to keep. "
             "The transition setting is for the cut after that clip."
         ).classes("text-sm text-gray-600")
+        self.shown_titles = self.trip.shot_titles(board)
         for n, it in enumerate(board[: self.board_limit], 1):  # one long list you scroll through
             self.story_row(n, it, last=n == len(board))
         if len(board) > self.board_limit:
@@ -1727,6 +1740,7 @@ class Page:
                     ui.label(f"{icon} {fmt_time(it['taken_at'])}" + (f" · {place}" if place else "")).classes("text-sm")
                     if it.get("ai_caption"):
                         ui.label(f"📝 {it['ai_caption']}").classes("text-xs italic text-gray-600")
+                    self.title_control(it)
                     if it["kind"] == "video":
                         self.trim_control(it, box)
                         with ui.row().classes("items-center gap-4"):
@@ -1747,6 +1761,67 @@ class Page:
                         why.text = f"💡 {it['transition_why']}" if it.get("transition_why") else ""
                         why.classes("text-xs text-gray-500")
                     ui.button("Leave out", icon="remove_circle_outline", on_click=lambda p=it["path"]: self.leave_out(p)).props("flat dense size=sm")
+
+    def title_control(self, it: dict) -> None:
+        """The words over this shot (yours, or the automatic opening, story or end title), and a button to change them."""
+        shown = getattr(self, "shown_titles", {}).get(it["path"])
+        with ui.row().classes("items-center gap-2 no-wrap"):
+            if shown:
+                kind = {"opening": "Opening title", "story": "Story title", "ending": "End card"}.get(shown["auto"], "Your title")
+                words = " · ".join(x for x in (shown["text"], shown["sub"]) if x)
+                ui.label(f"🔤 {kind}: {words}").classes("text-xs text-indigo-800")
+            ui.button("Edit title" if shown else "Add title", icon="title",
+                      on_click=lambda: self.edit_title(it, shown)).props("flat dense size=sm no-caps")
+
+    def edit_title(self, it: dict, shown: dict | None) -> None:
+        own = bool(shown and shown["auto"] is None)
+        with ui.dialog() as dialog, ui.card().classes("w-full max-w-lg"):
+            ui.label("Words over this shot").classes("text-lg font-semibold")
+            if shown and shown["auto"]:
+                ui.label("This shot has an automatic title. What you write here shows instead. (Switch the automatic "
+                         "titles off or change them in Make video.)").classes("text-xs text-gray-600")
+            text = ui.input("Title", value=shown["text"] if shown else "").classes("w-full")
+            sub = ui.input("Second line (optional)", value=shown["sub"] if shown else "").classes("w-full")
+            with ui.row().classes("w-full gap-3"):
+                style = ui.select({k: v["label"] for k, v in titles.STYLES.items()},
+                                  value=(shown or {}).get("style") or "clean", label="Style").classes("w-48")
+                where = ui.select({"": "Style's usual place", **titles.WHERE}, value=(shown or {}).get("where") or "",
+                                  label="Where").classes("w-48")
+            preview = ui.image().classes("w-full rounded bg-gray-800")
+
+            def show() -> None:
+                picture = titles.draw({"text": text.value, "sub": sub.value, "style": style.value, "where": where.value},
+                                      640, 360)
+                background = self.title_background(it, 640, 360)
+                background.alpha_composite(picture)
+                preview.set_source(pil_data_url(background.convert("RGB")))
+
+            for box in (text, sub, style, where):
+                box.on_value_change(lambda _: show())
+            show()
+            ui.label("The title fades in and out while this shot is on screen (up to 4 seconds).") \
+                .classes("text-xs text-gray-500")
+            with ui.row().classes("w-full justify-end gap-2"):
+                if own:
+                    ui.button("Remove my title", on_click=lambda: (self.save_title(it, "", "", "", ""), dialog.close())) \
+                        .props("flat")
+                ui.button("Cancel", on_click=dialog.close).props("flat")
+                ui.button("Save", on_click=lambda: (self.save_title(it, text.value, sub.value, style.value, where.value),
+                                                    dialog.close()))
+        dialog.open()
+
+    def title_background(self, it: dict, w: int, h: int):
+        from PIL import Image, ImageOps
+
+        try:
+            with Image.open(it["thumb"]) as img:
+                return ImageOps.fit(img.convert("RGB"), (w, h)).convert("RGBA")
+        except (OSError, TypeError):
+            return Image.new("RGBA", (w, h), (60, 70, 80, 255))
+
+    def save_title(self, it: dict, text: str, sub: str, style: str, where: str) -> None:
+        self.trip.set_shot_title(it["path"], text, sub, style, where)
+        self.storyboard_view.refresh()
 
     def choose_transition(self, path: str, value: str, why: ui.label) -> None:
         self.trip.set_transition(path, None if value == DEFAULT_TRANSITION else value)
@@ -1860,6 +1935,7 @@ class Page:
 
     def build_video(self) -> None:
         self.video_summary()
+        self.titles_card()
         with ui.card().classes("w-full"):
             ui.label("Style").classes("text-lg font-semibold")
             with ui.grid(columns=2).classes("w-full gap-4"):
@@ -1894,6 +1970,42 @@ class Page:
             self.render_status = ui.label("")
             self.result_box = ui.column().classes("w-full")
             self.render_progress.set_visibility(False)
+
+    @ui.refreshable
+    def titles_card(self) -> None:
+        if not self.trip or not self.items:
+            return
+        t = self.trip.title_settings()
+        styles = {k: v["label"] for k, v in titles.STYLES.items()}
+
+        def save(**values) -> None:
+            self.trip.set_title_settings(**values)
+            self.storyboard_view.refresh()
+
+        with ui.card().classes("w-full"):
+            ui.label("Titles").classes("text-lg font-semibold")
+            ui.label("Words that fade in over the video. Add your own on any shot in the Storyboard (Add title).") \
+                .classes("text-sm text-gray-600")
+            with ui.row().classes("w-full items-end gap-3"):
+                ui.switch("Opening title", value=t["opening"], on_change=lambda e: save(opening=e.value)).classes("w-44")
+                first = ui.input("Title", value=t["trip_title"]).classes("w-64")
+                first.on("blur", lambda: save(trip_title=first.value))
+                second = ui.input("Second line", value=t["trip_sub"]).classes("w-64")
+                second.on("blur", lambda: save(trip_sub=second.value))
+                ui.select(styles, value=t["style"], label="Style", on_change=lambda e: save(style=e.value)).classes("w-48")
+            with ui.row().classes("w-full items-end gap-3"):
+                ui.switch("A title for each story", value=t["stories"], on_change=lambda e: save(stories=e.value)) \
+                    .classes("w-44")
+                ui.label("The story's name (the AI's theme or your own) with its place and day, on its first shot.") \
+                    .classes("text-xs text-gray-500 w-64")
+                ui.select(styles, value=t["story_style"], label="Style",
+                          on_change=lambda e: save(story_style=e.value)).classes("w-48")
+            with ui.row().classes("w-full items-end gap-3"):
+                ui.switch("End card", value=t["ending"], on_change=lambda e: save(ending=e.value)).classes("w-44")
+                end = ui.input("Words", value=t["end_text"]).classes("w-64")
+                end.on("blur", lambda: save(end_text=end.value))
+                end_sub = ui.input("Second line", value=t["end_sub"]).classes("w-64")
+                end_sub.on("blur", lambda: save(end_sub=end_sub.value))
 
     @ui.refreshable
     def video_summary(self) -> None:

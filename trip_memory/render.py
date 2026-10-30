@@ -23,6 +23,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
+from . import titles
 from .media import MediaItem
 from .transitions import MIXED, STYLES, ZOOM_INTO, ZOOM_OUT_OF, seconds_of
 from .tools import FFmpegError, has_encoder, has_filter, probe, run_ffmpeg
@@ -36,7 +37,7 @@ AUDIO = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
 ProgressFn = Callable[[float, str], None]
 
 # Bump when the way clips are prepared changes, so old remembered clips are not reused.
-SEGMENT_VERSION = 5
+SEGMENT_VERSION = 6
 TITLE_SECONDS = 3.0
 FONTS = [
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
@@ -158,6 +159,10 @@ def _video_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
     graph += _fit_with_blur("src", s.width, s.height, "fit")
     graph += f";[fit]fps={FPS}{_zoom_filter(item, length)},format=yuv420p[v]"
     inputs = ["-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", str(item.path)]
+    title_png = None
+    if item.overlay and (item.overlay.get("text") or item.overlay.get("sub")):
+        title_png = out.with_suffix(".title.png")
+        titles.draw(item.overlay, s.width, s.height).save(title_png)
     if item.has_audio and item.sound and s.keep_clip_sound:
         level = f"aformat=sample_rates=48000:channel_layouts=stereo,volume={item.volume * s.clip_volume:.2f}"
         if effects.get("ramp"):
@@ -173,6 +178,12 @@ def _video_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
     else:
         inputs += ["-f", "lavfi", "-t", f"{length:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
         graph += ";[1:a]anull[a]"
+    if title_png is not None:  # the title, fading in and out over the shot
+        n = inputs.count("-i")  # the next input's number
+        inputs += ["-loop", "1", "-t", f"{length + 0.5:.3f}", "-i", str(title_png)]
+        graph = graph.replace(",format=yuv420p[v]", ",format=yuv420p[v0]", 1)
+        graph += (f";[{n}:v]format=rgba,setpts=PTS-STARTPTS,{titles.ffmpeg_fades(length)}[title];"
+                  f"[v0][title]overlay=0:0:shortest=1:format=auto,format=yuv420p[v]")
     _encode_segment(inputs, graph, length, out, s)
     return length
 
@@ -261,10 +272,16 @@ def _photo_segment(item: MediaItem, s: RenderSettings, out: Path, workdir: Path)
     move = "in" if item.kind == "title" else _pick_move(item.path, canvas_is_tall=_is_tall(still))
     frames = max(1, round(seconds * FPS))
     w, h = s.width, s.height
+    layer = None
+    if item.kind != "title" and item.overlay and (item.overlay.get("text") or item.overlay.get("sub")):
+        layer = np.asarray(titles.draw(item.overlay, w, h))
 
     def feed(pipe) -> None:
         for n in range(frames):
-            pipe.write(_photo_frame(canvas, w, h, move, n / max(1, frames - 1)).tobytes())
+            frame = _photo_frame(canvas, w, h, move, n / max(1, frames - 1))
+            if layer is not None:
+                frame = titles.blend(frame, layer, titles.strength(n / FPS, frames / FPS))
+            pipe.write(frame.tobytes())
 
     inputs = [
         "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}", "-r", str(FPS), "-i", "pipe:0",
@@ -347,7 +364,8 @@ def _encode_segment(inputs: list[str], graph: str, length: float, out: Path, s: 
 def _segment_key(item: MediaItem, s: RenderSettings) -> str:
     """Name a prepared clip by everything that changes how it looks, so it can be reused safely."""
     stat = item.path.stat()
-    parts = [SEGMENT_VERSION, item.kind, item.path, stat.st_mtime, stat.st_size, s.width, s.height, item.rotation]
+    parts = [SEGMENT_VERSION, item.kind, item.path, stat.st_mtime, stat.st_size, s.width, s.height, item.rotation,
+             sorted((item.overlay or {}).items())]
     if item.kind == "photo":
         parts += [item.seconds or s.photo_seconds]
     elif item.kind == "title":

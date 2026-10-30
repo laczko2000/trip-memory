@@ -2,6 +2,8 @@
 
 from fractions import Fraction
 
+from pathlib import Path
+
 import numpy as np
 from PIL import Image
 
@@ -362,3 +364,27 @@ def test_stories_can_be_linked_and_split_again(tmp_path, monkeypatch):
     trip.unlink_story(0)
     assert [it["story"] for it in trip.items()] == [0, 1, 2]
     assert trip.joined_stories() == set()
+
+
+def test_titles_opening_story_end_and_your_own(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "Portugal_2025"
+    trip_dir.mkdir()
+    for n, when in enumerate(["2025:07:03 10:00:00", "2025:07:03 10:05:00", "2025:07:04 12:00:00", "2025:07:04 12:05:00"]):
+        _gps_photo(trip_dir / f"{n}.jpg", when, 38.7, -9.1, "red")
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    shown = lambda: {Path(p).name: (t["auto"], t["text"]) for p, t in trip.shot_titles().items()}
+    assert shown() == {"0.jpg": ("opening", "Portugal 2025"), "2.jpg": ("story", trip.stories()[1]["name"]),
+                       "3.jpg": ("ending", "Until next time")}
+    assert trip.title_settings()["trip_sub"] == "3 – 4 July 2025"
+
+    trip.set_shot_title(str(trip_dir / "2.jpg"), "Beach day", "", "bold", "center")
+    trip.set_title_settings(opening=False, ending=False)
+    assert shown() == {"2.jpg": (None, "Beach day")}
+    overlays = {m.path.name: m.overlay for m in trip.media_items()}
+    assert overlays["2.jpg"]["style"] == "bold" and overlays["0.jpg"] is None
+
+    trip.set_shot_title(str(trip_dir / "2.jpg"), "", "")
+    assert shown()["2.jpg"][0] == "story"

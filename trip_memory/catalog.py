@@ -168,7 +168,7 @@ class Trip:
             "clip_sound INTEGER DEFAULT 0", "clip_volume REAL DEFAULT 1.0", "cut_out INTEGER DEFAULT 0", "subjects TEXT",
             "transition_why TEXT", "camera_moves TEXT", "speed REAL DEFAULT 1.0", "speed_why TEXT", "fps REAL",
             "effects TEXT", "effects_why TEXT", "ai_caption TEXT", "ai_score INTEGER", "removed INTEGER DEFAULT 0", "features BLOB",
-            "plan_role TEXT", "plan_pos REAL",
+            "plan_role TEXT", "plan_pos REAL", "title_text TEXT", "title_sub TEXT", "title_style TEXT", "title_where TEXT",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
@@ -307,6 +307,7 @@ class Trip:
         """What the video is made from, in storyboard order, optionally with a title card for each day."""
         board = self.storyboard()
         days = sorted({r["day"] for r in self.items() if r["chosen"]})
+        shown = self.shot_titles(board)
         result: list[MediaItem] = []
         previous_day = None
         for r in board:
@@ -330,8 +331,70 @@ class Trip:
                     volume=1.0 if r["clip_volume"] is None else r["clip_volume"],
                     speed=r["speed"] or 1.0,
                     effects=json.loads(r["effects"]) if r["effects"] else None,
+                    overlay=shown.get(r["path"]),
                 )
             )
+        return result
+
+    # ---------- titles ----------
+
+    def title_settings(self) -> dict:
+        """The automatic titles: opening title, a title for each story, end card (and their words)."""
+        rows = self.query("SELECT value FROM meta WHERE key = 'titles'")
+        saved = json.loads(rows[0]["value"]) if rows else {}
+        days = sorted({r["day"] for r in self.items() if r["chosen"]})
+        span = ""
+        if days:
+            a, b = (datetime.fromisoformat(d) for d in (days[0], days[-1]))
+            span = (f"{a:%-d %B %Y}" if a == b else f"{a:%-d} – {b:%-d %B %Y}" if (a.year, a.month) == (b.year, b.month)
+                    else f"{a:%-d %b} – {b:%-d %b %Y}")
+        return {"opening": True, "trip_title": self.folder.name.replace("_", " "), "trip_sub": span,
+                "stories": True, "story_style": "caption", "ending": True, "end_text": "Until next time",
+                "end_sub": self.folder.name.replace("_", " "), "style": "bold", **saved}
+
+    def set_title_settings(self, **values) -> None:
+        rows = self.query("SELECT value FROM meta WHERE key = 'titles'")
+        saved = {**(json.loads(rows[0]["value"]) if rows else {}), **values}
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('titles', ?)", (json.dumps(saved),))
+
+    def set_shot_title(self, path: str, text: str, sub: str = "", style: str = "clean", where: str = "") -> None:
+        """Your own words over a shot (empty: none, the automatic title shows if there is one)."""
+        text, sub = (text or "").strip(), (sub or "").strip()
+        if not text and not sub:
+            self.execute("UPDATE items SET title_text = NULL, title_sub = NULL, title_style = NULL, title_where = NULL "
+                         "WHERE path = ?", (path,))
+            return
+        self.execute("UPDATE items SET title_text = ?, title_sub = ?, title_style = ?, title_where = ? WHERE path = ?",
+                     (text, sub, style, where or None, path))
+
+    def shot_titles(self, board: list[dict] | None = None) -> dict[str, dict]:
+        """The text over each shot of the video: yours, else the automatic opening, story and end titles.
+        Each: {"text", "sub", "style", "where", "auto": "opening" | "story" | "ending" | None}."""
+        board = self.storyboard() if board is None else board
+        if not board:
+            return {}
+        t = self.title_settings()
+        names = {s["number"]: s["name"] for s in self.stories()}
+        result: dict[str, dict] = {}
+        previous = object()
+        for k, r in enumerate(board):
+            if r["story"] != previous and t["stories"] and k > 0:
+                places = [x["place"] or x["country"] for x in board if x["story"] == r["story"] and (x["place"] or x["country"])]
+                when = datetime.fromisoformat(r["taken_at"]).astimezone()
+                sub = (max(set(places), key=places.count) + " · " if places else "") + f"{when:%a %-d %b}"
+                result[r["path"]] = {"text": names.get(r["story"], ""), "sub": sub, "style": t["story_style"],
+                                     "where": "", "auto": "story"}
+            previous = r["story"]
+        if t["opening"] and (t["trip_title"] or t["trip_sub"]):
+            result[board[0]["path"]] = {"text": t["trip_title"], "sub": t["trip_sub"], "style": t["style"],
+                                        "where": "center", "auto": "opening"}
+        if t["ending"] and len(board) > 1 and (t["end_text"] or t["end_sub"]):
+            result[board[-1]["path"]] = {"text": t["end_text"], "sub": t["end_sub"], "style": "elegant",
+                                         "where": "center", "auto": "ending"}
+        for r in board:
+            if r["title_text"] or r["title_sub"]:
+                result[r["path"]] = {"text": r["title_text"] or "", "sub": r["title_sub"] or "",
+                                     "style": r["title_style"] or "clean", "where": r["title_where"] or "", "auto": None}
         return result
 
     def _title_card(self, first: dict, board: list[dict], days: list[str]) -> MediaItem:

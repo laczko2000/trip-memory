@@ -191,3 +191,28 @@ def test_zooms_punch_ins_and_speed_ramps_keep_the_length(tmp_path):
     c.trim_start, c.trim_end = 0.0, 1.5
     out = render(items, RenderSettings(width=320, height=180, transition_seconds=0.5), tmp_path / "fx.mp4")
     assert abs(float(probe(str(out))["format"]["duration"]) - (4 + 2 + 3)) < 0.2
+
+
+def _frame(path, t, w=640, h=360):
+    raw = subprocess.run([ffmpeg_paths()[0], "-loglevel", "error", "-ss", str(t), "-i", str(path), "-frames:v", "1",
+                          "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, check=True).stdout
+    import numpy as np
+
+    return np.frombuffer(raw, np.uint8).reshape(h, w, 3)
+
+
+def test_titles_fade_in_over_videos_and_photos(tmp_path):
+    import dataclasses
+
+    trip = tmp_path / "trip"
+    trip.mkdir()
+    make_clip(trip / "a.mp4", "640x360", 3, "2025-07-03T10:00:00Z")
+    Image.new("RGB", (400, 300), (0, 0, 120)).save(trip / "b.jpg")
+    title = {"text": "PORTUGAL", "sub": "July", "style": "bold", "where": "center"}
+    settings = RenderSettings(width=640, height=360, photo_seconds=3)
+    for item in scan_folder(trip)[0]:
+        out = render([dataclasses.replace(item, overlay=title)], settings, tmp_path / f"{item.kind}.mp4")
+        assert abs(float(probe(str(out))["format"]["duration"]) - 3.0) < 0.2
+        plain, titled = _frame(out, 0.05), _frame(out, 1.5)
+        centre = (slice(150, 210), slice(200, 440))
+        assert titled[centre].min(axis=2).max() > 220 > plain[centre].min(axis=2).max(), item.kind  # letters fade in

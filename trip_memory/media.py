@@ -54,6 +54,7 @@ class MediaItem:
     fx_in: str | None = None  # set while rendering: "zoom" or "reveal" from the transition into this shot
     fx_out: str | None = None  # "zoom" from the transition out of it
     title: str | None = None  # for kind "title": the chapter card text, two lines split by "\n"
+    overlay: dict | None = None  # text over the shot: {"text", "sub", "style", "where"} (see titles.py)
 
     @property
     def name(self) -> str:
