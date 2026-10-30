@@ -491,3 +491,37 @@ def test_a_clip_you_cut_only_ever_uses_the_part_you_kept(tmp_path, monkeypatch):
     trip.set_keep(path, None, None)  # Undo cut: the whole clip again
     assert "keep_offset" not in trip.auto_edit_pool()[0]
     assert trip.undo_label() == "bringing a whole clip back"
+
+
+def test_a_long_clip_gives_two_shots_from_different_parts_never_the_same_moment(tmp_path, monkeypatch):
+    from trip_memory import autoedit
+
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    subprocess.run([ffmpeg_paths()[0], "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=160x90:r=30:d=20",
+                    "-pix_fmt", "yuv420p", str(trip_dir / "long.mp4")], check=True)
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    trip.auto_edit_steady(autoedit.Limits(max_video=3, max_photo=2, min_shot=1), 6.0, 0.0, "Fade")
+    board = trip.storyboard()
+    assert [Path(r["path"]).name for r in board] == ["long.mp4", "long.mp4#2"]
+    (a0, a1), (b0, b1) = [(r["trim_start"], r["trim_end"]) for r in board]
+    assert a1 + autoedit.PART_GAP - 0.01 <= b0  # different moments of the clip, with a gap between them
+    assert {str(i.path) for i in trip.media_items()} == {str(trip_dir / "long.mp4")}  # both play from the file
+    assert [r["path"] for r in trip.items()] == [str(trip_dir / "long.mp4")]  # Choose files and Library: one clip
+    trip.auto_edit_steady(autoedit.Limits(max_video=3, max_photo=2, min_shot=1), 2.0, 0.0, "Fade")
+    assert len(trip.storyboard()) == 1  # a new cut that needs one shot: no parts left over
+
+
+def test_the_same_moment_in_two_files_is_used_once():
+    rows = [
+        {"path": "/t/IMG_1.HEIC", "kind": "photo", "taken_at": "2025-07-01T10:00:00", "duration": 0, "similar_set": None},
+        {"path": "/t/IMG_1.MOV", "kind": "video", "taken_at": "2025-07-01T10:00:00", "duration": 3.0, "similar_set": None},
+        {"path": "/t/a.mov", "kind": "video", "taken_at": "2025-07-01T11:00:00", "duration": 20.0, "similar_set": 4},
+        {"path": "/t/a copy.mov", "kind": "video", "taken_at": "2025-07-01T11:00:05", "duration": 8.0, "similar_set": 4},
+        {"path": "/t/b.mov", "kind": "video", "taken_at": "2025-07-01T11:00:00", "duration": 20.2, "similar_set": None},
+        {"path": "/t/other phone.mov", "kind": "video", "taken_at": "2025-07-01T11:00:03", "duration": 9.0, "similar_set": 9},
+    ]
+    assert catalog.Trip._same_moments(rows) == {"/t/IMG_1.MOV", "/t/a copy.mov", "/t/a.mov"}

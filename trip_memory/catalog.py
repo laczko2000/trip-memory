@@ -19,7 +19,7 @@ import traceback
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import cv2
@@ -174,7 +174,7 @@ class Trip:
             "transition_why TEXT", "camera_moves TEXT", "speed REAL DEFAULT 1.0", "speed_why TEXT", "fps REAL",
             "effects TEXT", "effects_why TEXT", "ai_caption TEXT", "ai_score INTEGER", "removed INTEGER DEFAULT 0", "features BLOB",
             "plan_role TEXT", "plan_pos REAL", "title_text TEXT", "title_sub TEXT", "title_style TEXT", "title_where TEXT",
-            "focus_x REAL", "keep_start REAL", "keep_end REAL",
+            "focus_x REAL", "keep_start REAL", "keep_end REAL", "part_of TEXT",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
@@ -206,10 +206,12 @@ class Trip:
             self.db.execute(sql, args)
             self.db.commit()
 
-    def items(self, removed: bool = False) -> list[dict]:
+    def items(self, removed: bool = False, parts: bool = False) -> list[dict]:
         """All items in date order, with the names of the (known) people in them. Files you removed from the trip
-        are left out (or, with removed=True, only those are given)."""
-        rows = [dict(r) for r in self.query("SELECT * FROM items WHERE removed = ? ORDER BY taken_at, path", (int(removed),))]
+        are left out (or, with removed=True, only those are given). parts: also the second and third parts of long
+        clips that Auto-edit used as shots of their own (only the storyboard shows those)."""
+        rows = [dict(r) for r in self.query("SELECT * FROM items WHERE removed = ? AND (part_of IS NULL OR ?) "
+                                            "ORDER BY taken_at, path", (int(removed), int(parts)))]
         people = self._people_status()
         by_path: dict[str, set[int]] = {}
         for f in self.query("SELECT path, person_id FROM faces WHERE person_id IS NOT NULL"):
@@ -294,19 +296,23 @@ class Trip:
 
         Files you moved keep their place; anything not placed yet follows story by story (your story order).
         """
-        items = self.items()
-        stories = self.stories(items)
+        items = self.items(parts=True)
+        stories = self.stories([it for it in items if not it["part_of"]])
         off = {r["path"] for s in stories if not s["enabled"] for r in s["items"]}
         rank = {r["path"]: n for n, s in enumerate(stories) for r in s["items"]}
         left_out = self._left_out_by_plan(stories)
+        source = {it["path"]: it["part_of"] or it["path"] for it in items}
+        clips = {it["path"]: it for it in items if not it["part_of"]}
         rows = [it for it in items if it["chosen"] and it["included"] and not it["cut_out"]
-                and it["path"] not in off and it["path"] not in left_out]
+                and source[it["path"]] not in off and source[it["path"]] not in left_out
+                and (not it["part_of"] or (it["part_of"] in clips and clips[it["part_of"]]["chosen"]
+                                           and clips[it["part_of"]]["included"]))]
         # The photos inside a collage show as part of its first photo, not on their own.
         inside = {p for r in rows if r["effects"] for p in json.loads(r["effects"]).get("collage", [])}
         rows = [r for r in rows if r["path"] not in inside]
 
         def order(r: dict) -> tuple:  # by story, then the story's plan, then time
-            return rank.get(r["path"], 0), r["plan_pos"] is None, r["plan_pos"] or 0, r["taken_at"]
+            return rank.get(source[r["path"]], 0), r["plan_pos"] is None, r["plan_pos"] or 0, r["taken_at"]
 
         placed = sorted((r for r in rows if r["position"] is not None), key=lambda r: r["position"])
         rest = sorted((r for r in rows if r["position"] is None), key=order)
@@ -341,7 +347,7 @@ class Trip:
             previous_day = r["day"]
             result.append(
                 MediaItem(
-                    path=Path(r["path"]),
+                    path=Path(r["part_of"] or r["path"]),  # a part of a long clip plays from the clip itself
                     kind=r["kind"],
                     taken_at=datetime.fromisoformat(r["taken_at"]),
                     duration=r["duration"],
@@ -535,7 +541,7 @@ class Trip:
         links = self.story_links()
         if not links:
             return
-        rows = self.query("SELECT path, taken_at, story, chosen FROM items WHERE removed = 0 ORDER BY taken_at, path")
+        rows = self.query("SELECT path, taken_at, story, chosen FROM items WHERE part_of IS NULL AND removed = 0 ORDER BY taken_at, path")
         keep = []
         for link in links:
             at = next((i for i, r in enumerate(rows) if f"{r['taken_at']}|{r['path']}" >= link), None)
@@ -612,16 +618,47 @@ class Trip:
         left_out = self._left_out_by_plan(stories)
         wish = self.wish()
         pool = []
+        repeats = self._same_moments([r for s in stories if s["enabled"] for r in s["items"]
+                                      if r["chosen"] and r["included"] and r["path"] not in left_out])
         for rank, story in enumerate(stories):
             if story["enabled"]:
                 for r in story["items"]:
-                    if r["chosen"] and r["included"] and r["path"] not in left_out:
+                    if r["chosen"] and r["included"] and r["path"] not in left_out and r["path"] not in repeats:
                         r = r | {"wish": self.wish_match(r, wish)}
                         if kept_part(r):  # a clip you cut: Auto-edit only sees the part you kept
                             start, end = kept_part(r)
                             r = r | {"duration": end - start, "keep_offset": start, "full_duration": r["duration"]}
                         pool.append(r | {"story_rank": rank, "story_name": story["name"]})
         return pool
+
+    @staticmethod
+    def _same_moments(rows: list[dict]) -> set[str]:
+        """Files that show a moment another file already shows, so the video never shows it twice: a Live Photo's
+        little video next to its photo, and videos filmed at the same time (a copy, an edited version, one
+        recording saved twice). The longer video (or the photo) stays; the others are left out of Auto-edit."""
+        out: set[str] = set()
+        by_name: dict[tuple[str, str], list[dict]] = {}
+        for r in rows:
+            p = Path(r["path"])
+            by_name.setdefault((str(p.parent), p.stem.lower()), []).append(r)
+        for same in by_name.values():  # IMG_1234.HEIC and IMG_1234.MOV: one Live Photo
+            if any(r["kind"] == "photo" for r in same):
+                out |= {r["path"] for r in same if r["kind"] == "video" and (r["duration"] or 0) <= 4.0}
+        videos = sorted((r for r in rows if r["kind"] == "video" and r["path"] not in out),
+                        key=lambda r: (-(r["duration"] or 0), r["path"]))
+        seen: list[tuple[datetime, datetime, dict]] = []
+        for r in videos:  # the longest first: a shorter one filmed during it, looking the same, is a repeat
+            start = datetime.fromisoformat(r["taken_at"])
+            end = start + timedelta(seconds=r["duration"] or 0)
+            for a, b, other in seen:
+                during = start < b - timedelta(seconds=0.5) and a + timedelta(seconds=0.5) < end
+                alike = (r["similar_set"] is not None and r["similar_set"] == other["similar_set"]) or (
+                    abs((start - a).total_seconds()) < 2 and abs((r["duration"] or 0) - (other["duration"] or 0)) < 1)
+                if during and alike:  # (someone else filming the same moment from elsewhere looks different: stays)
+                    out.add(r["path"])
+                    break
+            seen.append((start, end, r))  # a repeat of a repeat is a repeat too
+        return out
 
     def auto_edit_to_music(
         self,
@@ -725,9 +762,20 @@ class Trip:
         offsets = {r["path"]: r["keep_start"] for r in self.query(
             "SELECT path, keep_start FROM items WHERE keep_start IS NOT NULL AND keep_end IS NOT NULL")}
         with self._lock:
+            # Parts of long clips: made afresh for each cut, as rows of their own copied from the clip.
+            self.db.execute("DELETE FROM items WHERE part_of IS NOT NULL")
+            columns = [r["name"] for r in self.db.execute("PRAGMA table_info(items)")]
+            for path, (clip, _) in result.parts.items():
+                if path == clip:
+                    continue
+                row = dict(self.db.execute("SELECT * FROM items WHERE path = ?", (clip,)).fetchone())
+                row.update(path=path, part_of=clip, position=None, title_text=None, title_sub=None)
+                self.db.execute(f"INSERT INTO items ({', '.join(columns)}) VALUES ({', '.join('?' * len(columns))})",
+                                [row[c] for c in columns])
             for shot_no, shot in enumerate(result.shots):
                 used = (shot.seconds - held(shot.effects)) * shot.speed * source_factor(shot.effects)  # of the video
-                start = shot.start + offsets.get(shot.path, 0.0)  # Auto-edit only saw the part you kept
+                clip, into = result.parts.get(shot.path, (shot.path, 0.0))
+                start = shot.start + into + offsets.get(clip, 0.0)  # Auto-edit only saw the part you kept
                 trim = (start, start + used) if shot.kind == "video" else (None, None)
                 self.db.execute(
                     "UPDATE items SET cut_out = 0, position = ?, trim_start = ?, trim_end = ?, transition = ?, "
@@ -951,7 +999,7 @@ class Trip:
                 continue
         rows = [dict(r) for r in self.query(
             "SELECT path, kind, taken_at, duration, lat, lon, dhash, colours, sharpness, features, motion_shake "
-            "FROM items WHERE removed = 0")]
+            "FROM items WHERE part_of IS NULL AND removed = 0")]
         groups = stories.group(rows, self.look_alike_level(), self.story_links())
         with self._lock:
             self.db.executemany(
@@ -971,7 +1019,7 @@ class Trip:
     def link_story(self, number: int, to_next: bool) -> None:
         """Join a story with the one before it (or after it, to_next) in time: they become one story."""
         firsts = {}
-        for r in self.query("SELECT path, taken_at, story FROM items WHERE removed = 0 AND story IS NOT NULL "
+        for r in self.query("SELECT path, taken_at, story FROM items WHERE part_of IS NULL AND removed = 0 AND story IS NOT NULL "
                             "ORDER BY taken_at DESC, path DESC"):
             firsts[r["story"]] = f"{r['taken_at']}|{r['path']}"
         later = number + 1 if to_next else number
@@ -980,7 +1028,7 @@ class Trip:
 
     def unlink_story(self, number: int) -> None:
         """Split a story you joined back into the stories it was made of."""
-        rows = self.query("SELECT path, taken_at FROM items WHERE removed = 0 AND story = ?", (number,))
+        rows = self.query("SELECT path, taken_at FROM items WHERE part_of IS NULL AND removed = 0 AND story = ?", (number,))
         if not rows:
             return
         first, last = min((r["taken_at"], r["path"]) for r in rows), max((r["taken_at"], r["path"]) for r in rows)
@@ -992,7 +1040,7 @@ class Trip:
         links = [tuple(link.split("|", 1)) for link in self.story_links()]
         spans: dict[int, list] = {}
         for r in self.query("SELECT story, MIN(taken_at || '|' || path) AS a, MAX(taken_at || '|' || path) AS b "
-                            "FROM items WHERE removed = 0 AND story IS NOT NULL GROUP BY story"):
+                            "FROM items WHERE part_of IS NULL AND removed = 0 AND story IS NOT NULL GROUP BY story"):
             spans[r["story"]] = [tuple(r["a"].split("|", 1)), tuple(r["b"].split("|", 1))]
         return {n for n, (a, b) in spans.items() if any(a < j <= b for j in links)}
 
@@ -1041,7 +1089,7 @@ class Trip:
         self._prepare(notify)
         p = self.progress
         todo = self.query(
-            "SELECT * FROM items WHERE chosen = 1 AND (faces_done = 0 OR scene_done = 0 OR tags_done = 0) ORDER BY taken_at"
+            "SELECT * FROM items WHERE part_of IS NULL AND chosen = 1 AND (faces_done = 0 OR scene_done = 0 OR tags_done = 0) ORDER BY taken_at"
         )
         faces = scenes = tagger = None
         if todo:
@@ -1082,7 +1130,7 @@ class Trip:
 
     def _find_camera_moves(self, notify: Callable[[], None]) -> None:
         """How the camera moves in each video (pans, zooms, whips...), for videos analysed before this was added."""
-        rows = self.query("SELECT * FROM items WHERE chosen = 1 AND kind = 'video' AND camera_moves IS NULL")
+        rows = self.query("SELECT * FROM items WHERE part_of IS NULL AND chosen = 1 AND kind = 'video' AND camera_moves IS NULL")
         for i, row in enumerate(rows):
             self.progress.fraction = i / len(rows)
             self.progress.message = f"Reading camera moves {i + 1} of {len(rows)}: {Path(row['path']).name}"
@@ -1194,7 +1242,7 @@ class Trip:
         """Describe each chosen file. Look-alike shots are described once: the ⭐ of the set is shown to the AI and
         its doubles get the same description, which often halves the work."""
         p = self.progress
-        chosen = self.query("SELECT * FROM items WHERE chosen = 1 AND thumb IS NOT NULL AND removed = 0 "
+        chosen = self.query("SELECT * FROM items WHERE part_of IS NULL AND chosen = 1 AND thumb IS NOT NULL AND removed = 0 "
                             "ORDER BY taken_at, path")
         sets: dict[object, list] = {}
         for row in chosen:
@@ -1718,7 +1766,7 @@ class Trip:
             "SELECT COUNT(*) AS chosen, SUM(faces_done) AS done, "
             "(SELECT COUNT(*) FROM faces f JOIN items i ON i.path = f.path WHERE i.chosen = 1) AS faces, "
             "(SELECT COUNT(*) FROM faces f JOIN items i ON i.path = f.path WHERE i.chosen = 1 AND f.person_id IS NULL) "
-            "AS ungrouped FROM items WHERE chosen = 1")[0]
+            "AS ungrouped FROM items WHERE part_of IS NULL AND chosen = 1")[0]
         error = self.query("SELECT value FROM meta WHERE key = 'faces_error'")
         return {"chosen": row["chosen"] or 0, "done": row["done"] or 0, "faces": row["faces"] or 0,
                 "ungrouped": row["ungrouped"] or 0, "error": error[0]["value"] if error else None}
@@ -1726,7 +1774,7 @@ class Trip:
     def look_for_faces_again(self) -> None:
         """Forget the faces found in the chosen files, so the next Analyse looks again (names you gave stay)."""
         with self._lock:
-            self.db.execute("DELETE FROM faces WHERE path IN (SELECT path FROM items WHERE chosen = 1)")
+            self.db.execute("DELETE FROM faces WHERE path IN (SELECT path FROM items WHERE part_of IS NULL AND chosen = 1)")
             self.db.execute("UPDATE items SET faces_done = 0 WHERE chosen = 1")
             self.db.execute("DELETE FROM meta WHERE key = 'faces_error'")
             self.db.commit()
@@ -1843,7 +1891,7 @@ class Trip:
 
     def _group_look_alike(self) -> None:
         """Group files that look alike across the whole trip (all the snorkelling, all the sunsets...)."""
-        rows = self.query("SELECT path, clip FROM items WHERE chosen = 1 AND clip IS NOT NULL ORDER BY taken_at")
+        rows = self.query("SELECT path, clip FROM items WHERE part_of IS NULL AND chosen = 1 AND clip IS NOT NULL ORDER BY taken_at")
         groups = look_alike_groups({r["path"]: np.frombuffer(r["clip"], dtype=np.float32) for r in rows})
         with self._lock:
             self.db.execute("UPDATE items SET look_group = NULL")

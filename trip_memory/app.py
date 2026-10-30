@@ -702,7 +702,8 @@ class Page:
             if thumb:
                 ui.image(thumb).props("fit=contain").style(size).classes("rounded bg-gray-800")
             return box
-        src = f"{self.media_route}/{quote(str(Path(it['path']).relative_to(self.trip.folder)))}"
+        file = Path(it.get("part_of") or it["path"])  # a part of a long clip plays from the clip itself
+        src = f"{self.media_route}/{quote(str(file.relative_to(self.trip.folder)))}"
         end = (it["duration"] or 0) if end is None else end
         kept = kept_part(it)
         if kept:  # a clip you cut: only the part you kept plays
@@ -2486,7 +2487,8 @@ class Page:
                 with ui.column().classes("flex-grow gap-1"):
                     place = ", ".join(x for x in (it["place"], it["country"]) if x)
                     icon = "🎬" if it["kind"] == "video" else "📷"
-                    ui.label(f"{icon} {fmt_time(it['taken_at'])}" + (f" · {place}" if place else "")).classes("text-sm")
+                    part = f" · part {it['path'].rsplit('#', 1)[1]} of this clip" if it.get("part_of") else ""
+                    ui.label(f"{icon} {fmt_time(it['taken_at'])}" + (f" · {place}" if place else "") + part).classes("text-sm")
                     if it.get("ai_caption"):
                         ui.label(f"📝 {it['ai_caption']}").classes("text-xs italic text-gray-600")
                     self.title_control(it)

@@ -45,6 +45,9 @@ class Plan:
     beat: Beat | None = None
     pins: int = 0  # how many of your pins (Music tab) the cuts follow; 0 = cut on the music by itself
     kept_pins: list[float] | None = None  # too few shots for all your pins: the ones this cut used
+    # Short of shots, a long clip gives two or three: "clip.mov#2" is its second part. path -> (the file, where in
+    # it (seconds into the part of the clip Auto-edit saw) the part starts).
+    parts: dict[str, tuple[str, float]] = field(default_factory=dict)
 
 
 def loudness_steps(path: str) -> list[float]:
@@ -419,6 +422,51 @@ def _cuts_on_hits(song, limits: Limits, start: float, stop: float, n: int, longe
     return [start, *cuts[::-1]]
 
 
+def _measure(r: dict, curve) -> None:
+    """How good a video looks overall, at its best, and its longest good stretch."""
+    if curve is None or not len(curve):
+        return
+    r["peak"] = float(np.clip(np.percentile(curve, 90), 0, 1))
+    r["quality"] = quality(curve)
+    good = np.concatenate([[False], curve > BAD, [False]]).astype(int)
+    edges = np.flatnonzero(np.diff(good))
+    runs = edges[1::2] - edges[::2]
+    r["usable"] = float(runs.max()) / STEPS_PER_SECOND if len(runs) else 0.0  # longest good stretch
+
+
+PART_FROM = 12.0  # seconds: a clip this long can give two shots (twice this: three)
+PART_GAP = 2.0  # seconds left out between two parts of a clip, so they never show the same moment
+
+
+def split_long(rows: list[dict], curves: dict, short: int) -> tuple[list[dict], dict[str, tuple[str, float]]]:
+    """Short of `short` shots: the longest clips each give two or three shots, from different parts of the clip
+    that never overlap (the clip itself keeps only its first part). curves gets each part's own curve."""
+    parts: dict[str, tuple[str, float]] = {}
+    split: dict[str, list[dict]] = {}
+    for r in sorted((r for r in rows if r["kind"] == "video" and (r["duration"] or 0) >= PART_FROM),
+                    key=lambda r: -(r["duration"] or 0)):
+        if short <= 0:
+            break
+        length = r["duration"]
+        n = min(3 if length >= 2 * PART_FROM else 2, short + 1)
+        each = (length - (n - 1) * PART_GAP) / n
+        curve = curves.get(r["path"])
+        pieces = []
+        for k in range(n):
+            path = r["path"] if k == 0 else f"{r['path']}#{k + 1}"
+            begin = k * (each + PART_GAP)
+            piece = r | {"path": path, "duration": each, "part_of": r["path"] if k else None}
+            if curve is not None and len(curve):
+                curves[path] = curve[int(round(begin * STEPS_PER_SECOND)):int(round((begin + each) * STEPS_PER_SECOND))]
+                _measure(piece, curves[path])
+            parts[path] = (r["path"], begin)
+            pieces.append(piece)
+        split[r["path"]] = pieces
+        short -= n - 1
+    result = [p for r in rows for p in split.get(r["path"], [r])]
+    return result, parts
+
+
 def fit_pins(song, pins: list[float], count: int, longest: float) -> list[float]:
     """Too few shots for all your pins: keep `count` of them. The least important go first, so the pattern
     stays (a pin every 2 s becomes one every 4 s); pins on big hits and where the music changes, and your first
@@ -662,14 +710,9 @@ def plan_to_music(
     soft_transition: str,
 ) -> Plan:
     """The music-driven first cut: the song decides where the cuts are, the shots are matched to it."""
+    curves = dict(curves)
     for r in rows:
-        if r["path"] in curves and len(curves[r["path"]]):
-            r["peak"] = float(np.clip(np.percentile(curves[r["path"]], 90), 0, 1))
-            r["quality"] = quality(curves[r["path"]])
-            good = np.concatenate([[False], curves[r["path"]] > BAD, [False]]).astype(int)
-            edges = np.flatnonzero(np.diff(good))
-            runs = edges[1::2] - edges[::2]
-            r["usable"] = float(runs.max()) / STEPS_PER_SECOND if len(runs) else 0.0  # longest good stretch
+        _measure(r, curves.get(r["path"]))
     candidates = arrange(choose(rows), limits.storyline)
     end = song.duration if target is None or target >= song.duration else target
     if target is not None and target < song.duration:
@@ -698,6 +741,12 @@ def plan_to_music(
     inside = [t for t in taps if 0 < t < end - 1e-3]
     after = [t for t in taps if t >= end - 1e-3]
     cap = max(limits.max_video, limits.max_photo)
+    # Fewer shots than the music needs: a long clip gives two or three, from different parts of it.
+    need = len(inside) + 1 if inside else int(np.ceil(end / ((limits.min_shot + cap) / 2)))
+    parts: dict[str, tuple[str, float]] = {}
+    if len(candidates) < need:
+        rows, parts = split_long(rows, curves, need - len(candidates))
+        candidates = arrange(choose(rows), limits.storyline)
     if inside and len(candidates) - 1 < len(inside):  # fewer shots than your pins: a first guess
         kept = fit_pins(song, inside, max(1, len(candidates) - 1), cap)
         song.taps = kept + after
@@ -800,7 +849,9 @@ def plan_to_music(
     if limits.camera_effects:
         shots = collages(shots, slots, {r["path"]: r for r in candidates}, transition_seconds)
     used = {s.path for s in shots} | {p for s in shots for p in s.effects.get("collage", [])}
+    used |= {parts[p][0] for p in used if p in parts}
     length = begin / 30
     pins = sum(1 for k in range(1, len(slots)) if slots[k].tapped or slots[k - 1].tapped)
-    return Plan(shots=shots, left_out=[r["path"] for r in rows if r["path"] not in used], length=length, beat=song.beat,
-                pins=pins, kept_pins=kept)
+    return Plan(shots=shots, left_out=[r["path"] for r in rows if r["path"] not in used and not r.get("part_of")],
+                length=length, beat=song.beat, pins=pins, kept_pins=kept if kept and len(kept) < len(inside) else None,
+                parts={p: parts[p] for p in {s.path for s in shots} if p in parts})
