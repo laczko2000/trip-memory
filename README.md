@@ -59,6 +59,7 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **0.25.1:** in Choose files, as soon as anything is unticked a red bar stays at the top of the screen while you scroll: "N unticked · Remove them from the trip".
 - **0.25:** *Step 1: sort out* at the top of Choose files, for big folders. It shows how many files (and GB) the trip has; *Show → Only doubles and triples* lists just the look-alike sets; ticking is instant; *Keep only the ⭐ of every set* unticks every double; *Remove unticked from the trip* takes them out of every tab for good (they are never analysed; the files on your Mac are not touched; *See removed* brings them back). Choose files shows 60 files a page and the Storyboard 60 clips at a time (*Show more*), and each tab is only built when you open it, so big trips stay quick. The local AI (Ollama) now looks at one smaller picture per clip and stays loaded, which is several times faster.
 - **0.24.8:** the AI director shows its progress in its own card (which clip it is looking at, or that it is thinking about storylines), says when it's done, and tells you to wait if you click while it's still busy, instead of silently doing nothing.
 - **0.24.7:** Music timeline: every pin shows its own time next to it (to the hundredth of a second when zoomed in); zoom buttons Whole song / 30 s / 10 s / 4 s replace the *Show* list; the line under it now says how many shots your pins make and up to when.

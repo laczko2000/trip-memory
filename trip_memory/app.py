@@ -350,8 +350,7 @@ class Page:
         doubles = total - len({it["similar_set"] for it in self.all_items})
         with ui.card().classes("w-full bg-amber-50"):
             ui.label("Step 1: sort out").classes("text-lg font-semibold")
-            self.sort_label = ui.label("").classes("text-sm")
-            self.sort_label.text = self.sort_text(total, chosen, size, removed)
+            self.sort_label = ui.label(self.sort_text(total, chosen, size, removed)).classes("text-sm")
             ui.label(
                 f"Go through quickly and untick what you don't want. {doubles} files are doubles or triples of another "
                 "shot; Show → Only doubles and triples lists just those. Then remove the unticked files from the trip: "
@@ -361,11 +360,36 @@ class Page:
             with ui.row().classes("items-center gap-2"):
                 ui.button("Keep only the ⭐ of every set", icon="star", on_click=self.suggest).props("outline") \
                     .tooltip("Untick every double or triple except the best one (sharpest, best exposed)")
-                ui.button(f"Remove {total - chosen} unticked from the trip", icon="delete_sweep",
-                          on_click=self.confirm_remove).props("color=negative" + ("" if total - chosen else " disable"))
+                self.remove_button = ui.button(f"Remove {total - chosen} unticked from the trip", icon="delete_sweep",
+                                               on_click=self.confirm_remove).props("color=negative")
+                self.remove_button.set_visibility(total > chosen)
                 if removed:
                     ui.button(f"See removed ({removed})", icon="restore_from_trash",
                               on_click=lambda: self.set_choose_filter("show", "removed")).props("flat")
+
+        # Always in view while you scroll and untick: how many are unticked, and the button to remove them.
+        with ui.element("div").style(
+            "position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:3000"
+        ) as self.remove_bar:
+            with ui.card().classes("bg-red-50 border border-red-200 shadow-lg py-1 px-3"):
+                with ui.row().classes("items-center gap-3 no-wrap"):
+                    self.remove_bar_label = ui.label("").classes("text-sm font-medium")
+                    ui.button("Remove them from the trip", icon="delete_sweep", on_click=self.confirm_remove) \
+                        .props("color=negative dense")
+        self.update_sort_counts()
+
+    def update_sort_counts(self) -> None:
+        """The counts in Step 1 and the floating Remove bar, after ticking or unticking."""
+        total = len(self.all_items)
+        ticked = sum(1 for it in self.all_items if it["chosen"])
+        unticked = total - ticked
+        if getattr(self, "sort_label", None) is not None:
+            self.sort_label.text = self.sort_text(total, ticked, sum(_file_size(x["path"]) for x in self.all_items),
+                                                  self.trip.removed_count())
+            self.remove_button.text = f"Remove {unticked} unticked from the trip"
+            self.remove_button.set_visibility(unticked > 0)
+            self.remove_bar_label.text = f"{unticked} unticked"
+            self.remove_bar.set_visibility(unticked > 0 and self.choose_filters["show"] != "removed")
 
     def sort_text(self, total: int, chosen: int, size: int, removed: int) -> str:
         amount = f"{size / 1e9:.1f} GB" if size >= 1e9 else f"{size / 1e6:.0f} MB"
@@ -585,10 +609,7 @@ class Page:
         tile.classes(remove="opacity-40") if chosen else tile.classes(add="opacity-40")
         self.items = [x for x in self.all_items if x["chosen"]]
         self.stale = True
-        if getattr(self, "sort_label", None) is not None:
-            total, ticked = len(self.all_items), len(self.items)
-            self.sort_label.text = self.sort_text(total, ticked, sum(_file_size(x["path"]) for x in self.all_items),
-                                                  self.trip.removed_count())
+        self.update_sort_counts()
 
     def refresh_choose(self) -> None:
         """After ticking in Choose files: redraw just this tab; the others catch up when you open them."""
