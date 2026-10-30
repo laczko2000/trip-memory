@@ -44,6 +44,7 @@ class Plan:
     length: float = 0.0
     beat: Beat | None = None
     pins: int = 0  # how many of your pins (Music tab) the cuts follow; 0 = cut on the music by itself
+    kept_pins: list[float] | None = None  # too few shots for all your pins: the ones this cut used
 
 
 def loudness_steps(path: str) -> list[float]:
@@ -418,6 +419,44 @@ def _cuts_on_hits(song, limits: Limits, start: float, stop: float, n: int, longe
     return [start, *cuts[::-1]]
 
 
+def fit_pins(song, pins: list[float], count: int, longest: float) -> list[float]:
+    """Too few shots for all your pins: keep `count` of them. The least important go first, so the pattern
+    stays (a pin every 2 s becomes one every 4 s); pins on big hits and where the music changes, and your first
+    and last pin, stay longest. No shot is made longer than allowed (so a few more may stay)."""
+    pins = sorted(pins)
+    if len(pins) <= max(count, 2):
+        return pins
+    beats = song.beat_times()
+    accents = np.asarray(getattr(song, "accents", None) or [], float)
+    changes = [s.start for s in song.sections[1:]]
+
+    def weight(p: float) -> float:
+        w = 0.0
+        if any(abs(p - c) <= max(0.35, song.period) for c in changes):
+            w += 2.0
+        if len(accents) == len(beats) and len(beats):
+            k = int(np.argmin(np.abs(beats - p)))
+            if abs(beats[k] - p) < 0.1:
+                w += float(accents[k])
+        return w
+
+    weights = [weight(p) for p in pins]
+    usual = float(np.median(np.diff(pins))) or 1.0
+    while len(pins) > count:
+        best, drop = None, None
+        for i in range(1, len(pins) - 1):  # never the first or the last
+            joined = pins[i + 1] - pins[i - 1]
+            if joined > longest * 1.03:
+                continue
+            cost = joined / usual + 1.5 * weights[i]
+            if best is None or cost < best - 1e-9:
+                best, drop = cost, i
+        if drop is None:
+            break  # every shot is as long as allowed already
+        del pins[drop], weights[drop]
+    return pins
+
+
 def merge_slots(slots: list[Slot], count: int, longest: float) -> list[Slot]:
     """With fewer shots than pieces of music, join neighbouring pieces (in the same part of the song, and
     never longer than allowed) so the shots you have stretch further."""
@@ -642,6 +681,15 @@ def plan_to_music(
             bars = song.bar_starts()
             later = bars[bars >= max(limits.min_shot, target - 2 * song.period)]
             end = float(later[0]) if len(later) else target  # end on a bar line
+    kept = None
+    taps = getattr(song, "taps", None)
+    if taps:  # fewer shots than your pins: cut on fewer of them, keeping their pattern
+        longest = max(limits.max_video, limits.max_photo)
+        inside = sorted(t for t in taps if 0 < t < end - 1e-3)
+        room = len(candidates) - 1  # one shot before your first pin, one after each
+        if inside and room < len(inside):
+            kept = fit_pins(song, inside, max(1, room), longest)
+            song.taps = kept + [t for t in taps if t >= end - 1e-3]
     best: tuple[list[Slot], list[int]] = ([], [])
     for longest in (None, limits.max_photo, max(limits.min_shot, limits.max_photo / 2)):
         slots = music_slots(song, limits, end, longest)
@@ -726,4 +774,4 @@ def plan_to_music(
     length = begin / 30
     pins = sum(1 for k in range(1, len(slots)) if slots[k].tapped or slots[k - 1].tapped)
     return Plan(shots=shots, left_out=[r["path"] for r in rows if r["path"] not in used], length=length, beat=song.beat,
-                pins=pins)
+                pins=pins, kept_pins=kept)

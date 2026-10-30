@@ -1427,12 +1427,36 @@ class Page:
 
     @ui.refreshable
     def pin_summary(self, music: str, taps: list[float]) -> None:
+        used = song_taps.extra(music, app_dir() / "music-taps", "used") if taps else None
+        mine = sorted(round(p, 3) for p in taps or [])
+        if used and sorted(round(p, 3) for p in used["pins"]) != mine:
+            used = None  # you changed your pins since that cut
+        kept = {round(p, 3) for p in used["kept"]} if used else set()
+        skipped = [p for p in mine if p not in kept] if used else []
+        ui.run_javascript(f"tm.tap.unused = new Set({json.dumps([f'{p:.3f}' for p in skipped])}); tmTapDraw()")
         if taps:
             ui.label(f"✓ {len(taps)} pins saved: Auto-edit (in the Storyboard) cuts exactly there.") \
                 .classes("text-sm text-green-700")
+            if skipped:
+                with ui.row().classes("items-center gap-2 p-2 rounded bg-slate-100"):
+                    ui.label(f"The last cut used {len(mine) - len(skipped)} of your {len(mine)} pins: there weren't "
+                             "enough shots for all of them, so it skipped the grey ones and kept your pattern. Add more "
+                             "clips or photos and the next cut uses more.").classes("text-sm text-slate-700 flex-1")
+                    ui.button("Make these my pins", icon="check",
+                              on_click=lambda: self.use_kept_pins(music, sorted(kept))).props("outline dense no-caps") \
+                        .tooltip("Delete the grey pins for good")
             self.tap_lengths(music, taps)
         else:
             ui.label("No pins yet: Auto-edit finds the beats by itself.").classes("text-sm text-gray-500")
+
+    def use_kept_pins(self, music: str, kept: list[float]) -> None:
+        song_taps.save(music, app_dir() / "music-taps", kept, True)
+        song_taps.set_extra(music, app_dir() / "music-taps", "used", None)
+        self.saved_pins = kept
+        ui.run_javascript(f"tmTapSet({json.dumps(kept)})")
+        ui.notify(f"Your pins are now the {len(kept)} the last cut used.", type="positive")
+        self.pin_summary.refresh(music, kept)  # last: this removes the button you pressed
+        self.music_reading.refresh(music)
 
     async def autosave_taps(self) -> None:
         music = self.music_path()
@@ -2427,6 +2451,12 @@ class Page:
         on_beat = f", cuts on the beat ({beat.bpm:.0f} BPM)" if music and beat and beat.clear else ""
         if music and result.pins:
             on_beat = f", cut exactly on your {result.pins} pins"
+        if music:
+            self.music_tab_view.refresh()  # the pins this cut skipped show grey there
+        if music and result.kept_pins:
+            total = len(song_taps.final_taps(music, app_dir() / "music-taps") or [])
+            on_beat = (f", cut on {len(result.kept_pins)} of your {total} pins (too few shots for all of them; "
+                       "Music & audio shows which it skipped)")
         song = self.song_maps.get(music) if music else None
         wanted = song.duration if song and target == "song" else (float(target) if target not in ("song", "all") else None)
         pool = self.trip.auto_edit_pool()
@@ -3140,7 +3170,8 @@ TAP_SCRIPT = """
 window.tm = window.tm || {};
 tm.tap = {pins: [], sel: -1, view: 0, span: 0, until: -1, ctx: null, raf: 0, drag: -1, osc: [], srcEl: null,
           wave: null, waveSrc: '', follow: true, trim: null, tdrag: -1, skip: true, fade: [0, 0], fdrag: -1, gain: null,
-          ai: new Set()};  // "Finish my pins": the app's suggestions (orange) until you keep them
+          ai: new Set(),  // "Finish my pins": the app's suggestions (orange) until you keep them
+          unused: new Set()};  // too few shots: the pins the last cut skipped (grey)
 const TM_WAVE_STEP = 0.002;  // the waveform keeps the loudest moment of every 2 ms
 
 function tmTapAudio() { return document.getElementById('tm-song'); }
@@ -3316,7 +3347,8 @@ function tmTapDraw() {
   let lastLabel = -1e9;
   T.pins.forEach((p, i) => {
     if (p < v0 || p > v0 + span) return;
-    const c = i === T.sel ? '#dc2626' : T.trim && (p < k0 || p > k1) ? '#94a3b8' : T.ai.has(p.toFixed(3)) ? '#f59e0b' : '#2563eb',
+    const c = i === T.sel ? '#dc2626' : T.trim && (p < k0 || p > k1) ? '#94a3b8' : T.ai.has(p.toFixed(3)) ? '#f59e0b' :
+              T.unused.has(p.toFixed(3)) ? '#cbd5e1' : '#2563eb',
           px = (p - v0) / span * width;
     if (px - lastLabel > (fine ? 70 : 52) || i === T.sel) {
       const m = Math.floor(p / 60), sec = (p % 60).toFixed(fine ? 2 : 1).padStart(fine ? 5 : 4, '0');

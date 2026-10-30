@@ -642,6 +642,7 @@ class Trip:
         report(0.95, "Listening to the music")
         song = songmap.analyse(song_path, app_dir() / "music-maps")
         song.taps = taps.final_taps(song_path, app_dir() / "music-taps")  # your own cuts, if you tapped this song
+        mine = list(song.taps or [])
         # The calm and lively stretches (yours, if you changed them) and the song's style.
         music = musicmood.reading(song, song_path, app_dir() / "music-taps")
         musicmood.apply(song, music["stretches"])
@@ -649,6 +650,9 @@ class Trip:
         if gap and song.taps:
             song.taps = musicmood.thin(song.taps, gap)  # a calm style cuts only on some of your pins
         result = autoedit.plan_to_music(rows, scores, song, limits, target, transition_seconds, soft_transition)
+        if mine:  # too few shots for all your pins: remember which ones this cut used (Music & audio greys the rest)
+            kept = result.kept_pins or (song.taps if len(song.taps or []) < len(mine) else None)
+            taps.set_extra(song_path, app_dir() / "music-taps", "used", {"pins": mine, "kept": kept} if kept else None)
         self._apply_plan(result)
         report(1.0, "Done")
         return result

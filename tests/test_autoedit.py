@@ -311,3 +311,15 @@ def test_a_shorter_video_ends_on_your_pin_nearest_the_length():
     limits = autoedit.Limits(max_video=4.0, max_photo=2.5, min_shot=1.0, cut_on="taps")
     plan = autoedit.plan_to_music(rows, {}, song, limits, 14.0, 0.8, "Fade")
     assert abs(plan.length - 13.0) < 0.05  # the pin at 13 s, not the bar line after 14 s
+
+
+def test_too_few_shots_thin_your_pins_but_keep_their_pattern():
+    from trip_memory.songmap import Section, SongMap
+
+    song = SongMap(duration=60.0, bpm=120, period=0.5, first_beat=0.0, clear_beat=True, downbeat=0,
+                   accents=[0.2] * 120, sections=[Section(0, 30, 0.3, "Calm"), Section(30, 60, 0.8, "Lively")])
+    pins = [2.0 * k for k in range(1, 29)]  # a pin every 2 s, one of them where the music changes (30 s)
+    kept = autoedit.fit_pins(song, pins, 15, longest=4.0)
+    assert len(kept) == 15 and kept[0] == 2.0 and kept[-1] == 56.0 and 30.0 in kept
+    assert kept[:4] == [2.0, 6.0, 10.0, 14.0] and max(np.diff(kept)) <= 4.0 + 1e-9  # every other pin, no shot too long
+    assert autoedit.fit_pins(song, pins, 5, longest=4.0) == kept  # can't go further without too long shots
