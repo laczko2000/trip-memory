@@ -1,5 +1,6 @@
 """The catalogue: places from GPS, scene suggestions, faces grouped into people, and your edits."""
 
+import subprocess
 from fractions import Fraction
 
 from pathlib import Path
@@ -8,6 +9,7 @@ import numpy as np
 from PIL import Image
 
 from trip_memory import catalog
+from trip_memory.tools import ffmpeg_paths
 from trip_memory.faces import Face, group_faces
 from trip_memory.scenes import SCENES, classify
 
@@ -388,3 +390,26 @@ def test_titles_opening_story_end_and_your_own(tmp_path, monkeypatch):
 
     trip.set_shot_title(str(trip_dir / "2.jpg"), "", "")
     assert shown()["2.jpg"][0] == "story"
+
+
+def test_video_doubles_are_found_on_several_frames(tmp_path, monkeypatch):
+    from tests.test_render import make_clip
+
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    make_clip(trip_dir / "take1.mp4", "640x360", 4, "2025-07-03T10:00:00Z", audio=False)
+    make_clip(trip_dir / "take2.mp4", "640x360", 6, "2025-07-03T10:06:00Z", audio=False)  # 6 min after take 1 ended
+    subprocess.run([ffmpeg_paths()[0], "-loglevel", "error", "-y", "-f", "lavfi", "-i", "mandelbrot=s=640x360:r=30",
+                    "-t", "4", "-metadata", "creation_time=2025-07-03T10:08:00Z", "-c:v", "libx264",
+                    str(trip_dir / "other.mp4")], check=True)
+    Image.new("RGB", (640, 360), "red").save(trip_dir / "photo.jpg")
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    by_name = {Path(i["path"]).name: i for i in trip.items()}
+    assert by_name["take1.mp4"]["similar_set"] == by_name["take2.mp4"]["similar_set"]
+    assert by_name["other.mp4"]["similar_set"] != by_name["take1.mp4"]["similar_set"]
+    assert by_name["take2.mp4"]["best"] and not by_name["take1.mp4"]["best"]  # the longer take wins (same sharpness)
+    trip.untick_doubles()
+    assert not {Path(i["path"]).name: i for i in trip.items()}["take1.mp4"]["chosen"]

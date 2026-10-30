@@ -51,6 +51,30 @@ def features(thumb_path: str) -> bytes:
     descriptors of up to 400 small details (corners and edges) that survive shifting, turning and zooming."""
     with Image.open(thumb_path) as img:
         rgb = np.asarray(img.convert("RGB"))
+    return _features_of(rgb)
+
+
+VIDEO_FRAMES = (0.15, 0.5, 0.85)  # where in a video its look is taken: start, middle and end
+
+
+def video_features(frames: list[str]) -> tuple[bytes, float]:
+    """A video's look from a few of its frames (a camera moves, so one frame is not enough), and how sharp
+    it is on average."""
+    packed, sharp = {}, []
+    for k, path in enumerate(frames):
+        with Image.open(path) as img:
+            rgb = np.asarray(img.convert("RGB"))
+        one = _unpack(_features_of(rgb))
+        packed.update({f"{name}{k}": value for name, value in one.items()})
+        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        sharp.append(float(cv2.Laplacian(gray, cv2.CV_64F).var()))
+    out = io.BytesIO()
+    np.savez(out, frames=np.array(len(frames)), **{k: (v.astype(np.float16) if v.dtype != np.uint8 else v)
+                                                    for k, v in packed.items()})
+    return out.getvalue(), float(np.mean(sharp)) if sharp else 0.0
+
+
+def _features_of(rgb: np.ndarray) -> bytes:
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     layout = cv2.resize(cv2.GaussianBlur(gray, (0, 0), 8), (12, 12), interpolation=cv2.INTER_AREA).astype(np.float32).ravel()
     layout = (layout - layout.mean()) / (layout.std() + 1e-6)
@@ -65,7 +89,12 @@ def features(thumb_path: str) -> bytes:
 
 
 def _unpack(blob: bytes) -> dict:
+    """A picture's details, or a video's: {"frames": [the details of each of its frames]}."""
     with np.load(io.BytesIO(blob)) as data:
+        if "frames" in data:
+            return {"frames": [{"layout": data[f"layout{k}"].astype(np.float32),
+                                "colours": data[f"colours{k}"].astype(np.float32), "details": data[f"details{k}"]}
+                               for k in range(int(data["frames"]))]}
         return {"layout": data["layout"].astype(np.float32), "colours": data["colours"].astype(np.float32),
                 "details": data["details"]}
 
@@ -87,6 +116,14 @@ def likeness(a: dict, b: dict) -> tuple[float, float, float]:
 
 
 def alike(a: dict, b: dict, level: str = "normal") -> bool:
+    """Whether two shots look like the same shot. Videos: any of their frames looking alike counts, as
+    two takes of the same scene often start or end the same way."""
+    if "frames" in a or "frames" in b:
+        return any(_alike(x, y, level) for x in a.get("frames", [a]) for y in b.get("frames", [b]))
+    return _alike(a, b, level)
+
+
+def _alike(a: dict, b: dict, level: str) -> bool:
     t = STRICTNESS.get(level, STRICTNESS["normal"])
     colours = float(np.minimum(a["colours"], b["colours"]).sum())
     if colours < 0.3:  # quick check first: clearly different colours are never the same shot
@@ -121,6 +158,8 @@ def score(row: dict) -> float:
         s -= abs(brightness - 128) / 64  # very dark or washed-out pictures lose points
     if row["kind"] == "video":
         s += min(row.get("duration") or 0, 20) / 10
+        if row.get("motion_shake") is not None:
+            s -= 2 * min(1.0, row["motion_shake"])  # a shaky take loses to a steady one
     return s
 
 
@@ -158,7 +197,10 @@ def group(rows: list[dict], level: str = "normal", links: list[str] | None = Non
         best_set = None
         for k in list(reversed(open_sets))[:12]:  # the most recent sets only, so big trips stay quick
             last = sets[k][-1]
-            if (when - datetime.fromisoformat(last["taken_at"])).total_seconds() / 60 > t["minutes"]:
+            if last["kind"] != row["kind"]:
+                continue  # a video's doubles are other videos (a photo of the same scene is still worth keeping)
+            ended = datetime.fromisoformat(last["taken_at"]).timestamp() + (last.get("duration") or 0)
+            if (when.timestamp() - ended) / 60 > t["minutes"]:
                 continue
             for other in sets[k][-2:]:
                 a, b = look(row), look(other)

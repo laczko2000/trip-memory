@@ -743,16 +743,26 @@ class Trip:
             except OSError:
                 continue
             self.execute("UPDATE items SET dhash = ?, colours = ?, sharpness = ? WHERE path = ?", (dhash, colours, sharp, row["path"]))
-        todo = self.query("SELECT path, thumb FROM items WHERE thumb IS NOT NULL AND features IS NULL AND removed = 0")
+        if not self.query("SELECT 1 FROM meta WHERE key = 'video_looks'"):
+            # Videos used to be compared on one frame: look at them again on several.
+            self.execute("UPDATE items SET features = NULL WHERE kind = 'video'")
+            self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('video_looks', '1')")
+        todo = self.query("SELECT path, kind, thumb, duration, rotation FROM items "
+                          "WHERE thumb IS NOT NULL AND features IS NULL AND removed = 0")
         for i, row in enumerate(todo):
-            if i % 50 == 0:
-                self.progress.message = f"Comparing pictures for look-alikes: {i + 1} of {len(todo)}"
+            if i % 50 == 0 or row["kind"] == "video":
+                self.progress.message = f"Comparing pictures and videos for look-alikes: {i + 1} of {len(todo)}"
             try:
-                self.execute("UPDATE items SET features = ? WHERE path = ?", (stories.features(row["thumb"]), row["path"]))
-            except (OSError, cv2.error):
+                if row["kind"] == "video":
+                    blob, sharp = self._video_looks(row)
+                    self.execute("UPDATE items SET features = ?, sharpness = ? WHERE path = ?", (blob, sharp, row["path"]))
+                else:
+                    self.execute("UPDATE items SET features = ? WHERE path = ?", (stories.features(row["thumb"]), row["path"]))
+            except (OSError, cv2.error, ValueError):
                 continue
         rows = [dict(r) for r in self.query(
-            "SELECT path, kind, taken_at, duration, lat, lon, dhash, colours, sharpness, features FROM items WHERE removed = 0")]
+            "SELECT path, kind, taken_at, duration, lat, lon, dhash, colours, sharpness, features, motion_shake "
+            "FROM items WHERE removed = 0")]
         groups = stories.group(rows, self.look_alike_level(), self.story_links())
         with self._lock:
             self.db.executemany(
@@ -796,6 +806,24 @@ class Trip:
                             "FROM items WHERE removed = 0 AND story IS NOT NULL GROUP BY story"):
             spans[r["story"]] = [tuple(r["a"].split("|", 1)), tuple(r["b"].split("|", 1))]
         return {n for n, (a, b) in spans.items() if any(a < j <= b for j in links)}
+
+    def _video_looks(self, row) -> tuple[bytes, float]:
+        """A video's look from frames at its start, middle and end (falls back to its preview)."""
+        duration = row["duration"] or 0
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = []
+            for k, share in enumerate(stories.VIDEO_FRAMES if duration >= 2 else (0.5,)):
+                out = Path(tmp) / f"{k}.jpg"
+                subprocess.run(
+                    [ffmpeg_paths()[0], "-loglevel", "error", "-y", "-ss", f"{duration * share:.2f}", "-i", row["path"],
+                     "-frames:v", "1", "-vf", rotate_filter(row["rotation"] or 0) + "scale=320:-2", "-q:v", "4", str(out)],
+                    capture_output=True,
+                )
+                if out.exists():
+                    frames.append(str(out))
+            if not frames:
+                frames = [row["thumb"]]
+            return stories.video_features(frames)
 
     def look_alike_level(self) -> str:
         rows = self.query("SELECT value FROM meta WHERE key = 'look_alike'")
