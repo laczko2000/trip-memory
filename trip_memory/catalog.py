@@ -907,7 +907,7 @@ class Trip:
             r = kinds[path]
             out.append({"path": path, "t": t, "score": round(score, 3), "likely": path in good,
                         "thumb": self.moment_picture(r, t) if r["kind"] == "video" else r["thumb"],
-                        "kind": r["kind"], "duration": r["duration"]})
+                        "kind": r["kind"], "duration": r["duration"], "row": r})
         return out
 
     def moment_picture(self, row: dict, t: float) -> str | None:

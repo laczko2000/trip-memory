@@ -29,6 +29,7 @@ from . import songmap
 from . import musicmood
 from . import pinfill
 from . import themes
+from . import moments
 from . import taps as song_taps
 from .beats import song_length
 from .autoedit import CUT_ON, shot_value
@@ -175,6 +176,7 @@ class Page:
         self.story_stop = None
         self.theme_shown = ""  # the activity open in the Themes tab
         self.theme_moment = None  # the moment being marked there (a name), or None
+        self.moment_from_story = None  # the My story part you came from to mark a moment, or None
         self.moment_found: dict = {}  # (activity, moment) -> the shots in the order found
         self.theme_selected: set[str] = set()
         self.theme_limit = 60
@@ -257,7 +259,7 @@ class Page:
                 self.panels = None
                 themes_tab = self.themes_tab = ui.tab("Themes", icon="category")
                 music_tab = ui.tab("Music & audio", icon="graphic_eq")
-                story_tab = ui.tab("Storyboard", icon="view_timeline")
+                story_tab = self.storyboard_tab = ui.tab("Storyboard", icon="view_timeline")
                 video_tab = ui.tab("Make video", icon="movie")
                 ui.separator().props("vertical").classes("mx-2")
                 library_tab = ui.tab("Library", icon="photo_library").classes("opacity-70")
@@ -867,6 +869,74 @@ class Page:
                 ui.button("Undo cut", icon="undo", on_click=lambda: apply(whole=True)).props("flat dense no-caps") \
                     .tooltip("The whole clip again")
             ui.button("Cancel", on_click=lambda: self.close_cut(cut)).props("flat dense no-caps")
+
+    def part_dialog(self, it: dict, a: float, b: float, title: str, actions: list[tuple]) -> None:
+        """A big window to choose a part of a video: it plays that part (silently, again and again), the strip below
+        shows the whole clip (move the mouse along it to look), and the green handles set the part.
+        actions: (label, icon, callback(start, end), props) buttons; a callback returning True closes the window."""
+        full0, full1 = kept_part(it) or (0.0, float(it["duration"] or 0))
+        part = {"min": round(max(full0, a), 1), "max": round(min(full1, b), 1)}
+        with ui.dialog() as dialog, ui.card().classes("w-[60rem] max-w-full gap-2"):
+            ui.label(title).classes("text-lg font-semibold")
+            box = self.preview(it, "width:100%;height:min(60vh,520px)", part["min"], part["max"], view="part")
+            shade = "position:absolute;top:0;bottom:0;background:rgba(15,23,42,.65)"
+            ui.html(f'<div data-scrub-for="{box}" style="position:relative;height:48px;margin:4px 10px 0;'
+                    f'border-radius:4px;overflow:hidden;background:#e2e8f0;cursor:col-resize">'
+                    f'<img id="{box}-strip" style="width:100%;height:100%;object-fit:fill;display:none;'
+                    f'pointer-events:none">'
+                    f'<div id="{box}-l" style="{shade};left:0;width:0;pointer-events:none"></div>'
+                    f'<div id="{box}-r" style="{shade};right:0;width:0;pointer-events:none"></div>'
+                    f'<div id="{box}-head" style="position:absolute;top:0;bottom:0;width:2px;background:#facc15;'
+                    f'display:none;pointer-events:none"></div></div>', sanitize=False).classes("w-full")
+            ui.range(min=full0, max=full1, step=0.1, value=dict(part),
+                     on_change=lambda e: moved(e.value["min"], e.value["max"])).props("color=green dense") \
+                .classes("w-full px-2")
+            label = ui.label().classes("text-sm font-medium text-green-800 px-2")
+            ui.label("Move the mouse along the strip to look through the clip (click plays from there). Drag the "
+                     "green handles to the part you want.").classes("text-xs text-gray-500 px-2")
+
+            def show() -> None:
+                label.text = (f"{fmt_length(part['min'])}–{fmt_length(part['max'])} · "
+                              f"{part['max'] - part['min']:.1f} s")
+                length = full1 - full0 or 1
+                left, right = 100 * (part["min"] - full0) / length, 100 * (full1 - part["max"]) / length
+                ui.run_javascript(f"for (const [s, w] of [['l', {left:.2f}], ['r', {right:.2f}]]) {{"
+                                  f"const e = document.getElementById('{box}-' + s); if (e) e.style.width = w + '%'; }}")
+
+            def moved(lo: float, hi: float) -> None:
+                at = lo if lo != part["min"] else max(lo, hi - 1.5)
+                part.update(min=lo, max=hi)
+                show()
+                ui.run_javascript(f"tmPlayPart('{box}', {lo}, {hi}, {at})")
+
+            async def start() -> None:
+                ui.run_javascript(f"const b = document.getElementById('{box}'); if (b) {{ b.dataset.full0 = {full0}; "
+                                  f"b.dataset.full1 = {full1}; }} tmPlayPart('{box}', {part['min']}, {part['max']}, "
+                                  f"{part['min']})")
+                show()
+                picture = await run.io_bound(self.trip.filmstrip, it["path"])
+                if picture:
+                    ui.run_javascript(f"const s = document.getElementById('{box}-strip'); "
+                                      f"if (s) {{ s.src = '{data_url(str(picture))}'; s.style.display = 'block'; }}")
+
+            async def act(callback) -> None:
+                done = callback(part["min"], part["max"])
+                if asyncio.iscoroutine(done):
+                    done = await done
+                if done:
+                    ui.run_javascript(f"const b = document.getElementById('{box}'); if (b) tmStop(b);")
+                    dialog.close()
+
+            with ui.row().classes("w-full items-center justify-end gap-2"):
+                ui.button("Play", icon="play_arrow", on_click=lambda: ui.run_javascript(
+                    f"tmPlayPart('{box}', {part['min']}, {part['max']}, {part['min']})")).props("outline dense no-caps")
+                ui.space()
+                ui.button("Close", on_click=dialog.close).props("flat no-caps")
+                for text, icon, callback, props in actions:
+                    ui.button(text, icon=icon, on_click=lambda c=callback: act(c)).props(props)
+            ui.timer(0.3, start, once=True)
+        dialog.on("hide", lambda: ui.run_javascript(f"const b = document.getElementById('{box}'); if (b) tmStop(b);"))
+        dialog.open()
 
     def show_cut(self, path: str) -> None:
         """After a cut: change that one clip where it is on screen (its picture, length, what hovering plays),
@@ -2166,7 +2236,7 @@ class Page:
                 "emitEvent('tm_story_drop',{{src:event.dataTransfer.getData('text/plain'),dst:'{dst}'}})")
         for n, part in enumerate(parts):
             card = ui.element("div").classes("w-full p-2 rounded border bg-white flex flex-col gap-1")
-            card._props.update({"draggable": "true", "ondragstart": drag.format(src=f"p:{n}"),
+            card._props.update({"id": f"tm-part-{n}", "draggable": "true", "ondragstart": drag.format(src=f"p:{n}"),
                                 "ondragend": "this.style.opacity=1", "ondragover": over, "ondragleave": leave,
                                 "ondrop": drop.format(dst=f"p:{n}")})
             with card:
@@ -2768,7 +2838,9 @@ class Page:
                                        ("border-blue-600 bg-blue-50" if picked else "border-transparent bg-gray-50")) \
                 .on("click", lambda p=r["path"]: self.pick_theme_shot(p)) as tile:
             self.theme_tiles[r["path"]] = tile
-            if r["thumb"]:
+            if r["kind"] == "video":  # hover plays it (silently) so you can see what happens in it
+                self.preview(r, "width:100%;aspect-ratio:16/10", start=self.hover_start(r), view="theme")
+            elif r["thumb"]:
                 ui.image(data_url(r["thumb"])).classes("w-full rounded").style("aspect-ratio:16/10") \
                     .props("fit=cover no-spinner")
             # Top left: tick = "right theme" (saved at once). Top right: pick another theme.
@@ -2904,6 +2976,17 @@ class Page:
         self.trip.add_moment(activity, name)
         self.panels.set_value(self.themes_tab)
         self.open_moment(activity, name)
+        self.moment_from_story = n  # the part to go back to
+
+    def back_to_story(self) -> None:
+        """Done marking a moment: back to My story, at the part you came from."""
+        part, self.moment_from_story = self.moment_from_story, None
+        self.panels.set_value(self.storyboard_tab)
+        self.storyboard_view.refresh()
+        if part is not None:
+            ui.timer(0.6, lambda: ui.run_javascript(
+                f"const e = document.getElementById('tm-part-{part}'); "
+                "if (e) e.scrollIntoView({behavior: 'smooth', block: 'center'});"), once=True)
 
     def new_moment_dialog(self, activity: str) -> None:
         with ui.dialog() as dialog, ui.card().classes("w-96"):
@@ -2977,6 +3060,9 @@ class Page:
         with ui.row().classes("w-full items-center gap-2"):
             ui.label(f"{emoji.get(activity, '⭐')} {activity} › 🔍 {name}").classes("text-lg font-semibold")
             self.moment_count = ui.label(f"{len(saved['shots'])} marked").classes("text-sm text-gray-600")
+            if self.moment_from_story is not None:
+                ui.button("Done, back to my story", icon="arrow_back", on_click=self.back_to_story) \
+                    .props("no-caps color=green").classes("ml-auto")
         ui.label(f"Tick the shots that show “{name}”: the picture is the second that fits best, and that is the part "
                  "the video keeps. After a few ticks, press Find the rest: the shots most like yours come first.") \
             .classes("text-sm text-gray-600")
@@ -2998,6 +3084,16 @@ class Page:
         marked = [f for f in found if f["ticked"]]
         suggested = [f for f in found if f["likely"] and not f["ticked"]]
         rest = [f for f in found if not f["likely"] and not f["ticked"]]
+        if marked and not suggested:
+            with ui.row().classes("w-full items-center gap-3 p-2 rounded bg-green-50"):
+                ui.label(f"That's all of them: {len(marked)} marked, nothing else looks like “{name}”.") \
+                    .classes("text-sm text-green-800")
+                if self.moment_from_story is not None:
+                    ui.button("Back to my story", icon="arrow_back", on_click=self.back_to_story) \
+                        .props("dense no-caps color=green")
+                else:
+                    ui.button(f"Back to {activity}", icon="arrow_back", on_click=lambda: self.show_theme(activity)) \
+                        .props("dense flat no-caps")
         sections = [(f"✓ Marked ({len(marked)})", marked, ""),
                     (f"Suggested ({len(suggested)}): " + ("they look like your ticks" if marked else
                                                           "they fit your words best"), suggested, ""),
@@ -3024,7 +3120,10 @@ class Page:
     def moment_tile(self, activity: str, name: str, f: dict) -> None:
         with ui.element("div").classes("relative rounded p-1 border-2 bg-gray-50 cursor-pointer " +
                                        ("border-green-600" if f["ticked"] else "border-transparent")) as tile:
-            if f["thumb"]:
+            if f["kind"] == "video" and f.get("row"):  # hover plays the seconds around the moment, again and again
+                a, b = moments.window(f["t"], f["duration"] or 0, *(kept_part(f["row"]) or (0.0, f["duration"] or 0)))
+                self.preview(f["row"] | {"thumb": f["thumb"]}, "width:100%;aspect-ratio:16/10", a, b, view="moment")
+            elif f["thumb"]:
                 ui.image(data_url(f["thumb"])).classes("w-full rounded").style("aspect-ratio:16/10") \
                     .props("fit=cover no-spinner")
             box = ui.element("div").classes("absolute top-2 left-2 w-7 h-7 rounded border-2 flex items-center "
@@ -3051,8 +3150,29 @@ class Page:
 
             show()
             tile.on("click", toggle)
-            ui.label("🎬 at " + fmt_length(f["t"]) if f["kind"] == "video" else "📷 photo") \
-                .classes("text-xs text-gray-600 mt-1")
+            with ui.row().classes("w-full items-center justify-between no-wrap"):
+                when = ui.label("🎬 at " + fmt_length(f["t"]) if f["kind"] == "video" else "📷 photo") \
+                    .classes("text-xs text-gray-600 mt-1")
+                if f["kind"] == "video" and f.get("row"):
+                    async def use(lo: float, hi: float) -> bool:
+                        f["t"], f["ticked"] = round((lo + hi) / 2, 2), True
+                        await run.io_bound(self.trip.tick_moment, activity, name, f["path"], f["t"], True)
+                        when.set_text("🎬 at " + fmt_length(f["t"]))
+                        show()
+                        saved = self.trip.moment(activity, name) or {"shots": []}
+                        self.moment_count.set_text(f"{len(saved['shots'])} marked")
+                        ui.notify(f"Moment set at {fmt_length(f['t'])} and ticked.", type="positive")
+                        return True
+
+                    def big() -> None:
+                        a, b = moments.window(f["t"], f["duration"] or 0, *(kept_part(f["row"]) or
+                                                                            (0.0, f["duration"] or 0)))
+                        self.part_dialog(f["row"], a, b, f"{name}: find the exact moment",
+                                         [("This is the moment", "check", use, "no-caps color=green")])
+
+                    with ui.element("div").on("click.stop", lambda: None):
+                        ui.button(icon="open_in_full", on_click=big).props("flat dense round size=sm") \
+                            .tooltip("Watch it big and choose the exact seconds")
 
     async def tick_all_moment(self, activity: str, name: str, group: list[dict]) -> None:
         for f in group:
