@@ -773,30 +773,22 @@ class Page:
         ui.timer(0.2, lambda: ui.run_javascript(f"tmTapInit({json.dumps(saved['taps'])}, 0)"), once=True)
 
     def tap_lengths(self, music: str, taps: list[float]) -> None:
-        """The shots your cuts make, checked against your limits."""
+        """The shots your pins make, one box each."""
         song = self.song_maps.get(music)
         try:
             duration = song.duration if song else song_length(music)
         except Exception:
             duration = max(taps) + 1
         lengths = song_taps.shot_lengths(taps, max(taps))  # up to your last pin; after it the app cuts by itself
-        limits = self.auto_limits
-        longest = max(limits.max_video, limits.max_photo)
         with ui.row().classes("w-full gap-1"):
             for n, length in enumerate(lengths, 1):
-                colour = "orange" if length > longest * 1.03 else "red" if length < limits.min_shot else "blue-grey"
-                ui.chip(f"{n}: {length:.1f} s", color=colour, text_color="white").props("dense square")
-        too_long = sum(length > longest * 1.03 for length in lengths)
-        too_short = sum(length < limits.min_shot for length in lengths)
+                ui.chip(f"{n}: {length:.1f} s", color="blue-grey", text_color="white").props("dense square") \
+                    .tooltip(f"Shot {n}: from pin {n - 1 if n > 1 else 'start'} to pin {n}")
         rest = duration - max(taps)
-        notes = [f"After your last pin ({fmt_length(max(taps))}) the app cuts the remaining {fmt_length(rest)} by itself."
-                 if rest > longest else ""]
-        if too_long:
-            notes.append(f"{too_long} orange shot(s) are longer than your longest clip ({longest:g} s); Auto-edit splits "
-                         "them on the beat. Raise the limit in the Storyboard to keep them whole.")
-        if too_short:
-            notes.append(f"{too_short} red shot(s) are shorter than your shortest shot ({limits.min_shot:g} s); they're "
-                         "kept, since you placed them.")
+        notes = ["Each grey box is one shot, in order: the time from one pin to the next. Your pins are the only cuts, "
+                 "however long or short.",
+                 f"After your last pin ({fmt_length(max(taps))}) the app cuts the remaining {fmt_length(rest)} by itself."
+                 if rest > 1 else ""]
         for note in filter(None, notes):
             ui.label(note).classes("text-xs text-gray-600")
 
