@@ -829,7 +829,7 @@ class Page:
             f"const b = document.getElementById('{box}'); if (b) {{ b.dataset.scrub = '1'; "
             f"b.dataset.full0 = {start}; b.dataset.full1 = {end}; }}"), once=True)
         ui.range(min=start, max=end, step=0.1, value=dict(part),
-                 on_change=lambda e: moved(e.value["min"], e.value["max"])).props("color=green dense").classes("w-full px-2")
+                 on_change=lambda e: moved(e.value["min"], e.value["max"])).props("color=green dense drag-range").classes("w-full px-2")
         label = ui.label().classes("text-xs font-medium text-green-800 px-2")
 
         def show() -> None:  # times from the start of the clip as it is now
@@ -1044,11 +1044,12 @@ class Page:
                 ui.label("Red: parts other shots in your video already use (never shown twice).") \
                     .classes("text-xs text-red-700 px-2")
             ui.range(min=full0, max=full1, step=0.1, value=dict(part),
-                     on_change=lambda e: moved(e.value["min"], e.value["max"])).props("color=green dense") \
+                     on_change=lambda e: moved(e.value["min"], e.value["max"])).props("color=green dense drag-range") \
                 .classes("w-full px-2")
             label = ui.label().classes("text-sm font-medium text-green-800 px-2")
             ui.label("Move the mouse along the strip to look through the clip (click plays from there). Drag the "
-                     "green handles to the part you want.").classes("text-xs text-gray-500 px-2")
+                     "green bar's middle to move the same length to another moment, or its ends to make it longer "
+                     "or shorter.").classes("text-xs text-gray-500 px-2")
 
             def show() -> None:
                 label.text = (f"{fmt_length(part['min'])}–{fmt_length(part['max'])} · "
@@ -2238,8 +2239,8 @@ class Page:
             ui.button("Back to time order", icon="restart_alt", on_click=self.reset_order).props("flat dense") \
                 .tooltip("Forget the order you set here: the shots go back to the order they were taken")
         ui.label(
-            "Drag a clip by its ⠿ handle up or down to change the order. For videos, drag the two ends of the bar to "
-            "choose which part to keep. "
+            "Drag a clip by its ⠿ handle up or down to change the order. For videos, drag the middle of the bar to use "
+            "the same length from another moment, or its two ends to make it longer or shorter. "
             "The transition setting is for the cut after that clip."
         ).classes("text-sm text-gray-600")
         self.shown_titles = self.trip.shot_titles(board)
@@ -3908,7 +3909,7 @@ class Page:
         bar = ui.range(
             min=round(lo, 1), max=round(hi, 1), step=0.1, value={"min": round(start, 1), "max": round(end, 1)},
             on_change=lambda e: trimmed(e.value["min"], e.value["max"]),
-        ).props("dense").classes("w-full")
+        ).props("dense drag-range").classes("w-full")
 
         def trimmed(lo: float, hi: float) -> None:
             clip = self.clip_of(it)
