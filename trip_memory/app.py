@@ -796,7 +796,7 @@ class Page:
         length = end - start
         part = {"min": start, "max": end}
         name = Path(it["path"]).name
-        box = cut.get("box") or self.preview(it, "width:100%;height:210px", start, end, view="cut", sound=True)
+        box = cut.get("box") or self.preview(it, "width:100%;height:210px", start, end, view="cut")
         # The clip as a row of pictures (made while you look); the parts you cut off are greyed out.
         shade = "position:absolute;top:0;bottom:0;background:rgba(15,23,42,.65)"
         # Move the mouse along it and the video follows; click to play from there.
@@ -827,7 +827,7 @@ class Page:
             at = lo if lo != part["min"] else max(lo, hi - 1.5)
             part.update(min=lo, max=hi)
             show()
-            ui.run_javascript(f"tmPlayPart('{box}', {lo}, {hi}, {at}, true)")
+            ui.run_javascript(f"tmPlayPart('{box}', {lo}, {hi}, {at})")
 
         async def apply(whole: bool = False) -> None:
             if not whole and part["min"] <= start + 0.05 and part["max"] >= end - 0.05:
@@ -856,7 +856,7 @@ class Page:
         ui.timer(0.05, strip, once=True)
         with ui.row().classes("w-full items-center gap-1 px-1 pb-1"):
             ui.button("Play", icon="play_arrow",
-                      on_click=lambda: ui.run_javascript(f"tmPlayPart('{box}', {part['min']}, {part['max']}, {part['min']}, true)")) \
+                      on_click=lambda: ui.run_javascript(f"tmPlayPart('{box}', {part['min']}, {part['max']}, {part['min']})")) \
                 .props("outline dense no-caps")
             ui.button("Cut", icon="content_cut", on_click=lambda: apply()).props("color=green dense no-caps") \
                 .tooltip("Keep only this part")
@@ -1036,7 +1036,7 @@ class Page:
         with ui.card().tight().classes("w-full" + ("" if it["included"] else " opacity-50")) as card:
             if it["thumb"]:
                 height = {2: 320, 3: 220}.get(self.library_columns, 150)  # fewer in a row: bigger pictures
-                cut = {"box": self.preview(it, f"width:100%;height:{height}px", start=self.hover_start(it), sound=True)}
+                cut = {"box": self.preview(it, f"width:100%;height:{height}px", start=self.hover_start(it))}
                 cut["area"] = ui.column().classes("w-full gap-1")  # the cutting handles, when you press ✂
             else:
                 ui.label("Analysing…").classes("w-full thumb flex items-center justify-center bg-gray-100 text-gray-400")
@@ -3351,7 +3351,7 @@ class Page:
                 box = None
                 if it["thumb"]:
                     start, end = self.kept_part(it) if it["kind"] == "video" else (0, None)
-                    box = self.preview(it, "width:160px;height:100px;flex:none", start, end, view="story", sound=True)
+                    box = self.preview(it, "width:160px;height:100px;flex:none", start, end, view="story")
                 with ui.column().classes("flex-grow gap-1"):
                     place = ", ".join(x for x in (it["place"], it["country"]) if x)
                     icon = "🎬" if it["kind"] == "video" else "📷"
@@ -3942,7 +3942,7 @@ function tmScrubAt(box, frac, play) {
   const t = a + Math.min(1, Math.max(0, frac)) * (b - a);
   const head = document.getElementById(box.id + '-head');
   if (head) { head.style.display = 'block'; head.style.left = (100 * Math.min(1, Math.max(0, frac))) + '%'; }
-  if (play) { tmPlayPart(box.id, t, b, t, true); return; }
+  if (play) { tmPlayPart(box.id, t, b, t); return; }
   if (tmPlaying && tmPlaying !== box) tmStop(tmPlaying);
   tmPlaying = box;
   const v = tmVideo(box);
