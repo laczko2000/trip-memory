@@ -295,3 +295,24 @@ def test_a_phone_video_fills_the_upright_frame_around_the_people(tmp_path):
         assert (stream["width"], stream["height"]) == (180, 320)
         middle = _frame(out, 1.0, 180, 320)[100:220, 70:110].astype(int)
         assert middle[..., 0].mean() > 150 and middle[..., 2].mean() < 80, item.kind  # the red band is in view
+
+
+def test_a_collage_pops_its_photos_in_one_after_another(tmp_path):
+    from trip_memory.render import collage_tiles
+
+    trip = tmp_path / "trip"
+    trip.mkdir()
+    colours = [(220, 0, 0), (0, 200, 0), (0, 0, 220), (230, 230, 0)]
+    for n, colour in enumerate(colours):
+        Image.new("RGB", (400, 300), colour).save(trip / f"{n}.jpg")
+    first = next(i for i in scan_folder(trip)[0] if i.name == "0.jpg")
+    first.seconds = 2.0
+    first.effects = {"collage": [str(trip / f"{n}.jpg") for n in (1, 2, 3)], "appear": [0.0, 0.5, 1.0, 1.5]}
+    out = render([first], RenderSettings(width=640, height=360), tmp_path / "c.mp4")
+    assert abs(float(probe(str(out))["format"]["duration"]) - 2.0) < 0.1
+    tiles = collage_tiles(4, 640, 360)
+    centre = lambda t, k: _frame(out, t)[tiles[k][1] + tiles[k][3] // 2, tiles[k][0] + tiles[k][2] // 2].astype(int)  # noqa: E731
+    assert centre(0.8, 1)[1] > 150  # the second photo (green) is in by 0.8 s
+    assert centre(0.8, 3).max() < 60  # the fourth is not yet
+    yellow = centre(1.75, 3)  # ... and is by the end (as the video fades out)
+    assert yellow[0] > yellow[2] + 40 and yellow[1] > yellow[2] + 40

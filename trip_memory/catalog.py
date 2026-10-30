@@ -297,6 +297,9 @@ class Trip:
         left_out = self._left_out_by_plan(stories)
         rows = [it for it in items if it["chosen"] and it["included"] and not it["cut_out"]
                 and it["path"] not in off and it["path"] not in left_out]
+        # The photos inside a collage show as part of its first photo, not on their own.
+        inside = {p for r in rows if r["effects"] for p in json.loads(r["effects"]).get("collage", [])}
+        rows = [r for r in rows if r["path"] not in inside]
 
         def order(r: dict) -> tuple:  # by story, then the story's plan, then time
             return rank.get(r["path"], 0), r["plan_pos"] is None, r["plan_pos"] or 0, r["taken_at"]
@@ -323,6 +326,7 @@ class Trip:
         focus: also say where the people are in each shot (for a phone video, which shows a narrow slice)."""
         board = self.storyboard()
         where = self.focus_points(board) if focus else {}
+        turned = {r["path"]: r["rotation"] or 0 for r in self.items()}
         days = sorted({r["day"] for r in self.items() if r["chosen"]})
         shown = self.shot_titles(board)
         result: list[MediaItem] = []
@@ -347,12 +351,40 @@ class Trip:
                     sound=bool(r["clip_sound"]),  # videos are silent unless you switch their sound on
                     volume=1.0 if r["clip_volume"] is None else r["clip_volume"],
                     speed=r["speed"] or 1.0,
-                    effects=json.loads(r["effects"]) if r["effects"] else None,
+                    effects=self._with_parts(r["effects"], turned),
                     overlay=shown.get(r["path"]),
                     focus=where.get(r["path"]),
                 )
             )
         return result
+
+    @staticmethod
+    def _with_parts(effects: str | None, turned: dict[str, int]) -> dict | None:
+        """A shot's effects; a collage also gets how each of its photos is turned."""
+        if not effects:
+            return None
+        fx = json.loads(effects)
+        if fx.get("collage"):
+            fx["turns"] = [turned.get(p, 0) for p in fx["collage"]]
+        return fx
+
+    def split_collage(self, path: str) -> None:
+        """Show a collage's photos one after another again, each for the time it popped in for."""
+        row = self.query("SELECT effects, position, seconds FROM items WHERE path = ?", (path,))
+        fx = json.loads(row[0]["effects"]) if row and row[0]["effects"] else {}
+        if not fx.get("collage"):
+            return
+        appear = [*fx.get("appear", []), row[0]["seconds"] or 0.0]
+        lengths = [max(0.5, b - a) for a, b in zip(appear, appear[1:])] if len(appear) == len(fx["collage"]) + 2 \
+            else [None] * (len(fx["collage"]) + 1)
+        position = row[0]["position"]
+        with self._lock:
+            self.db.execute("UPDATE items SET effects = NULL, effects_why = NULL, seconds = ? WHERE path = ?",
+                            (lengths[0], path))
+            for n, (part, length) in enumerate(zip(fx["collage"], lengths[1:]), 1):
+                self.db.execute("UPDATE items SET seconds = ?, cut_out = 0, position = ? WHERE path = ?",
+                                (length, None if position is None else position + n / 100, part))
+            self.db.commit()
 
     def focus_points(self, rows: list[dict]) -> dict[str, float]:
         """Where the faces are across each shot's picture (0 left .. 1 right; bigger faces count more), looked
@@ -612,6 +644,9 @@ class Trip:
         """Take the punch-in, speed ramp, push-in, shake or freeze-frame off a shot (the same part of the video
         stays in use)."""
         row = self.query("SELECT effects, trim_start, trim_end, speed FROM items WHERE path = ?", (path,))
+        if row and row[0]["effects"] and json.loads(row[0]["effects"]).get("collage"):
+            self.split_collage(path)
+            return
         if row and row[0]["effects"] and held(json.loads(row[0]["effects"])) and row[0]["trim_end"] is not None:
             # The freeze-frame's time goes back to the video playing, so the shot stays just as long.
             more = held(json.loads(row[0]["effects"])) * (row[0]["speed"] or 1.0)
@@ -677,6 +712,9 @@ class Trip:
                      shot.speed, shot.speed_why, json.dumps(shot.effects) if shot.effects else None, shot.effects_why,
                      shot.path),
                 )
+            # The photos inside a collage are part of this cut (they show through its first photo).
+            parts = [(p,) for shot in result.shots for p in (shot.effects or {}).get("collage", [])]
+            self.db.executemany("UPDATE items SET cut_out = 0, position = NULL WHERE path = ?", parts)
             # Left out of this cut, but still in your selection, so the next Auto-edit can use it again.
             self.db.executemany("UPDATE items SET cut_out = 1, position = NULL WHERE path = ?", [(p,) for p in result.left_out])
             self.db.commit()

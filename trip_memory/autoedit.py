@@ -477,6 +477,50 @@ def speed_for(row: dict, slot: Slot, seconds: float) -> tuple[float, str | None]
     return 1.0, None
 
 
+COLLAGE_MAX = 4  # photos in one collage (2x2)
+COLLAGE_GAP = 12.0  # at least this many seconds between two collages
+COLLAGE_SHOT = 1.6  # only quick shots are gathered into a collage
+
+
+def collages(shots: list[Shot], slots: list[Slot], rows: dict[str, dict], transition_seconds: float) -> list[Shot]:
+    """In the lively parts, a quick run of 3 or 4 photos from one story becomes one collage: the photos pop in one
+    after another on the same beats where they would have been cut, and stay together on screen."""
+    result: list[Shot] = []
+    k, last_end, at = 0, -99.0, 0.0  # at: where shot k starts in the video (seconds)
+
+    def fits(n: int, story) -> bool:
+        shot = shots[n]
+        return (shot.kind == "photo" and not shot.effects and shot.seconds <= COLLAGE_SHOT and n < len(slots)
+                and slots[n].energy >= 0.62 and rows.get(shot.path, {}).get("story") == story)
+
+    while k < len(shots):
+        story = rows.get(shots[k].path, {}).get("story")
+        run = k
+        while run < len(shots) and run - k < COLLAGE_MAX and fits(run, story) and (
+                run == k or shots[run - 1].transition in (None, HARD_CUT)):
+            run += 1
+        if run - k >= 3 and at - last_end >= COLLAGE_GAP:
+            group = shots[k:run]
+            inside = [transitions.seconds_of(g.transition, transition_seconds) for g in group[:-1]]  # cut overlaps
+            appear, t = [], 0.0
+            for g, overlap in zip(group, [*inside, 0.0]):
+                appear.append(round(t, 3))
+                t += g.seconds - overlap
+            lead = group[0]
+            result.append(Shot(path=lead.path, kind="photo", seconds=round(t, 4), transition=group[-1].transition,
+                               why=group[-1].why,
+                               effects={"collage": [g.path for g in group[1:]], "appear": appear},
+                               effects_why=f"Collage of {len(group)} photos, popping in on the beat"))
+            last_end = at + t
+            at += t
+            k = run
+            continue
+        at += shots[k].seconds - transitions.seconds_of(shots[k].transition, transition_seconds)
+        result.append(shots[k])
+        k += 1
+    return result
+
+
 FREEZE = 1.0  # seconds a freeze-frame holds, with the person's name on it
 FREEZE_GAP = 20.0  # at most one freeze-frame in this many seconds
 
@@ -671,7 +715,9 @@ def plan_to_music(
         transition, why = chosen[k] if k < len(chosen) else (None, None)
         shots.append(Shot(path=c["path"], kind=c["kind"], start=round(start, 2), seconds=seconds, transition=transition,
                           why=why, speed=speed, speed_why=speed_why, effects=effects, effects_why=effects_why))
-    used = {s.path for s in shots}
+    if limits.camera_effects:
+        shots = collages(shots, slots, {r["path"]: r for r in candidates}, transition_seconds)
+    used = {s.path for s in shots} | {p for s in shots for p in s.effects.get("collage", [])}
     length = begin / 30
     pins = sum(1 for k in range(1, len(slots)) if slots[k].tapped or slots[k - 1].tapped)
     return Plan(shots=shots, left_out=[r["path"] for r in rows if r["path"] not in used], length=length, beat=song.beat,

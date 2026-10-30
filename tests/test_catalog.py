@@ -442,3 +442,27 @@ def test_where_the_people_are_is_found_once(tmp_path, monkeypatch):
     assert abs(item.focus - 60 / width) < 1e-6
     monkeypatch.setattr(catalog, "FaceFinder", None)  # not needed again
     assert trip.media_items(focus=True)[0].focus == item.focus and trip.media_items()[0].focus is None
+
+
+def test_a_collage_shows_as_one_shot_and_can_be_split(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    folder = tmp_path / "trip"
+    folder.mkdir()
+    for n in range(4):
+        _gps_photo(folder / f"{n}.jpg", f"2025:07:03 10:0{n}:00", 38.7, -9.1, "red")
+    trip = catalog.Trip(folder)
+    trip.prepare()
+    parts = [str(folder / f"{n}.jpg") for n in (1, 2)]
+    trip.execute("UPDATE items SET position = 0, seconds = 1.5, effects = ? WHERE path = ?",
+                 (json.dumps({"collage": parts, "appear": [0.0, 0.5, 1.0]}), str(folder / "0.jpg")))
+    trip.execute("UPDATE items SET rotation = 90 WHERE path = ?", (parts[1],))
+    assert [Path(r["path"]).name for r in trip.storyboard()] == ["0.jpg", "3.jpg"]
+    lead = trip.media_items()[0]
+    assert lead.effects["turns"] == [0, 90]
+    trip.split_collage(str(folder / "0.jpg"))
+    board = trip.storyboard()
+    assert [Path(r["path"]).name for r in board] == ["0.jpg", "1.jpg", "2.jpg", "3.jpg"]
+    assert [r["seconds"] for r in board[:3]] == [0.5, 0.5, 0.5]

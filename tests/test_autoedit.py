@@ -78,7 +78,7 @@ def test_photos_respect_their_maximum():
     rows = [_clip(n, 0.0, kind="photo") for n in range(40)]
     limits = autoedit.Limits(max_video=4.0, max_photo=2.0, min_shot=1.0)
     plan = autoedit.plan_to_music(rows, {}, _song(), limits, 20.0, 0.8, "Fade")
-    assert plan.shots and all(s.seconds <= 2.0 + 0.8 for s in plan.shots)
+    assert plan.shots and all(s.seconds <= 2.0 + 0.8 for s in plan.shots if not s.effects.get("collage"))
     assert 18 <= plan.length <= 22
 
 
@@ -286,3 +286,19 @@ def test_the_hardest_hit_shakes_an_action_shot():
     assert effects == {"shake": [1.5]} and "shake" in why
     effects, _ = autoedit.effects_for(row, slot, 3.0, 1.0, [(11.5, 0.8)], 5)
     assert effects == {"punch": [1.5]}
+
+
+def test_a_quick_run_of_photos_becomes_a_collage():
+    slots = [autoedit.Slot(k * 0.5, k * 0.5 + 0.5, 0.8) for k in range(6)]
+    shots = [autoedit.Shot(path=f"p{k}.jpg", kind="photo", seconds=0.5 + 1 / 30, transition=transitions.HARD_CUT)
+             for k in range(6)]
+    rows = {s.path: {"story": 1} for s in shots}
+    rows["p5.jpg"] = {"story": 2}
+    merged = autoedit.collages(shots, slots, rows, 0.8)
+    assert [s.path for s in merged] == ["p0.jpg", "p4.jpg", "p5.jpg"]  # p0..p3 together, then the rest
+    lead = merged[0]
+    assert lead.effects["collage"] == ["p1.jpg", "p2.jpg", "p3.jpg"]
+    assert lead.effects["appear"] == [0.0, 0.5, 1.0, 1.5]  # each pops in where its cut was
+    assert abs(lead.seconds - (2.0 + 1 / 30)) < 1e-3  # the same time on screen as the four shots
+    calm = [autoedit.Slot(s.start, s.end, 0.3) for s in slots]
+    assert len(autoedit.collages(shots, calm, rows, 0.8)) == 6  # not in calm music

@@ -1871,6 +1871,8 @@ class Page:
                             self.sound_control(it)
                             self.speed_control(it)
                         self.effects_control(it)
+                    elif it.get("effects") and json.loads(it["effects"]).get("collage"):
+                        self.collage_control(it)
                     else:
                         ui.label(f"Photo · {it['seconds']:.1f} s" if it["seconds"] else "Photo").classes("text-xs text-gray-500")
                 with ui.column().classes("gap-1 w-56"):
@@ -2022,6 +2024,23 @@ class Page:
                 ui.notify("Effect taken off")
 
             ui.button("Remove", on_click=remove).props("flat dense size=sm no-caps")
+
+    def collage_control(self, it: dict) -> None:
+        """A collage (several photos on screen together): small previews of its other photos, and a way back."""
+        parts = json.loads(it["effects"])["collage"]
+        thumbs = {r["path"]: r["thumb"] for r in self.items if r["path"] in parts}
+        with ui.row().classes("items-center gap-2"):
+            ui.label(f"🧩 Collage of {len(parts) + 1} photos · {it['seconds'] or 0:.1f} s").classes("text-xs text-purple-700")
+            for p in parts:
+                if thumbs.get(p):
+                    ui.image(data_url(thumbs[p])).style("width:48px;height:32px;object-fit:cover;flex:none")
+
+            def split() -> None:
+                self.trip.split_collage(it["path"])
+                ui.notify("The photos now show one after another")
+                self.storyboard_view.refresh()
+
+            ui.button("Show them one by one", on_click=split).props("flat dense size=sm no-caps")
 
     def speed_control(self, it: dict) -> None:
         speeds = {0.5: "0.5× slow motion", 0.75: "0.75× slower", 1.0: "1× normal speed", 1.5: "1.5× faster", 2.0: "2× fast"}

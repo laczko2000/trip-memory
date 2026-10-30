@@ -349,6 +349,75 @@ def _photo_segment(item: MediaItem, s: RenderSettings, out: Path, workdir: Path)
     return seconds
 
 
+POP = 0.18  # seconds a collage tile takes to pop into place
+COLLAGE_GAP_SHARE = 0.008  # the thin dark line between tiles, as a share of the video's width
+
+
+def collage_tiles(count: int, w: int, h: int) -> list[tuple[int, int, int, int]]:
+    """Where each photo of a collage goes (x, y, width, height): 2 side by side, 3 as one big and two small,
+    4 as a 2x2 grid. An upright (phone) video stacks them instead."""
+    g = max(2, round(w * COLLAGE_GAP_SHARE))
+    upright = h > w
+    half_w, half_h = (w - g) // 2, (h - g) // 2
+    if count == 2:
+        return [(0, 0, w, half_h), (0, h - half_h, w, half_h)] if upright else \
+            [(0, 0, half_w, h), (w - half_w, 0, half_w, h)]
+    if count == 3:
+        if upright:
+            return [(0, 0, w, half_h), (0, h - half_h, half_w, half_h), (w - half_w, h - half_h, half_w, half_h)]
+        return [(0, 0, half_w, h), (w - half_w, 0, half_w, half_h), (w - half_w, h - half_h, half_w, half_h)]
+    return [(0, 0, half_w, half_h), (w - half_w, 0, half_w, half_h),
+            (0, h - half_h, half_w, half_h), (w - half_w, h - half_h, half_w, half_h)]
+
+
+def _collage_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
+    """Several photos on screen together, popping in one after another (on the beats where they'd have been cut)."""
+    fx = item.effects or {}
+    paths = [item.path, *map(Path, fx["collage"])][:4]
+    turns = [item.rotation, *(fx.get("turns") or [0] * len(fx["collage"]))]
+    appear = list(fx.get("appear") or [0.0] * len(paths))
+    seconds = item.seconds or s.photo_seconds
+    w, h = s.width, s.height
+    tiles = []
+    for path, turn, (x, y, tw, th) in zip(paths, turns, collage_tiles(len(paths), w, h)):
+        with Image.open(path) as img:
+            img = ImageOps.exif_transpose(img).convert("RGB").rotate(-turn, expand=True)
+            img.thumbnail((2400, 2400))
+            tiles.append((x, y, np.asarray(ImageOps.fit(img, (tw, th), Image.LANCZOS))))
+    frames = max(1, round(seconds * FPS))
+    layer = np.asarray(titles.draw(item.overlay, w, h)) if item.overlay and (
+        item.overlay.get("text") or item.overlay.get("sub")) else None
+
+    def feed(pipe) -> None:
+        for n in range(frames):
+            t = n / FPS
+            frame = np.full((h, w, 3), 12, np.uint8)
+            for (x, y, tile), start in zip(tiles, appear):
+                if t < start:
+                    continue
+                grow = min(1.0, (t - start) / POP)
+                grow = 1 - (1 - grow) ** 3  # quick at first, settling into place
+                if grow >= 1.0:
+                    frame[y:y + tile.shape[0], x:x + tile.shape[1]] = tile
+                    continue
+                scale = 0.82 + 0.18 * grow
+                th, tw = tile.shape[:2]
+                small = cv2.resize(tile, (max(1, round(tw * scale)), max(1, round(th * scale))))
+                oy, ox = y + (th - small.shape[0]) // 2, x + (tw - small.shape[1]) // 2
+                region = frame[oy:oy + small.shape[0], ox:ox + small.shape[1]]
+                frame[oy:oy + small.shape[0], ox:ox + small.shape[1]] = (region * (1 - grow) + small * grow).astype(np.uint8)
+            if layer is not None:
+                frame = titles.blend(frame, layer, titles.strength(t, seconds))
+            pipe.write(frame.tobytes())
+
+    inputs = [
+        "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}", "-r", str(FPS), "-i", "pipe:0",
+        "-f", "lavfi", "-t", f"{seconds:.3f}", "-i", "anullsrc=r=48000:cl=stereo",
+    ]
+    _encode_segment(inputs, "[0:v]format=yuv420p[v];[1:a]anull[a]", seconds, out, s, feed=feed)
+    return seconds
+
+
 # Photos move gently while on screen (the "Ken Burns" look). Each photo gets one of these moves, chosen from
 # its file name so it stays the same every time you make the video.
 ZOOM = 1.15  # how far in the moves go (15%)
@@ -431,7 +500,7 @@ def _segment_key(item: MediaItem, s: RenderSettings) -> str:
     parts = [SEGMENT_VERSION, item.kind, item.path, stat.st_mtime, stat.st_size, s.width, s.height, item.rotation,
              sorted((item.overlay or {}).items()), item.focus if tall(s) else None]
     if item.kind == "photo":
-        parts += [item.seconds or s.photo_seconds]
+        parts += [item.seconds or s.photo_seconds, sorted((item.effects or {}).items())]
     elif item.kind == "title":
         parts += [item.title]
     else:
@@ -455,6 +524,8 @@ def _prepare_segment(item: MediaItem, s: RenderSettings, cache_dir: Path, workdi
     tmp = workdir / f"{seg.stem}.mp4"
     if item.kind == "video":
         _video_segment(item, s, tmp)
+    elif (item.effects or {}).get("collage"):
+        _collage_segment(item, s, tmp)
     else:
         _photo_segment(item, s, tmp, workdir)
     shutil.move(tmp, seg)
