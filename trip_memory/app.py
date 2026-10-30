@@ -709,7 +709,7 @@ class Page:
             start = start if kept[0] <= start < end else kept[0]
         length = f"✂ {fmt_length(kept[1] - kept[0])}" if kept else fmt_length(it["duration"])
         ui.html(
-            f'<div id="{box}" class="tm-hover" data-start="{start:.2f}" data-end="{end:.2f}" data-rot="{it.get("rotation") or 0}" '
+            f'<div id="{box}" class="tm-hover" data-sound="{int(sound)}" data-start="{start:.2f}" data-end="{end:.2f}" data-rot="{it.get("rotation") or 0}" '
             f'style="position:relative;overflow:hidden;border-radius:4px;background:#222;{size}">'
             f'<img src="{thumb}" style="width:100%;height:100%;object-fit:contain">'
             f'<video data-src="{src}" {"" if sound else "muted "}playsinline preload="none" '
@@ -746,9 +746,9 @@ class Page:
 
     def close_cut(self, cut: dict) -> None:
         cut["open"] = False
-        if cut.get("box"):  # the Library picture plays silently again when you hover over it
+        if cut.get("box"):  # the Library picture plays by itself again when you hover over it
             ui.run_javascript(f"const b = document.getElementById('{cut['box']}'); if (b) {{ delete b.dataset.scrub; "
-                              f"const v = b.querySelector('video'); if (v) {{ v.muted = true; v.pause(); }} }}")
+                              f"const v = b.querySelector('video'); if (v) v.pause(); }}")
         cut["area"].clear()
         if cut.get("wide"):
             cut["tile"].classes(remove="w-96", add="w-36")
@@ -1001,7 +1001,7 @@ class Page:
         with ui.card().tight().classes("w-full" + ("" if it["included"] else " opacity-50")) as card:
             if it["thumb"]:
                 height = {2: 320, 3: 220}.get(self.library_columns, 150)  # fewer in a row: bigger pictures
-                cut = {"box": self.preview(it, f"width:100%;height:{height}px", start=self.hover_start(it))}
+                cut = {"box": self.preview(it, f"width:100%;height:{height}px", start=self.hover_start(it), sound=True)}
                 cut["area"] = ui.column().classes("w-full gap-1")  # the cutting handles, when you press ✂
             else:
                 ui.label("Analysing…").classes("w-full thumb flex items-center justify-center bg-gray-100 text-gray-400")
@@ -2984,6 +2984,7 @@ function tmVideo(box) {
 function tmPlayFrom(box, from) {
   const v = tmVideo(box);
   // With sound if allowed; the browser only allows sound after a first click on the page.
+  if (box.dataset.sound === '1') v.muted = false;  // try with sound again (it may have been refused before your first click)
   const go = () => { v.currentTime = from; v.play().catch(() => { v.muted = true; v.play().catch(() => {}); }); };
   if (v.readyState >= 1) go(); else v.addEventListener('loadedmetadata', go, {once: true});
 }
