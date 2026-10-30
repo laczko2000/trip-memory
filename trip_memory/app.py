@@ -2018,9 +2018,10 @@ class Page:
                 self.my_story_view(line)
             elif line["order"] != themes.TIME:
                 self.storyline_blocks_view(line)
-            with ui.row().classes("items-center gap-3"):
-                ui.switch("Finale: end with the most exciting shots", value=line["finale"],
-                          on_change=lambda e: self.set_finale(e.value))
+            if line["order"] != themes.STORY:  # my story ends with its last part, nothing after it
+                with ui.row().classes("items-center gap-3"):
+                    ui.switch("Finale: end with the most exciting shots", value=line["finale"],
+                              on_change=lambda e: self.set_finale(e.value))
             with ui.row().classes("w-full items-center gap-3"):
                 ui.button("Make the first cut", icon="auto_fix_high", on_click=self.run_auto_edit) \
                     .tooltip("Replaces the storyboard's order, trims and transitions; Undo brings them back")
@@ -2094,7 +2095,7 @@ class Page:
             return
         parts = story["parts"]
         total = self.video_seconds()
-        room = themes.part_room(total, line["finale"])
+        room = total  # the parts share the whole video: the last part is the end
         times = themes.fit_times(parts, room)
         counts = {b["key"]: b["count"] for b in blocks}
         with ui.row().classes("items-center gap-2"):
@@ -2111,10 +2112,6 @@ class Page:
                         .style(f"flex:{t};background:{colours.get(part['pace'], '#9b8afb')};"
                                f"border-right:2px solid white"):
                     ui.label(f"{n + 1}. {part['name']} {fmt_length(t)}").tooltip(f"{part['name']}: {fmt_length(t)}")
-            if line["finale"]:
-                with ui.element("div").classes("flex items-center px-1 overflow-hidden whitespace-nowrap") \
-                        .style(f"flex:{total - room};background:#e0662f"):
-                    ui.label(f"Finale {fmt_length(total - room)}")
         drag = ("this.style.opacity=0.5;event.dataTransfer.setData('text/plain','{src}');event.stopPropagation()")
         over = "event.preventDefault();this.style.outline='2px dashed #2563eb'"
         leave = "this.style.outline=''"
@@ -2259,8 +2256,7 @@ class Page:
             print(f"My story: asking the AI ({type(ai).__name__})…", flush=True)
             try:
                 prompt = director.story_prompt(idea, self._story_blocks_info(blocks), before[-4:] or None,
-                                               themes.part_room(self.video_seconds(),
-                                                                self.trip.storyline()["finale"]))
+                                               self.video_seconds())
                 answer = await self.stoppable(ai.story, prompt)
                 print(f"My story: the AI answered after {time.time() - started:.0f} s." if answer is not None else
                       "My story: stopped.", flush=True)
@@ -2299,12 +2295,10 @@ class Page:
         for p in story["parts"]:  # without the AI's times: by how many shots each part has
             if not p.get("seconds"):
                 p["seconds"] = sum(counts.get(e["key"], 0) for e in p["entries"]) ** 0.5 or 1
-        finale = bool(story.get("finale"))
-        for p, t in zip(story["parts"], themes.fit_times(story["parts"],
-                                                         themes.part_room(self.video_seconds(), finale))):
+        for p, t in zip(story["parts"], themes.fit_times(story["parts"], self.video_seconds())):
             p["seconds"] = t
         self.trip.checkpoint("story")
-        self.trip.set_storyline(story=story | {"idea": idea, "before": before}, finale=finale)
+        self.trip.set_storyline(story=story | {"idea": idea, "before": before})
         self.storyboard_view.refresh()
 
     def _edit_story(self, change) -> None:
@@ -2313,7 +2307,7 @@ class Page:
         parts = [dict(p, entries=[dict(e) for e in p["entries"]]) for p in story.get("parts") or []]
         change(parts)
         # Every part keeps its time; the total always stays the song's length (less the finale).
-        for p, t in zip(parts, themes.fit_times(parts, themes.part_room(self.video_seconds(), line["finale"]))):
+        for p, t in zip(parts, themes.fit_times(parts, self.video_seconds())):
             p["seconds"] = t
         story["parts"] = parts
         if self.wish_box is not None:
@@ -2322,10 +2316,8 @@ class Page:
         self.storyboard_view.refresh()
 
     def part_time(self, n: int, step: float) -> None:
-        line = self.trip.storyline()
-
         def change(parts):
-            times = themes.fit_times(parts, themes.part_room(self.video_seconds(), line["finale"]))
+            times = themes.fit_times(parts, self.video_seconds())
             for p, t in zip(parts, themes.change_time(times, n, times[n] + step)):
                 p["seconds"] = t
         self._edit_story(change)

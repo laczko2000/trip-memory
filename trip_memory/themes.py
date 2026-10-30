@@ -180,11 +180,8 @@ def chapters_for(storyline: dict, rows: list[dict]) -> tuple[list[dict], list[in
     story = storyline.get("story") or {}
     if order == STORY and not story.get("parts"):
         order = TIME  # no story made yet: as it happened
-    if order == STORY:
-        chapters, where = _story_chapters(story, rows, split)
-        if storyline.get("finale", True):
-            chapters.append({"kind": "finale", "what": "Finale"})
-        return chapters, where
+    if order == STORY:  # your parts in your order, the last one ends the video (no finale after it)
+        return _story_chapters(story, rows, split)
     if order == TIME:
         chapters.append({"kind": "theme", "what": "The whole trip"})
         where = [0 if block_of(r, split) in on else None for r in rows]

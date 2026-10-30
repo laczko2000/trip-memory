@@ -142,7 +142,7 @@ def test_each_part_gets_its_time_and_the_total_stays():
 
 
 
-def test_my_story_keeps_the_order_of_the_themes_in_a_part_and_in_the_finale():
+def test_my_story_keeps_the_order_of_the_themes_and_ends_with_the_last_one():
     from trip_memory import autoedit
 
     rows = [_row(n, "Boat") for n in range(10)] + [_row(20 + n, "Food & drink") for n in range(10)] + \
@@ -155,4 +155,4 @@ def test_my_story_keeps_the_order_of_the_themes_in_a_part_and_in_the_finale():
     ordered = autoedit.by_chapters([r | {"chapter": c} for r, c in zip(rows, where)], chapters)
     order = [r["theme"] for r in ordered]
     blocks = [k for k, _ in __import__("itertools").groupby(order)]
-    assert blocks == ["Sightseeing", "Boat", "Food & drink", "Sightseeing", "Boat", "Food & drink"]  # then the finale
+    assert blocks == ["Sightseeing", "Boat", "Food & drink"]  # no finale mixing them up after the last one

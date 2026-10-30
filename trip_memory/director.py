@@ -244,7 +244,7 @@ Answer:
     If the person names a particular moment inside a theme (e.g. "the big jumps", "falling in the water", "the
     sunset"), use pick "moment" and write what it looks like in "moment", in a few English words a photo caption
     would use (e.g. "a kitesurfer jumping high in the air"). Otherwise "moment" is "".
-- finale: true only if the person wants to end on the most exciting shots of the whole trip.
+- finale: always false (the last part ends the video; for an action ending, make a last part with "action" picks).
 Answer in JSON."""
 
 STORY_SCHEMA = {

@@ -59,6 +59,7 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **0.61.4:** *My story* ends with your last theme: there is no finale after it any more (it took the best shots of every theme and put them at the end, mixed). Your parts share the whole song, and inside each part the themes play strictly one after the other, in your order. Want an action ending? Make a last part with the *most exciting half* of a theme, or a moment.
 - **0.61.3:** *Find the rest* finds more. Each shot is compared with every shot you ticked (a jump from the left and one from the right each find their look-alikes, instead of being averaged into one), and your words count less the more you tick. The moment page now has three rows: *Marked*, *Suggested* (orange frame, with *Tick all suggested*: untick the wrong ones) and *Probably not*. It looks in exactly the shots the theme shows.
 - **0.61.2:** photo collages (3 or 4 quick photos together in lively music) never mix two themes of your story any more.
 - **0.61.1:** *My story* keeps your order everywhere: the themes inside a part play in the order you set them, and the finale (the most exciting shots, if switched on) now also goes theme by theme in that order instead of mixing them.
