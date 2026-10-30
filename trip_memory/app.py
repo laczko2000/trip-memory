@@ -1068,7 +1068,9 @@ class Page:
             ui.label("Choose a song first. Then play it and tap the right Shift key wherever you want a cut.") \
                 .classes("text-gray-500")
             return
+        self.trim_card(music)
         saved = song_taps.load(music, app_dir() / "music-taps")
+        ui.label("2. Pin the cuts").classes("font-semibold mt-2")
         ui.label(
             "Press Play and tap the RIGHT Shift key wherever you want the video to cut. Each tap puts a pin on the "
             "line below. Play it back to check: every pin makes a click as it passes. Scroll on the line to zoom in "
@@ -1097,6 +1099,57 @@ class Page:
         ui.timer(0.2, lambda: ui.run_javascript(f"tmTapInit({json.dumps(saved['taps'])}, 0); "
                                                 f"tm.tap.song = {json.dumps(music)}"), once=True)
         ui.timer(2.0, self.autosave_taps)  # pins are kept as you place them: no save button to forget
+
+    def trim_card(self, music: str) -> None:
+        """1. Cut off what you don't want at the start and end of the song: that part becomes the video's track."""
+        folder = app_dir() / "music-taps"
+        source = song_taps.trimmed_from(music, folder)
+        ui.label("1. Trim the song (if you like)").classes("font-semibold")
+        if source:
+            whole, start, end = source
+            with ui.row().classes("items-center gap-3"):
+                ui.label(f"✓ The track is {fmt_length(start)} to {fmt_length(end)} of {Path(whole).name}, with a short "
+                         "fade in and out.").classes("text-sm text-green-700")
+                ui.button("Trim again from the whole song", icon="content_cut",
+                          on_click=lambda: self.music_input.set_value(whole)).props("flat dense no-caps")
+            return
+        try:
+            whole = song_length(music)
+        except Exception:
+            return
+        ui.label("Drag the two ends to cut off the parts you don't want (a long intro, the ending). That part becomes "
+                 "the video's track; pins you placed in it come along.").classes("text-sm text-gray-600")
+        with ui.row().classes("w-full items-center gap-4 no-wrap"):
+            words = ui.label(f"0:00 to {fmt_length(whole)}").classes("text-sm w-32")
+            part = ui.range(min=0, max=round(whole, 1), step=0.1, value={"min": 0, "max": round(whole, 1)}) \
+                .classes("flex-grow")
+            part.on_value_change(lambda e: words.set_text(f"{fmt_length(e.value['min'])} to {fmt_length(e.value['max'])}"))
+        with ui.row().classes("items-center gap-2"):
+            ui.button("Listen from the start point", icon="play_arrow",
+                      on_click=lambda: self.listen_at(part.value["min"])).props("outline dense no-caps")
+            ui.button("Listen to the end", icon="play_arrow",
+                      on_click=lambda: self.listen_at(max(part.value["min"], part.value["max"] - 6))) \
+                .props("outline dense no-caps")
+            ui.button("Use this part as the track", icon="content_cut",
+                      on_click=lambda: self.trim_song(music, part.value["min"], part.value["max"], whole))
+
+    def listen_at(self, seconds: float) -> None:
+        ui.run_javascript(f"(() => {{ const a = document.getElementById('tm-song'); a.currentTime = {seconds:.2f}; "
+                          "if (a.paused) tmTapPlay(); }})()")
+
+    async def trim_song(self, music: str, start: float, end: float, whole: float) -> None:
+        if start < 0.05 and end > whole - 0.05:
+            ui.notify("Drag one of the ends first: the whole song is still chosen.", type="warning")
+            return
+        try:
+            track = await run.io_bound(song_taps.trim, music, start, end, app_dir() / "music-trimmed",
+                                       app_dir() / "music-taps")
+        except Exception as exc:
+            traceback.print_exc()
+            ui.notify(f"Could not trim the song: {exc}", type="negative")
+            return
+        self.music_input.set_value(track)
+        ui.notify(f"The track is now {fmt_length(start)} to {fmt_length(end)} of the song. Pin it below.", type="positive")
 
     @ui.refreshable
     def pin_summary(self, music: str, taps: list[float]) -> None:

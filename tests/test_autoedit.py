@@ -149,7 +149,7 @@ def test_pins_are_the_only_cuts_however_long_or_short():
     song.taps = [0.25, 0.5, 0.75, 1.0, 12.0, 12.25]  # a burst of quick cuts, a long 11 s shot, two more quick ones
     rows = [_clip(n, action=1.0, duration=8.0 if n == 4 else 3.0) for n in range(10)]
     limits = autoedit.Limits(max_video=2.0, max_photo=2.0, min_shot=1.0, cut_on="taps", storyline="date")
-    plan = autoedit.plan_to_music(rows, {}, song, limits, 14.0, 0.8, "Fade")
+    plan = autoedit.plan_to_music(rows, {}, song, limits, 20.0, 0.8, "Fade")
     cuts, begin = [], 0.0
     for shot in plan.shots[:-1]:
         overlap = transitions.seconds_of(shot.transition, 0.8)
@@ -302,3 +302,12 @@ def test_a_quick_run_of_photos_becomes_a_collage():
     assert abs(lead.seconds - (2.0 + 1 / 30)) < 1e-3  # the same time on screen as the four shots
     calm = [autoedit.Slot(s.start, s.end, 0.3) for s in slots]
     assert len(autoedit.collages(shots, calm, rows, 0.8)) == 6  # not in calm music
+
+
+def test_a_shorter_video_ends_on_your_pin_nearest_the_length():
+    song = _song()
+    song.taps = [2.0, 4.0, 6.0, 8.0, 10.5, 13.0, 15.5, 19.0]
+    rows = [_clip(n, action=1.0, duration=8.0) for n in range(12)]
+    limits = autoedit.Limits(max_video=4.0, max_photo=2.5, min_shot=1.0, cut_on="taps")
+    plan = autoedit.plan_to_music(rows, {}, song, limits, 14.0, 0.8, "Fade")
+    assert abs(plan.length - 13.0) < 0.05  # the pin at 13 s, not the bar line after 14 s

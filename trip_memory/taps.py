@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 import numpy as np
 
-from .beats import RATE, read_song
+from .beats import RATE, read_song, song_length
 
 EARLY, LATE = 0.2, 0.1  # without enough taps to learn from: the hit can be this far before or after a tap
 USUAL_EARLY, USUAL_LATE = 0.4, 0.15  # how far off anyone's taps can be (slow reactions, Bluetooth headphones)
@@ -38,7 +39,52 @@ def load(song: str, folder: Path) -> dict:
 def save(song: str, folder: Path, taps: list[float], final: bool) -> None:
     folder.mkdir(parents=True, exist_ok=True)
     clean = sorted({round(float(t), 3) for t in taps if t > 0})
-    _file(song, folder).write_text(json.dumps({"song": song, "taps": clean, "final": final}))
+    try:
+        data = json.loads(_file(song, folder).read_text())  # keeps where a trimmed track came from
+    except (OSError, ValueError):
+        data = {}
+    _file(song, folder).write_text(json.dumps({**data, "song": song, "taps": clean, "final": final}))
+
+
+def trimmed_from(song: str, folder: Path) -> tuple[str, float, float] | None:
+    """(the whole song, start, end) if this track is a part you cut out of a song."""
+    try:
+        data = json.loads(_file(song, folder).read_text())
+        source, start, end = data["source"], float(data["trim"][0]), float(data["trim"][1])
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        return None
+    return (source, start, end) if Path(source).is_file() else None
+
+
+def _mmss(seconds: float) -> str:
+    return f"{int(seconds // 60)}-{seconds % 60:04.1f}"
+
+
+def trim(song: str, start: float, end: float, out_dir: Path, folder: Path) -> str:
+    """Cut out the part of the song you want (start to end, in seconds) as the video's own track, with a short
+    fade in and a fade out where it was cut. Pins you placed in that part move along with it."""
+    from .tools import ffmpeg_paths
+
+    whole = song_length(song)
+    start, end = max(0.0, start), min(whole, end)
+    if end - start < 2:
+        raise ValueError("Keep at least a few seconds of the song.")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"{Path(song).stem} ({_mmss(start)} to {_mmss(end)}).m4a"
+    fades = []
+    if start > 0.05:
+        fades.append("afade=t=in:st=0:d=0.3")
+    if end < whole - 0.05:
+        fade = min(2.0, (end - start) / 4)
+        fades.append(f"afade=t=out:st={end - start - fade:.3f}:d={fade:.3f}")
+    subprocess.run([ffmpeg_paths()[0], "-y", "-loglevel", "error", "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
+                    "-i", song, "-vn", *(["-af", ",".join(fades)] if fades else []), "-c:a", "aac", "-b:a", "256k",
+                    str(out)], check=True, capture_output=True)
+    pins = [t - start for t in load(song, folder)["taps"] if start + 0.1 < t < end - 0.1]
+    save(str(out), folder, pins, True)
+    data = json.loads(_file(str(out), folder).read_text())
+    _file(str(out), folder).write_text(json.dumps({**data, "source": song, "trim": [start, end]}))
+    return str(out)
 
 
 def final_taps(song: str, folder: Path) -> list[float] | None:

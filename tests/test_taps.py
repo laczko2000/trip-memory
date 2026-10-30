@@ -39,3 +39,25 @@ def test_your_usual_delay_is_learned_and_taken_off():
     assert abs(taps.usual_delay(x, late) - 0.22) < 0.03
     snapped = taps.snap(x, late, np.arange(0.5, 19, 0.25))
     assert max(abs(s - w) for s, w in zip(snapped, wanted)) < 0.02
+
+
+def test_trim_the_song_and_keep_its_pins(tmp_path):
+    import subprocess
+
+    from trip_memory.beats import song_length
+    from trip_memory.tools import ffmpeg_paths
+
+    song = tmp_path / "song.wav"
+    subprocess.run([ffmpeg_paths()[0], "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=20",
+                    str(song)], check=True)
+    folder = tmp_path / "taps"
+    taps.save(str(song), folder, [3.0, 8.0, 12.5, 19.0], final=True)
+    part = taps.trim(str(song), 5.0, 15.0, tmp_path / "trimmed", folder)
+    assert abs(song_length(part) - 10.0) < 0.15
+    assert taps.final_taps(part, folder) == [3.0, 7.5]  # the pins inside the part, moved with it
+    assert taps.trimmed_from(part, folder) == (str(song), 5.0, 15.0)
+    taps.save(part, folder, [3.0, 7.5, 9.0], final=True)  # pinning the track later keeps where it came from
+    assert taps.trimmed_from(part, folder) == (str(song), 5.0, 15.0)
+    assert taps.trimmed_from(str(song), folder) is None
+    sound = taps.read_song(part)
+    assert np.abs(sound[:200]).max() < 0.2 and np.abs(sound[int(5 * RATE):int(5.1 * RATE)]).max() > 0.1  # fades in

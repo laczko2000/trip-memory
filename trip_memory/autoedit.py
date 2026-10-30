@@ -634,9 +634,14 @@ def plan_to_music(
     candidates = arrange(choose(rows), limits.storyline)
     end = song.duration if target is None or target >= song.duration else target
     if target is not None and target < song.duration:
-        bars = song.bar_starts()
-        later = bars[bars >= max(limits.min_shot, target - 2 * song.period)]
-        end = float(later[0]) if len(later) else target  # end on a bar line
+        taps = getattr(song, "taps", None) or []
+        near = [t for t in taps if abs(t - target) <= max(4.0, 0.15 * target) and t >= limits.min_shot]
+        if near:  # a shorter video ends on your pin closest to the length you asked for
+            end = float(min(near, key=lambda t: abs(t - target)))
+        else:
+            bars = song.bar_starts()
+            later = bars[bars >= max(limits.min_shot, target - 2 * song.period)]
+            end = float(later[0]) if len(later) else target  # end on a bar line
     best: tuple[list[Slot], list[int]] = ([], [])
     for longest in (None, limits.max_photo, max(limits.min_shot, limits.max_photo / 2)):
         slots = music_slots(song, limits, end, longest)
