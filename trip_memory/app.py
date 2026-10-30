@@ -32,7 +32,8 @@ from .tags import ALL_TAGS, EDITABLE_TAGS, TAG_GROUP
 OUTPUT_DIR = Path.home() / "Movies" / "Trip Memory"
 RESOLUTIONS = {"Full HD (1080p)": (1920, 1080), "HD (720p, faster)": (1280, 720)}
 PAGE_SIZE = 48
-STORIES_PER_PAGE = 8
+TILES_PER_PAGE = 60
+STORY_ROWS = 60
 STORY_PAGE_SIZE = 25
 DEFAULT_TRANSITION = "Default (from Make video)"
 ALL = "All"
@@ -100,7 +101,9 @@ class Page:
         self.trip: Trip | None = None
         self.all_items: list[dict] = []  # every file in the folder
         self.items: list[dict] = []  # the files you chose for this trip
-        self.choose_filters = {"day": ALL, "kind": ALL}
+        self.choose_filters = {"day": ALL, "kind": ALL, "show": ALL}
+        self.stale = False  # quick ticks in Choose files: the other tabs catch up when you open them
+        self.board_limit = STORY_ROWS  # Storyboard rows shown (more on request: a long list is slow to draw)
         self.choose_page = 1
         self.story_page = 1
         self.media_route: str | None = None
@@ -178,6 +181,7 @@ class Page:
             self.build_folder_row()
             with ui.tabs().classes("w-full") as tabs:
                 self.choose_tab = ui.tab("Choose files", icon="checklist")
+                self.panels = None
                 library_tab = ui.tab("Library", icon="photo_library")
                 people_tab = ui.tab("People", icon="people")
                 music_tab = ui.tab("Music", icon="graphic_eq")
@@ -186,7 +190,7 @@ class Page:
                 video_tab = ui.tab("Make video", icon="movie")
             self.library_tab = library_tab
             self.people_tab = people_tab
-            with ui.tab_panels(tabs, value=self.choose_tab).classes("w-full") as self.panels:
+            with ui.tab_panels(tabs, value=self.choose_tab, on_change=self.tab_opened).classes("w-full") as self.panels:
                 with ui.tab_panel(self.choose_tab):
                     self.choose_view()
                 with ui.tab_panel(library_tab):
@@ -310,16 +314,93 @@ class Page:
 
     # ---------- Choose files ----------
 
+    def tab_opened(self) -> None:
+        # Tabs are only built while open (a big trip would otherwise make the page very slow), so build this one now.
+        self.stale = False
+        self.refresh_all()
+
+    def showing(self, name: str) -> bool:
+        """Whether this tab is the one open (only the open tab is built)."""
+        if self.panels is None:
+            return name == "Choose files"
+        value = self.panels.value
+        return (value if isinstance(value, str) else getattr(value, "_props", {}).get("name")) == name
+
     def choose_shown(self) -> list[dict]:
         f = self.choose_filters
+        if f["show"] == "removed":
+            return self.trip.items(removed=True) if self.trip else []
+        sets: dict[int, int] = {}
+        for it in self.all_items:
+            sets[it["similar_set"] or -1] = sets.get(it["similar_set"] or -1, 0) + 1
         return [
             it
             for it in self.all_items
             if (f["day"] == ALL or it["day"] == f["day"]) and (f["kind"] == ALL or it["kind"] == f["kind"])
+            and (f["show"] != "sets" or sets.get(it["similar_set"] or -1, 0) > 1)
+            and (f["show"] != "ticked" or it["chosen"]) and (f["show"] != "unticked" or not it["chosen"])
         ]
+
+    def sort_out_card(self) -> None:
+        """The first pass over a big folder: throw out doubles and anything you don't want, before the slow steps."""
+        total = len(self.all_items)
+        chosen = sum(1 for it in self.all_items if it["chosen"])
+        removed = self.trip.removed_count()
+        size = sum(_file_size(it["path"]) for it in self.all_items)
+        doubles = total - len({it["similar_set"] for it in self.all_items})
+        with ui.card().classes("w-full bg-amber-50"):
+            ui.label("Step 1: sort out").classes("text-lg font-semibold")
+            self.sort_label = ui.label("").classes("text-sm")
+            self.sort_label.text = self.sort_text(total, chosen, size, removed)
+            ui.label(
+                f"Go through quickly and untick what you don't want. {doubles} files are doubles or triples of another "
+                "shot; Show → Only doubles and triples lists just those. Then remove the unticked files from the trip: "
+                "they disappear from every tab and are never analysed, so everything after this is faster. "
+                "Your original files on the Mac are not touched."
+            ).classes("text-sm text-gray-700")
+            with ui.row().classes("items-center gap-2"):
+                ui.button("Keep only the ⭐ of every set", icon="star", on_click=self.suggest).props("outline") \
+                    .tooltip("Untick every double or triple except the best one (sharpest, best exposed)")
+                ui.button(f"Remove {total - chosen} unticked from the trip", icon="delete_sweep",
+                          on_click=self.confirm_remove).props("color=negative" + ("" if total - chosen else " disable"))
+                if removed:
+                    ui.button(f"See removed ({removed})", icon="restore_from_trash",
+                              on_click=lambda: self.set_choose_filter("show", "removed")).props("flat")
+
+    def sort_text(self, total: int, chosen: int, size: int, removed: int) -> str:
+        amount = f"{size / 1e9:.1f} GB" if size >= 1e9 else f"{size / 1e6:.0f} MB"
+        return (f"{total} files in the trip ({amount}): {chosen} ticked, {total - chosen} unticked"
+                + (f" · {removed} removed earlier" if removed else ""))
+
+    def confirm_remove(self) -> None:
+        n = sum(1 for it in self.all_items if not it["chosen"])
+        with ui.dialog() as dialog, ui.card():
+            ui.label(f"Remove {n} unticked files from this trip?").classes("text-lg font-semibold")
+            ui.label("They disappear from every tab (Library, People, Stories, Storyboard) and are never analysed. "
+                     "The files themselves stay on your Mac, untouched. You can bring them back with See removed.") \
+                .classes("text-sm")
+            with ui.row().classes("justify-end w-full"):
+                ui.button("Cancel", on_click=dialog.close).props("flat")
+                ui.button(f"Remove {n}", icon="delete_sweep", on_click=lambda: (dialog.close(), self.remove_unchosen())) \
+                    .props("color=negative")
+        dialog.open()
+
+    def remove_unchosen(self) -> None:
+        n = self.trip.remove_unchosen()
+        ui.notify(f"Removed {n} files from the trip.", type="positive")
+        self.refresh_all()
+
+    def restore(self, paths: list[str]) -> None:
+        self.trip.restore(paths)
+        ui.notify(f"Brought back {len(paths)} files (unticked: tick the ones you want).", type="positive")
+        if not self.trip.removed_count():
+            self.choose_filters["show"] = ALL
+        self.refresh_all()
 
     @ui.refreshable
     def choose_view(self) -> None:
+        if not self.showing("Choose files"):
+            return
         if not self.all_items:
             ui.label("Open a trip folder to see its files here.").classes("text-gray-500")
             return
@@ -329,14 +410,12 @@ class Page:
             self.choose_filters["day"] = ALL
         shown = self.choose_shown()
         chosen = len(self.items)
+        self.sort_out_card()
         with ui.row().classes("w-full items-center gap-3"):
-            ui.label(f"{chosen} of {len(self.all_items)} files chosen").classes("text-lg font-semibold")
+            ui.label("Step 2:").classes("text-lg font-semibold")
             ui.button(
                 f"Analyse the {chosen} chosen files", icon="auto_awesome", on_click=self.analyse_chosen
             ).props("" if chosen else "disable")
-            ui.button("Suggest best shots", icon="star", on_click=self.suggest).props("outline").tooltip(
-                "Tick only the best shot of each set of similar shots"
-            )
         ui.label(
             "Files are grouped into stories (same time and place). Similar shots sit together in a box, and the ⭐ one "
             "is the app's suggestion. Hover over a video to play it."
@@ -347,17 +426,65 @@ class Page:
             ui.select({ALL: "Photos and videos", "photo": "Only photos", "video": "Only videos"},
                       value=self.choose_filters["kind"], label="Type",
                       on_change=lambda e: self.set_choose_filter("kind", e.value)).classes("min-w-40")
+            ui.select({ALL: "Everything", "sets": "Only doubles and triples", "ticked": "Only ticked",
+                       "unticked": "Only unticked", "removed": "Removed from the trip"},
+                      value=self.choose_filters["show"], label="Show",
+                      on_change=lambda e: self.set_choose_filter("show", e.value)).classes("min-w-52")
             ui.button("Tick all shown", icon="check_box", on_click=lambda: self.choose_shown_files(True)).props("flat dense")
             ui.button("Untick all shown", icon="check_box_outline_blank", on_click=lambda: self.choose_shown_files(False)).props("flat dense")
 
-        story_ids = sorted({it["story"] or 0 for it in shown})
-        pages = max(1, -(-len(story_ids) // STORIES_PER_PAGE))
+        if self.choose_filters["show"] == "removed":
+            self.removed_view(shown)
+            return
+        # Pages of about TILES_PER_PAGE files (a big story runs on over several pages), so even thousands stay quick.
+        pages_of: list[list[tuple[int, list[dict]]]] = [[]]
+        on_page = 0
+        for number in sorted({it["story"] or 0 for it in shown}):
+            members = [it for it in shown if (it["story"] or 0) == number]
+            sets: dict[int, list[dict]] = {}
+            for it in members:
+                sets.setdefault(it["similar_set"] or 0, []).append(it)
+            chunk: list[dict] = []
+            for group in sets.values():  # a set of look-alikes is never split
+                if on_page + len(group) > TILES_PER_PAGE and on_page:
+                    if chunk:
+                        pages_of[-1].append((number, chunk))
+                    pages_of.append([])
+                    chunk, on_page = [], 0
+                chunk += group
+                on_page += len(group)
+            if chunk:
+                pages_of[-1].append((number, chunk))
+        pages = len(pages_of)
         self.choose_page = min(self.choose_page, pages)
-        for number in story_ids[(self.choose_page - 1) * STORIES_PER_PAGE : self.choose_page * STORIES_PER_PAGE]:
-            self.story_block(number, [it for it in shown if (it["story"] or 0) == number])
         if pages > 1:
             ui.pagination(1, pages, direction_links=True, value=self.choose_page,
-                          on_change=lambda e: self.go_to_choose_page(e.value))
+                          on_change=lambda e: self.go_to_choose_page(e.value)).props("max-pages=12")
+        for number, members in pages_of[self.choose_page - 1]:
+            self.story_block(number, members)
+        if pages > 1:
+            ui.pagination(1, pages, direction_links=True, value=self.choose_page,
+                          on_change=lambda e: self.go_to_choose_page(e.value)).props("max-pages=12")
+
+    def removed_view(self, removed: list[dict]) -> None:
+        if not removed:
+            ui.label("Nothing removed.").classes("text-gray-500")
+            return
+        with ui.row().classes("items-center gap-2"):
+            ui.label(f"{len(removed)} files removed from the trip").classes("font-semibold")
+            ui.button("Bring them all back", icon="restore",
+                      on_click=lambda: self.restore([it["path"] for it in removed])).props("outline dense")
+        with ui.row().classes("w-full gap-2"):
+            for it in removed[:120]:
+                with ui.column().classes("w-36 gap-0"):
+                    if it["thumb"]:
+                        ui.image(data_url(it["thumb"])).props("fit=contain").style("width:144px;height:96px") \
+                            .classes("rounded bg-gray-800")
+                    else:
+                        ui.label(Path(it["path"]).name).classes("text-xs w-36 h-24 bg-gray-100 p-1 break-all")
+                    ui.button("Bring back", on_click=lambda p=it["path"]: self.restore([p])).props("flat dense size=sm")
+        if len(removed) > 120:
+            ui.label(f"…and {len(removed) - 120} more (Bring them all back covers them too).").classes("text-sm")
 
     def story_block(self, number: int, items: list[dict]) -> None:
         first, last = datetime.fromisoformat(items[0]["taken_at"]).astimezone(), datetime.fromisoformat(items[-1]["taken_at"]).astimezone()
@@ -388,12 +515,12 @@ class Page:
                                 self.choose_tile(it, in_set=True)
 
     def choose_tile(self, it: dict, in_set: bool) -> None:
-        with ui.column().classes("w-36 gap-0" + ("" if it["chosen"] else " opacity-40")):
+        with ui.column().classes("w-36 gap-0" + ("" if it["chosen"] else " opacity-40")) as tile:
             self.preview(it, "width:144px;height:96px", start=(it["duration"] or 0) * 0.3)
             with ui.row().classes("items-center gap-0 no-wrap"):
                 ui.checkbox(
                     value=bool(it["chosen"]),
-                    on_change=lambda e, path=it["path"]: self.choose_paths([path], e.value),
+                    on_change=lambda e, it=it, tile=tile: self.quick_tick(it, e.value, tile),
                 ).props("dense size=xs")
                 rotate_buttons(lambda degrees, path=it["path"]: self.rotate(path, degrees))
                 star = "⭐ " if in_set and it["best"] else ""
@@ -432,7 +559,7 @@ class Page:
     def keep_best(self, members: list[dict]) -> None:
         self.trip.set_chosen([m["path"] for m in members if not m["best"]], False)
         self.trip.set_chosen([m["path"] for m in members if m["best"]], True)
-        self.refresh_all()
+        self.refresh_choose()
 
     async def rotate(self, path: str, degrees: int) -> None:
         try:
@@ -447,13 +574,32 @@ class Page:
 
     def choose_paths(self, paths: list[str], chosen: bool) -> None:
         self.trip.set_chosen(paths, chosen)
-        self.refresh_all()
+        self.refresh_choose()
+
+    def quick_tick(self, it: dict, chosen: bool, tile) -> None:
+        """Tick or untick one file at once, without rebuilding the page (fast with thousands of files)."""
+        if bool(it["chosen"]) == chosen:
+            return
+        self.trip.set_chosen([it["path"]], chosen)
+        it["chosen"] = int(chosen)
+        tile.classes(remove="opacity-40") if chosen else tile.classes(add="opacity-40")
+        self.items = [x for x in self.all_items if x["chosen"]]
+        self.stale = True
+        if getattr(self, "sort_label", None) is not None:
+            total, ticked = len(self.all_items), len(self.items)
+            self.sort_label.text = self.sort_text(total, ticked, sum(_file_size(x["path"]) for x in self.all_items),
+                                                  self.trip.removed_count())
+
+    def refresh_choose(self) -> None:
+        """After ticking in Choose files: redraw just this tab; the others catch up when you open them."""
+        self.reload()
+        self.stale = True
+        self.choose_view.refresh()
 
     def set_choose_filter(self, key: str, value: str) -> None:
         self.choose_filters[key] = value
         self.choose_page = 1
         self.story_page = 1
-        self.media_route: str | None = None
         self.choose_view.refresh()
 
     def go_to_choose_page(self, page: int) -> None:
@@ -462,7 +608,7 @@ class Page:
 
     def choose_shown_files(self, chosen: bool) -> None:
         self.trip.set_chosen([it["path"] for it in self.choose_shown()], chosen)
-        self.refresh_all()
+        self.refresh_choose()
 
     # ---------- Library ----------
 
@@ -472,7 +618,7 @@ class Page:
 
     @ui.refreshable
     def filters_view(self) -> None:
-        if not self.items:
+        if not self.items or not self.showing("Library"):
             return
         opts = self.options()
         with ui.row().classes("w-full items-end gap-3"):
@@ -500,6 +646,8 @@ class Page:
 
     @ui.refreshable
     def gallery(self) -> None:
+        if not self.showing("Library"):
+            return
         if not self.items:
             if self.trip:
                 ui.label("Nothing to show yet.").classes("text-gray-500")
@@ -607,6 +755,8 @@ class Page:
 
     @ui.refreshable
     def people_view(self) -> None:
+        if not self.showing("People"):
+            return
         if not self.trip:
             ui.label("Open a trip first.").classes("text-gray-500")
             return
@@ -832,7 +982,8 @@ class Page:
 
     @ui.refreshable
     def director_card(self) -> None:
-        if not self.trip:
+        if not self.trip or not self.showing("Stories"):
+            self.ai_bar = None
             return
         ai = load_settings().get("ai", {})
         provider = ai.get("provider", "ollama")
@@ -1004,6 +1155,8 @@ class Page:
 
     @ui.refreshable
     def stories_view(self) -> None:
+        if not self.showing("Stories"):
+            return
         if not self.trip:
             ui.label("Open a trip first.").classes("text-gray-500")
             return
@@ -1079,6 +1232,8 @@ class Page:
 
     @ui.refreshable
     def storyboard_view(self) -> None:
+        if not self.showing("Storyboard"):
+            return
         if not self.trip:
             ui.label("Open a trip first.").classes("text-gray-500")
             return
@@ -1094,8 +1249,15 @@ class Page:
             "Use the arrows to change the order. For videos, drag the two ends of the bar to choose which part to keep. "
             "The transition setting is for the cut after that clip."
         ).classes("text-sm text-gray-600")
-        for n, it in enumerate(board, 1):  # one long list you scroll through
+        for n, it in enumerate(board[: self.board_limit], 1):  # one long list you scroll through
             self.story_row(n, it, last=n == len(board))
+        if len(board) > self.board_limit:
+            ui.button(f"Show {min(STORY_ROWS, len(board) - self.board_limit)} more of {len(board) - self.board_limit} left",
+                      icon="expand_more", on_click=self.more_board).props("outline").classes("w-full")
+
+    def more_board(self) -> None:
+        self.board_limit += STORY_ROWS
+        self.storyboard_view.refresh()
 
     def auto_edit_card(self) -> None:
         music = self.music_path()
@@ -1950,6 +2112,18 @@ function tmTapGet() { return tm.tap.pins.slice().sort((a, b) => a - b); }
 function tmTapSet(pins) { tm.tap.pins = pins.slice().sort((a, b) => a - b); tm.tap.sel = -1; tmTapUnschedule(); tmTapDraw(); }
 </script>
 """
+
+
+_sizes: dict[str, int] = {}
+
+
+def _file_size(path: str) -> int:
+    if path not in _sizes:
+        try:
+            _sizes[path] = Path(path).stat().st_size
+        except OSError:
+            _sizes[path] = 0
+    return _sizes[path]
 
 
 def serve_song(path: str) -> str:

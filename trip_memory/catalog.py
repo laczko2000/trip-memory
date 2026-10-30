@@ -96,7 +96,8 @@ CREATE TABLE IF NOT EXISTS items (
     effects TEXT,
     effects_why TEXT,
     ai_caption TEXT,
-    ai_score INTEGER
+    ai_score INTEGER,
+    removed INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS story_info (
     key TEXT PRIMARY KEY,  -- the story's first file
@@ -163,7 +164,7 @@ class Trip:
             "look_group INTEGER", "tags_done INTEGER DEFAULT 0", "seconds REAL", "curves TEXT",
             "clip_sound INTEGER DEFAULT 0", "clip_volume REAL DEFAULT 1.0", "cut_out INTEGER DEFAULT 0", "subjects TEXT",
             "transition_why TEXT", "camera_moves TEXT", "speed REAL DEFAULT 1.0", "speed_why TEXT", "fps REAL",
-            "effects TEXT", "effects_why TEXT", "ai_caption TEXT", "ai_score INTEGER",
+            "effects TEXT", "effects_why TEXT", "ai_caption TEXT", "ai_score INTEGER", "removed INTEGER DEFAULT 0",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
@@ -183,9 +184,10 @@ class Trip:
             self.db.execute(sql, args)
             self.db.commit()
 
-    def items(self) -> list[dict]:
-        """All items in date order, with the names of the (known) people in them."""
-        rows = [dict(r) for r in self.query("SELECT * FROM items ORDER BY taken_at, path")]
+    def items(self, removed: bool = False) -> list[dict]:
+        """All items in date order, with the names of the (known) people in them. Files you removed from the trip
+        are left out (or, with removed=True, only those are given)."""
+        rows = [dict(r) for r in self.query("SELECT * FROM items WHERE removed = ? ORDER BY taken_at, path", (int(removed),))]
         people = self._people_status()
         by_path: dict[str, set[int]] = {}
         for f in self.query("SELECT path, person_id FROM faces WHERE person_id IS NOT NULL"):
@@ -342,6 +344,28 @@ class Trip:
             self.db.executemany("UPDATE items SET included = ?, cut_out = 0, position = NULL WHERE path = ?",
                                 [(int(included), p) for p in paths])
             self.db.commit()
+
+    def remove_unchosen(self) -> int:
+        """Take every file that isn't ticked out of the trip: it disappears from every tab and is never analysed.
+        The file itself stays where it is on your computer. Returns how many were removed."""
+        with self._lock:
+            n = self.db.execute("UPDATE items SET removed = 1, included = 0, position = NULL "
+                                "WHERE chosen = 0 AND removed = 0").rowcount
+            self.db.execute("DELETE FROM faces WHERE path IN (SELECT path FROM items WHERE removed = 1)")
+            self.db.commit()
+        self._group_stories()
+        return n
+
+    def restore(self, paths: list[str]) -> None:
+        """Bring removed files back into the trip (unticked, so you can tick the ones you want)."""
+        with self._lock:
+            self.db.executemany("UPDATE items SET removed = 0, chosen = 0, included = 1, faces_done = 0 WHERE path = ?",
+                                [(p,) for p in paths])
+            self.db.commit()
+        self._group_stories()
+
+    def removed_count(self) -> int:
+        return self.query("SELECT COUNT(*) AS n FROM items WHERE removed = 1")[0]["n"]
 
     def set_chosen(self, paths: list[str], chosen: bool) -> None:
         """Choose which files of the folder belong to this trip (only those are analysed and used)."""
@@ -597,7 +621,7 @@ class Trip:
             with self._lock:
                 self.db.executemany("UPDATE items SET thumb = NULL WHERE path = ?", [(path,) for path in stale])
                 self.db.commit()
-        todo = self.query("SELECT path, kind, duration, rotation FROM items WHERE thumb IS NULL ORDER BY taken_at")
+        todo = self.query("SELECT path, kind, duration, rotation FROM items WHERE thumb IS NULL AND removed = 0 ORDER BY taken_at")
         for i, row in enumerate(todo):
             p.fraction = i / len(todo)
             p.message = f"Making previews: {i + 1} of {len(todo)}"
@@ -617,13 +641,14 @@ class Trip:
             self.suggest_selection()  # a new trip starts with the best shot of each similar set ticked
 
     def _group_stories(self) -> None:
-        for row in self.query("SELECT path, thumb FROM items WHERE thumb IS NOT NULL AND dhash IS NULL"):
+        for row in self.query("SELECT path, thumb FROM items WHERE thumb IS NOT NULL AND dhash IS NULL AND removed = 0"):
             try:
                 dhash, colours, sharp = stories.fingerprint(row["thumb"])
             except OSError:
                 continue
             self.execute("UPDATE items SET dhash = ?, colours = ?, sharpness = ? WHERE path = ?", (dhash, colours, sharp, row["path"]))
-        rows = [dict(r) for r in self.query("SELECT path, kind, taken_at, duration, lat, lon, dhash, colours, sharpness FROM items")]
+        rows = [dict(r) for r in self.query(
+            "SELECT path, kind, taken_at, duration, lat, lon, dhash, colours, sharpness FROM items WHERE removed = 0")]
         groups = stories.group(rows)
         with self._lock:
             self.db.executemany(
@@ -635,7 +660,7 @@ class Trip:
     def suggest_selection(self) -> None:
         """Tick only the best shot of each set of similar shots (single shots stay ticked)."""
         with self._lock:
-            self.db.execute("UPDATE items SET chosen = best")
+            self.db.execute("UPDATE items SET chosen = best WHERE removed = 0")
             self.db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('suggested', '1')")
             self.db.commit()
 
@@ -790,7 +815,7 @@ class Trip:
             clips = []
             for row in batch:
                 try:
-                    clips.append(self._ai_frames(row))
+                    clips.append(self._ai_frames(row, getattr(ai, "frames", 3), getattr(ai, "size", 512)))
                 except Exception as exc:
                     clips.append([])
                     p.notes.append(f"Could not read {Path(row['path']).name} for the AI: {exc}")
@@ -807,18 +832,25 @@ class Trip:
                 self.db.commit()
         p.message = f"The AI described {done} files."
 
-    def _ai_frames(self, row) -> list[bytes]:
-        """Small pictures for the AI: the photo's preview, or three frames spread through a video."""
+    def _ai_frames(self, row, count: int = 3, size: int = 512) -> list[bytes]:
+        """Small pictures for the AI: the photo's preview, or a few frames spread through a video."""
         if row["kind"] == "photo":
-            return [Path(row["thumb"]).read_bytes()]
+            if size >= 480:
+                return [Path(row["thumb"]).read_bytes()]
+            with Image.open(row["thumb"]) as img, tempfile.SpooledTemporaryFile() as out:
+                img.thumbnail((size, size))
+                img.convert("RGB").save(out, "JPEG", quality=80)
+                out.seek(0)
+                return [out.read()]
         duration = row["duration"] or 0
         frames = []
+        shares = (0.2, 0.5, 0.8) if count >= 3 and duration >= 3 else (0.5,)
         with tempfile.TemporaryDirectory() as tmp:
-            for i, share in enumerate((0.2, 0.5, 0.8) if duration >= 3 else (0.5,)):
+            for i, share in enumerate(shares):
                 out = Path(tmp) / f"{i}.jpg"
                 subprocess.run(
                     [ffmpeg_paths()[0], "-loglevel", "error", "-y", "-ss", f"{duration * share:.2f}", "-i", row["path"],
-                     "-frames:v", "1", "-vf", rotate_filter(row["rotation"] or 0) + "scale=512:-2", "-q:v", "5", str(out)],
+                     "-frames:v", "1", "-vf", rotate_filter(row["rotation"] or 0) + f"scale={size}:-2", "-q:v", "5", str(out)],
                     capture_output=True,
                 )
                 if out.exists():

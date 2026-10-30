@@ -134,6 +134,8 @@ def ollama_models() -> tuple[list[str], list[str]] | None:
 
 class Ollama:
     batch = 1  # small local models describe one clip at a time best
+    frames = 1  # one small picture per clip: a Mac without a big graphics card reads each picture slowly
+    size = 384
 
     def __init__(self, model: str):
         if not model:
@@ -145,7 +147,8 @@ class Ollama:
         if images:
             message["images"] = [base64.b64encode(i).decode() for i in images]
         answer = _ollama("/api/chat", {"model": self.model, "messages": [message], "stream": False, "format": schema,
-                                       "options": {"temperature": 0.2}})
+                                       "keep_alive": "30m",  # stay loaded between clips (loading takes the longest)
+                                       "options": {"temperature": 0.2, "num_predict": 400 if images else 1500}})
         try:
             return json.loads(answer["message"]["content"])
         except (KeyError, ValueError) as exc:
@@ -163,6 +166,8 @@ class Ollama:
 
 class Claude:
     batch = 6  # several clips per request: cheaper, and it can compare them
+    frames = 3
+    size = 512
 
     def __init__(self, api_key: str = "", model: str = CLAUDE_MODEL):
         try:

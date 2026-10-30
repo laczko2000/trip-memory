@@ -312,3 +312,26 @@ def test_previews_made_before_a_turn_are_made_again(tmp_path):
     assert item["thumb"].endswith("_90.jpg")
     with Image.open(item["thumb"]) as img:
         assert img.height > img.width
+
+
+def test_unticked_files_can_be_removed_from_the_trip_and_brought_back(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    for n, colour in enumerate(("red", "red", "blue")):
+        _gps_photo(trip_dir / f"{n}.jpg", f"2025:07:03 10:0{n}:00", 38.7223, -9.1393, colour)
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    gone = trip_dir / "1.jpg"
+    trip.set_chosen([str(gone)], False)
+    assert trip.remove_unchosen() == 1
+    assert str(gone) not in [i["path"] for i in trip.items()] and gone.exists()  # out of the trip, not off the disk
+    assert [i["path"] for i in trip.items(removed=True)] == [str(gone)]
+    assert all(str(gone) not in [i["path"] for i in s["items"]] for s in trip.stories())
+    trip.suggest_selection()
+    trip.prepare()  # opening the folder again doesn't bring it back
+    assert str(gone) not in [i["path"] for i in trip.items()]
+    trip.restore([str(gone)])
+    back = [i for i in trip.items() if i["path"] == str(gone)]
+    assert back and not back[0]["chosen"] and trip.removed_count() == 0
