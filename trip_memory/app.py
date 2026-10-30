@@ -4354,6 +4354,21 @@ function tmStop(box) {
   v.style.display = 'none';
 }
 let tmPlaying = null;
+// Dragging a clip or a theme near the top or bottom of the window scrolls the page, faster the closer you get.
+let tmDragY = null, tmDragTimer = null;
+document.addEventListener('dragover', (e) => { tmDragY = e.clientY; });
+document.addEventListener('dragstart', () => {
+  clearInterval(tmDragTimer);
+  tmDragTimer = setInterval(() => {
+    if (tmDragY === null) return;
+    const edge = 120, h = window.innerHeight;
+    if (tmDragY < edge) window.scrollBy(0, -Math.ceil(30 * (edge - tmDragY) / edge));
+    else if (tmDragY > h - edge) window.scrollBy(0, Math.ceil(30 * (tmDragY - (h - edge)) / edge));
+  }, 16);
+});
+const tmDragDone = () => { clearInterval(tmDragTimer); tmDragTimer = null; tmDragY = null; };
+document.addEventListener('dragend', tmDragDone);
+document.addEventListener('drop', tmDragDone);
 // After you cut a clip: its pictures everywhere on the page play only the kept part and show its new length.
 function tmShowCut(id, start, end, thumb, words) {
   for (const box of document.querySelectorAll(`.tm-hover[id$="-${id}"]`)) {
