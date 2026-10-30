@@ -1334,7 +1334,11 @@ class Page:
 
     def use_storyline(self, index: int) -> None:
         self.trip.apply_storyline(index)
-        ui.notify("Stories put in this order. Run Make a first cut in the Storyboard to use it.", type="positive")
+        if self.auto_limits.storyline != "stories":
+            # A teaser or date order would pull shots out of the storyline's stories.
+            self.set_limit("storyline", "stories")
+        ui.notify("Stories put in this order; the Storyboard now follows it, story by story. "
+                  "Make a first cut again to fit it to the music.", type="positive")
         self.refresh_all()
 
     @ui.refreshable

@@ -174,9 +174,11 @@ class Trip:
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
             except sqlite3.OperationalError:
                 pass
-        for column in ("theme TEXT", "idea TEXT", "plan_notes TEXT"):
+        for column in ("theme TEXT", "idea TEXT", "plan_notes TEXT", "ai_name TEXT"):
             try:
                 self.db.execute(f"ALTER TABLE story_info ADD COLUMN {column}")
+                if column == "ai_name TEXT":
+                    self._split_ai_names()
             except sqlite3.OperationalError:
                 pass
         (self.dir / "folder.txt").write_text(str(self.folder))
@@ -290,18 +292,29 @@ class Trip:
         stories = self.stories(items)
         off = {r["path"] for s in stories if not s["enabled"] for r in s["items"]}
         rank = {r["path"]: n for n, s in enumerate(stories) for r in s["items"]}
-        rows = [it for it in items if it["chosen"] and it["included"] and not it["cut_out"] and it["path"] not in off]
+        left_out = self._left_out_by_plan(stories)
+        rows = [it for it in items if it["chosen"] and it["included"] and not it["cut_out"]
+                and it["path"] not in off and it["path"] not in left_out]
+
+        def order(r: dict) -> tuple:  # by story, then the story's plan, then time
+            return rank.get(r["path"], 0), r["plan_pos"] is None, r["plan_pos"] or 0, r["taken_at"]
+
         placed = sorted((r for r in rows if r["position"] is not None), key=lambda r: r["position"])
-        rest = sorted((r for r in rows if r["position"] is None), key=lambda r: (rank.get(r["path"], 0), r["taken_at"]))
-        # Anything not placed yet goes in by story and time: after the last placed file that comes before it.
+        rest = sorted((r for r in rows if r["position"] is None), key=order)
+        # Anything not placed yet goes in by story and plan: after the last placed file that comes before it.
         for r in rest:
-            key = (rank.get(r["path"], 0), r["taken_at"])
+            key = order(r)
             at = 0
             for i, p in enumerate(placed):
-                if (rank.get(p["path"], 0), p["taken_at"]) <= key:
+                if order(p) <= key:
                     at = i + 1
             placed.insert(at, r)
         return placed
+
+    @staticmethod
+    def _left_out_by_plan(stories: list[dict]) -> set[str]:
+        """Shots a story's plan leaves out: they stay out of the storyboard and Auto-edit (your selection keeps them)."""
+        return {it["path"] for s in stories if s["planned"] for it in s["items"] if not it["plan_role"]}
 
     def media_items(self, chapters: bool = False) -> list[MediaItem]:
         """What the video is made from, in storyboard order, optionally with a title card for each day."""
@@ -518,13 +531,16 @@ class Trip:
 
     def auto_edit_pool(self) -> list[dict]:
         """What Auto-edit picks from: your selection (ticked in Choose files and "In the video" in the Library),
-        story by story in your story order, leaving out stories you switched off."""
+        story by story in your story order, leaving out stories you switched off and shots a story's plan
+        leaves out."""
         items = self.items()
+        stories = self.stories(items)
+        left_out = self._left_out_by_plan(stories)
         pool = []
-        for rank, story in enumerate(self.stories(items)):
+        for rank, story in enumerate(stories):
             if story["enabled"]:
                 for r in story["items"]:
-                    if r["chosen"] and r["included"]:
+                    if r["chosen"] and r["included"] and r["path"] not in left_out:
                         pool.append(r | {"story_rank": rank, "story_name": story["name"]})
         return pool
 
@@ -954,7 +970,9 @@ class Trip:
             auto = story_name(members)
             result.append({
                 "key": key, "number": number, "items": members, "auto_name": auto,
-                "name": saved.get("name") or saved.get("theme") or auto, "renamed": bool(saved.get("name")),
+                # Your own name first, then the storyline's you chose, then the story plan's theme.
+                "name": saved.get("name") or saved.get("ai_name") or saved.get("theme") or auto,
+                "renamed": bool(saved.get("name")),
                 "theme": saved.get("theme"), "idea": saved.get("idea"),
                 "notes": json.loads(saved["plan_notes"]) if saved.get("plan_notes") else {},
                 "planned": any(m["plan_role"] for m in members),
@@ -963,6 +981,15 @@ class Trip:
             })
         placed = sorted((s for s in result if s["position"] is not None), key=lambda s: s["position"])
         return placed + [s for s in result if s["position"] is None]
+
+    def _split_ai_names(self) -> None:
+        """Older versions saved a storyline's story names as if you had typed them, so a later storyline could
+        not rename them: keep those as the AI's names (once, when updating)."""
+        rows = self.db.execute("SELECT value FROM meta WHERE key = 'storylines'").fetchall()
+        names = json.loads(rows[0][0]).get("names", {}) if rows else {}
+        for key, name in names.items():
+            self.db.execute("UPDATE story_info SET ai_name = name, name = NULL WHERE key = ? AND name = ?", (key, name))
+        self.db.commit()
 
     def _story_info(self, key: str) -> None:
         self.execute("INSERT OR IGNORE INTO story_info (key) VALUES (?)", (key,))
@@ -1131,6 +1158,9 @@ class Trip:
             self.db.execute("INSERT OR IGNORE INTO story_info (key) VALUES (?)", (story["key"],))
             self.db.execute("UPDATE story_info SET theme = ?, idea = ?, plan_notes = ? WHERE key = ?",
                             (plan["theme"] or None, plan["idea"] or None, json.dumps(notes), story["key"]))
+            # A new plan may use shots the last first cut left out: they come back.
+            self.db.executemany("UPDATE items SET cut_out = 0 WHERE path = ?", [(p,) for _, _, p in rows])
+            self._replace_in_storyboard([it["path"] for it in story["items"]])
             self.db.commit()
 
     def set_plan_role(self, path: str, role: str | None) -> None:
@@ -1138,7 +1168,8 @@ class Trip:
         if role is None:
             self.execute("UPDATE items SET plan_role = NULL, plan_pos = NULL WHERE path = ?", (path,))
             return
-        self.execute("UPDATE items SET plan_role = ?, plan_pos = COALESCE(plan_pos, "
+        # A shot added to the plan comes back into the storyboard, even if the last first cut left it out.
+        self.execute("UPDATE items SET plan_role = ?, cut_out = 0, plan_pos = COALESCE(plan_pos, "
                      "(SELECT COALESCE(MAX(plan_pos), 0) + 1 FROM items)) WHERE path = ?", (role, path))
 
     def move_in_plan(self, path: str, steps: int) -> None:
@@ -1153,6 +1184,28 @@ class Trip:
         i = order.index(path)
         order.insert(max(0, min(len(order) - 1, i + steps)), order.pop(i))
         self.db_write_many("UPDATE items SET plan_pos = ? WHERE path = ?", [(n, p) for n, p in enumerate(order)])
+        with self._lock:
+            self._replace_in_storyboard(order)
+            self.db.commit()
+
+    def _replace_in_storyboard(self, paths: list[str]) -> None:
+        """After a story's plan changed: its shots take their new plan order in the storyboard, where the
+        story's first placed shot was. (Call with the lock held.)"""
+        if not paths:
+            return
+        marks = ",".join("?" * len(paths))
+        first = self.db.execute(f"SELECT MIN(position) FROM items WHERE path IN ({marks})", paths).fetchone()[0]
+        if first is None:
+            return  # not in the storyboard's own order yet: it follows the plan anyway
+        rows = self.db.execute(f"SELECT path, plan_pos, taken_at FROM items WHERE path IN ({marks}) "
+                               "AND plan_role IS NOT NULL", paths).fetchall()
+        planned = [r[0] for r in sorted(rows, key=lambda r: (r[1], r[2]))]
+        self.db.execute(f"UPDATE items SET position = NULL WHERE path IN ({marks})", paths)
+        # Spread the story's shots just after the story's old start, before whatever came next.
+        nxt = self.db.execute("SELECT MIN(position) FROM items WHERE position > ?", (first,)).fetchone()[0]
+        step = ((nxt if nxt is not None else first + len(planned) + 1) - first) / (len(planned) + 1)
+        self.db.executemany("UPDATE items SET position = ? WHERE path = ?",
+                            [(first + step * n, p) for n, p in enumerate(planned)])
 
     def forget_plan(self, key: str) -> None:
         story = next((s for s in self.stories() if s["key"] == key), None)
@@ -1199,22 +1252,21 @@ class Trip:
 
     def apply_storyline(self, index: int) -> None:
         """Put the stories in this storyline's order, switch off the ones it leaves out, and give stories you
-        haven't named yourself the AI's names."""
+        haven't named yourself the AI's names. The storyboard then follows it until the next first cut."""
         saved = self.saved_storylines()
         if not saved or not 0 <= index < len(saved["storylines"]):
             return
         keys = [s["key"] for s in self.stories()]
         chosen = [k for k in saved["storylines"][index]["stories"] if k in keys]
         rest = [k for k in keys if k not in chosen]
-        info = {r["key"]: dict(r) for r in self.query("SELECT * FROM story_info")}
         with self._lock:
             for n, key in enumerate(chosen + rest):
                 self.db.execute("INSERT OR IGNORE INTO story_info (key) VALUES (?)", (key,))
-                self.db.execute("UPDATE story_info SET position = ?, enabled = ? WHERE key = ?", (n, int(key in chosen), key))
-                name = saved["names"].get(key)
-                if name and not info.get(key, {}).get("name"):
-                    self.db.execute("UPDATE story_info SET name = ? WHERE key = ?", (name, key))
+                self.db.execute("UPDATE story_info SET position = ?, enabled = ?, ai_name = ? WHERE key = ?",
+                                (n, int(key in chosen), saved["names"].get(key), key))
             self.db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('storyline_used', ?)", (str(index),))
+            # The storyboard starts again from this storyline: the last first cut's order and left-outs go.
+            self.db.execute("UPDATE items SET position = NULL, cut_out = 0")
             self.db.commit()
 
     def storyline_used(self) -> int | None:

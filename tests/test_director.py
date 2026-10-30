@@ -147,3 +147,61 @@ def test_montage_and_slow_moments_set_the_pace():
     photo = {"kind": "photo"}
     assert autoedit.pace_of({**photo, "plan_role": "montage"})[0] > 0.8
     assert autoedit.pace_of({**photo, "plan_role": "slow moment"}) == (0.15, True)
+
+
+class FakeLeaver(FakeDirector):
+    """Plans story 1 (a, b, c linked) as c then a: b is left out."""
+
+    def plan(self, prompt):
+        return {"theme": "Water", "idea": "", "parts": [{"role": "opening", "shots": [3], "note": ""},
+                                                       {"role": "ending", "shots": [1], "note": ""}]}
+
+
+def test_stories_storyboard_and_video_agree(trip):
+    trip.link_story(0, to_next=True)
+    trip.link_story(0, to_next=True)  # a, b and c: one story
+    trip.plan_stories(FakeLeaver())
+    names = lambda rows: [Path(r["path"]).name for r in rows]
+    # A shot the plan leaves out does not creep into the storyboard, Auto-edit or the video.
+    assert names(trip.storyboard()) == ["c.jpg", "a.jpg"]
+    assert sorted(names(trip.auto_edit_pool())) == ["a.jpg", "c.jpg"]
+    assert [m.path.name for m in trip.media_items()] == ["c.jpg", "a.jpg"]
+
+    # After a first cut, changing the plan reorders the storyboard to match.
+    trip.execute("UPDATE items SET position = CASE WHEN path LIKE '%c.jpg' THEN 0 ELSE 1 END")
+    trip.move_in_plan(str(trip.folder / "a.jpg"), -1)
+    assert names(trip.storyboard()) == ["a.jpg", "c.jpg"]
+    trip.set_plan_role(str(trip.folder / "b.jpg"), "build-up")  # put back in by you
+    assert "b.jpg" in names(trip.storyboard())
+
+
+def test_a_new_storyline_renames_and_resets_the_storyboard(trip):
+    ai = FakeDirector()
+    trip.suggest_storylines(ai)
+    trip.apply_storyline(0)
+    assert trip.stories()[1]["name"] == "Morning at the beach"
+    trip.execute("UPDATE items SET position = 5, cut_out = 1 WHERE path LIKE '%a.jpg'")  # an older first cut
+
+    ai.storylines = lambda prompt: {"storylines": [{"title": "Again", "idea": "", "stories": [1, 2]}],
+                                    "names": [{"story": 1, "name": "Sunrise swim"}]}
+    trip.suggest_storylines(ai)
+    trip.apply_storyline(0)
+    stories = {s["key"]: s for s in trip.stories()}
+    beach = next(s for s in stories.values() if s["items"][0]["path"].endswith("a.jpg"))
+    assert beach["name"] == "Sunrise swim" and not beach["renamed"]  # the new storyline's name, not the old one
+    assert [Path(r["path"]).name for r in trip.storyboard()] == ["a.jpg", "b.jpg"]  # old first cut gone
+    titles = {Path(p).name: t["text"] for p, t in trip.shot_titles().items()}
+    assert titles["b.jpg"] == stories[trip.stories()[1]["key"]]["name"]  # the video's story titles match too
+    trip.rename_story(beach["key"], "Our swim")
+    assert next(s for s in trip.stories() if s["key"] == beach["key"])["name"] == "Our swim"
+
+
+def test_storyline_names_saved_by_older_versions_become_the_ais(trip):
+    ai = FakeDirector()
+    trip.suggest_storylines(ai)
+    key = trip.stories()[0]["key"]
+    trip.execute("ALTER TABLE story_info DROP COLUMN ai_name")
+    trip.execute("INSERT OR REPLACE INTO story_info (key, name) VALUES (?, 'Morning at the beach')", (key,))
+    again = catalog.Trip(trip.folder)
+    story = next(s for s in again.stories() if s["key"] == key)
+    assert story["name"] == "Morning at the beach" and not story["renamed"]
