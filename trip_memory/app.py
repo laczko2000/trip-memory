@@ -1074,15 +1074,23 @@ class Page:
             ui.label("Choose a song first. Then play it and tap the right Shift key wherever you want a cut.") \
                 .classes("text-gray-500")
             return
-        self.trim_card(music)
+        can_trim = self.trim_card(music)
         saved = song_taps.load(music, app_dir() / "music-taps")
-        ui.label("2. Pin the cuts").classes("font-semibold mt-2")
+        ui.label("Trim, fade and pin the song").classes("font-semibold mt-2")
+        if can_trim:
+            ui.label(
+                "Trim: drag the two green handles at the ends of the line to cut off what you don't want (a long intro, "
+                "the ending); the grey parts are cut off. Fade: drag the small purple dot at the top of each handle "
+                "inwards; the purple slope shows the music getting louder at the start and quieter at the end. "
+                "When you let go of a handle or a dot you hear it straight away: the start plays from there, the end "
+                "plays the last seconds up to it. Play skips the grey parts and plays the fades, so you hear exactly "
+                "the track you will get."
+            ).classes("text-sm text-gray-600")
         ui.label(
-            "Press Play and tap the RIGHT Shift key wherever you want the video to cut. Each tap puts a pin on the "
-            "line below. Play it back to check: every pin makes a click as it passes. Scroll on the line to zoom in "
-            "(the spikes are the hits), drag a pin to move it, or click it and nudge it with the arrow keys; Delete "
-            "removes it. Then let the app snap the pins onto the exact hits. Your pins are saved as you go, and "
-            "Auto-edit always cuts on them."
+            "Pins: press Play and tap the RIGHT Shift key wherever you want the video to cut. Each tap puts a pin on the "
+            "line. Every pin makes a click as it passes. Scroll on the line to zoom in (the spikes are the hits), drag a "
+            "pin to move it, or click it and nudge it with the arrow keys; Delete removes it. Pins in the grey parts "
+            "are dropped when you trim. Your pins are saved as you go, and Auto-edit always cuts on them."
         ).classes("text-sm text-gray-600")
         ui.html(f'<audio id="tm-song" preload="auto" src="{serve_song(music)}" onloadedmetadata="tmTapDraw()" '
                 f'onplay="tmTapOnPlay()" onpause="tmTapUnschedule(); tmTapDraw()"></audio>', sanitize=False)
@@ -1098,64 +1106,69 @@ class Page:
             ui.button("Clear all", icon="clear_all", on_click=self.clear_taps).props("flat")
         ui.html('<div id="tm-tl" style="position:relative;width:100%;height:150px;background:#f1f5f9;border-radius:8px;'
                 'touch-action:none;user-select:none;cursor:pointer;overflow:hidden"></div>', sanitize=False).classes("w-full")
+        ui.html('<div id="tm-trim-info" style="font-size:14px;font-weight:600;color:#15803d"></div>', sanitize=False)
         ui.html('<div id="tm-tap-info" style="font-size:13px;color:#475569"></div>', sanitize=False)
+        if can_trim:
+            with ui.row().classes("items-center gap-2"):
+                ui.button("Hear the start", icon="play_arrow",
+                          on_click=lambda: ui.run_javascript("tmTrimHear(0)")).props("outline dense no-caps")
+                ui.button("Hear the end", icon="play_arrow",
+                          on_click=lambda: ui.run_javascript("tmTrimHear(1)")).props("outline dense no-caps")
+                with ui.button_group().props("outline"):
+                    for secs, label in ((0, "No fades"), (1, "Fades 1 s"), (3, "3 s"), (6, "6 s")):
+                        ui.button(label, on_click=lambda secs=secs: ui.run_javascript(f"tmFadeSet({secs}, {secs})")) \
+                            .props("outline no-caps dense").tooltip("Set both fades at once (or drag the purple dots)")
+                ui.switch("Play skips the cut-off parts", value=True,
+                          on_change=lambda e: ui.run_javascript(f"tm.tap.skip = {json.dumps(bool(e.value))}; tmTapDraw()"))
+                ui.button("Use this part as the track", icon="content_cut", on_click=lambda: self.trim_song(music))
         ui.button("Snap to the music", icon="center_focus_strong", on_click=self.snap_taps).props("outline")
         self.saved_pins = saved["taps"]
         self.pin_summary(music, saved["taps"])
-        ui.timer(0.2, lambda: ui.run_javascript(f"tmTapInit({json.dumps(saved['taps'])}, 0); "
+        ui.timer(0.2, lambda: ui.run_javascript(f"tmTapInit({json.dumps(saved['taps'])}, 0, {json.dumps(can_trim)}); "
                                                 f"tm.tap.song = {json.dumps(music)}"), once=True)
         ui.timer(2.0, self.autosave_taps)  # pins are kept as you place them: no save button to forget
 
-    def trim_card(self, music: str) -> None:
-        """1. Cut off what you don't want at the start and end of the song: that part becomes the video's track."""
-        folder = app_dir() / "music-taps"
-        source = song_taps.trimmed_from(music, folder)
-        ui.label("1. Trim the song (if you like)").classes("font-semibold")
-        if source:
-            whole, start, end = source
-            with ui.row().classes("items-center gap-3"):
-                ui.label(f"✓ The track is {fmt_length(start)} to {fmt_length(end)} of {Path(whole).name}, with a short "
-                         "fade in and out.").classes("text-sm text-green-700")
-                ui.button("Trim again from the whole song", icon="content_cut",
-                          on_click=lambda: self.music_input.set_value(whole)).props("flat dense no-caps")
-            return
+    def trim_card(self, music: str) -> bool:
+        """Whether the song can still be trimmed (on the pin line); for a track already cut out of a song, says so."""
+        source = song_taps.trimmed_from(music, app_dir() / "music-taps")
+        if not source:
+            return True
+        whole, start, end = source
+        with ui.row().classes("items-center gap-3"):
+            fades = song_taps.fades_of(music, app_dir() / "music-taps")
+            faded = (f"fading in over {fades[0]:.1f} s and out over {fades[1]:.1f} s" if fades
+                     else "with a short fade in and out")
+            ui.label(f"✓ The track is {fmt_length(start)} to {fmt_length(end)} of {Path(whole).name}, {faded}.") \
+                .classes("text-sm text-green-700")
+            ui.button("Trim again from the whole song", icon="content_cut",
+                      on_click=lambda: self.music_input.set_value(whole)).props("flat dense no-caps")
+        return False
+
+    async def trim_song(self, music: str) -> None:
         try:
+            part = await ui.run_javascript("tmTrimGet()", timeout=5)
             whole = song_length(music)
         except Exception:
+            ui.notify("The song is still loading: try again in a moment.", type="warning")
             return
-        ui.label("Drag the two ends to cut off the parts you don't want (a long intro, the ending). That part becomes "
-                 "the video's track; pins you placed in it come along.").classes("text-sm text-gray-600")
-        with ui.row().classes("w-full items-center gap-4 no-wrap"):
-            words = ui.label(f"0:00 to {fmt_length(whole)}").classes("text-sm w-32")
-            part = ui.range(min=0, max=round(whole, 1), step=0.1, value={"min": 0, "max": round(whole, 1)}) \
-                .classes("flex-grow")
-            part.on_value_change(lambda e: words.set_text(f"{fmt_length(e.value['min'])} to {fmt_length(e.value['max'])}"))
-        with ui.row().classes("items-center gap-2"):
-            ui.button("Listen from the start point", icon="play_arrow",
-                      on_click=lambda: self.listen_at(part.value["min"])).props("outline dense no-caps")
-            ui.button("Listen to the end", icon="play_arrow",
-                      on_click=lambda: self.listen_at(max(part.value["min"], part.value["max"] - 6))) \
-                .props("outline dense no-caps")
-            ui.button("Use this part as the track", icon="content_cut",
-                      on_click=lambda: self.trim_song(music, part.value["min"], part.value["max"], whole))
-
-    def listen_at(self, seconds: float) -> None:
-        ui.run_javascript(f"(() => {{ const a = document.getElementById('tm-song'); a.currentTime = {seconds:.2f}; "
-                          "if (a.paused) tmTapPlay(); }})()")
-
-    async def trim_song(self, music: str, start: float, end: float, whole: float) -> None:
-        if start < 0.05 and end > whole - 0.05:
-            ui.notify("Drag one of the ends first: the whole song is still chosen.", type="warning")
+        if not part:
             return
+        start, end, fade_in, fade_out = (float(v) for v in part)
+        if start < 0.05 and end > whole - 0.05 and fade_in < 0.05 and fade_out < 0.05:
+            ui.notify("Drag a green handle or a purple fade dot first: the whole song is still chosen, unchanged.",
+                      type="warning")
+            return
+        await self.autosave_taps()  # the pins you just placed come along into the track
         try:
             track = await run.io_bound(song_taps.trim, music, start, end, app_dir() / "music-trimmed",
-                                       app_dir() / "music-taps")
+                                       app_dir() / "music-taps", fade_in, fade_out)
         except Exception as exc:
             traceback.print_exc()
             ui.notify(f"Could not trim the song: {exc}", type="negative")
             return
         self.music_input.set_value(track)
-        ui.notify(f"The track is now {fmt_length(start)} to {fmt_length(end)} of the song. Pin it below.", type="positive")
+        ui.notify(f"The track is now {fmt_length(start)} to {fmt_length(end)} of the song, fading in over "
+                  f"{fade_in:.1f} s and out over {fade_out:.1f} s. Pin it below.", type="positive")
 
     @ui.refreshable
     def pin_summary(self, music: str, taps: list[float]) -> None:
@@ -2794,17 +2807,19 @@ TAP_SCRIPT = """
 // selected and deleted; on playback every pin you pass makes a click so you hear where it is.
 window.tm = window.tm || {};
 tm.tap = {pins: [], sel: -1, view: 0, span: 0, until: -1, ctx: null, raf: 0, drag: -1, osc: [], srcEl: null,
-          wave: null, waveSrc: '', follow: true};
+          wave: null, waveSrc: '', follow: true, trim: null, tdrag: -1, skip: true, fade: [0, 0], fdrag: -1, gain: null};
 const TM_WAVE_STEP = 0.002;  // the waveform keeps the loudest moment of every 2 ms
 
 function tmTapAudio() { return document.getElementById('tm-song'); }
 function tmTapVisible() { const tl = document.getElementById('tm-tl'); return tl && tl.offsetParent !== null; }
 
 // The Music tab's panel is only on the page while it is open, so nothing here assumes it exists.
-function tmTapInit(pins, span) {
+// trim: whether the song can still be trimmed; then two green handles on the line mark the part you keep.
+function tmTapInit(pins, span, trim) {
   const T = tm.tap;
   T.pins = (pins || []).slice().sort((a, b) => a - b);
-  T.sel = -1; T.view = 0; T.span = span || 0; tmTapUnschedule();
+  T.sel = -1; T.view = 0; T.span = span || 0; T.trim = trim ? [0, -1] : null; T.tdrag = -1; T.skip = true; T.fade = [0, 0]; T.fdrag = -1;
+  tmTapUnschedule();
   tmTapLoadWave();
   tmTapDraw();
 }
@@ -2845,12 +2860,18 @@ function tmTapWaveSvg(v0, span) {
 }
 function tmTapOnPlay() {
   const T = tm.tap, a = tmTapAudio(); T.follow = true;
+  if (a && T.trim && T.skip) { const [k0, k1] = tmTrimPart(); if (a.currentTime < k0 || a.currentTime >= k1 - 0.05) a.currentTime = k0; }
   tmTapCtx(); tmTapUnschedule(); cancelAnimationFrame(T.raf); tmTapLoop(); tmTapDraw();
 }
 // Listen on the whole page: the line itself is rebuilt whenever the screen refreshes or the tab opens.
 document.addEventListener('pointerdown', ev => { if (ev.target.closest && ev.target.closest('#tm-tl')) tmTapPointerDown(ev); });
 window.addEventListener('pointermove', ev => tmTapPointerMove(ev));
-window.addEventListener('pointerup', () => { if (tm.tap.drag >= 0) { tm.tap.drag = -1; tm.tap.pins.sort((a, b) => a - b); tmTapDraw(); } });
+window.addEventListener('pointerup', () => {
+  const T = tm.tap;
+  if (T.drag >= 0) { T.drag = -1; T.pins.sort((a, b) => a - b); tmTapDraw(); }
+  if (T.tdrag >= 0) { const i = T.tdrag; T.tdrag = -1; tmTrimHear(i); }  // hear where you just put the handle
+  if (T.fdrag >= 0) { const i = T.fdrag; T.fdrag = -1; tmTrimHear(i); }  // and hear the fade you just set
+});
 // Scroll up/down (or pinch) on the line to zoom in and out around the mouse; scroll sideways to move along.
 document.addEventListener('wheel', ev => {
   const tl = ev.target.closest && ev.target.closest('#tm-tl'); if (!tl) return;
@@ -2876,7 +2897,10 @@ function tmTapCtx() {
   if (!T.ctx) T.ctx = new (window.AudioContext || window.webkitAudioContext)();
   if (T.ctx.state === 'suspended') T.ctx.resume();
   if (a && T.srcEl !== a) {
-    try { T.ctx.createMediaElementSource(a).connect(T.ctx.destination); T.srcEl = a; } catch (e) { console.warn(e); }
+    try {  // through a volume control, so the fades can be heard as you set them
+      if (!T.gain) { T.gain = T.ctx.createGain(); T.gain.connect(T.ctx.destination); }
+      T.ctx.createMediaElementSource(a).connect(T.gain); T.srcEl = a;
+    } catch (e) { console.warn(e); }
   }
 }
 // How long sound takes from the page to your ears (the sound card's own delay, as the browser reports it).
@@ -2907,10 +2931,16 @@ function tmTapUnschedule() {
 function tmTapLoop() {
   const T = tm.tap, a = tmTapAudio();
   if (!a || a.paused) return;
+  const [k0, k1] = tmTrimPart();
+  if (T.trim && T.skip && T.tdrag < 0) {
+    if (a.currentTime < k0 - 0.05) { a.currentTime = k0; T.until = -1; }
+    else if (a.currentTime >= k1) { a.pause(); a.currentTime = k1; tmTapDraw(); return; }
+  }
   const now = a.currentTime, rate = a.playbackRate || 1;
+  tmFadeVolume(now);
   if (T.until < 0 || T.until < now - 0.3 || T.until > now + 1) T.until = now;  // just started, or jumped
   const ahead = now + 0.25;
-  if (T.ctx) T.pins.forEach(p => { if (p > T.until && p <= ahead) tmTapClick(false, T.ctx.currentTime + (p - now) / rate); });
+  if (T.ctx) T.pins.forEach(p => { if (p > T.until && p <= ahead && p >= k0 && p <= k1) tmTapClick(false, T.ctx.currentTime + (p - now) / rate); });
   T.until = ahead;
   if (T.span && T.follow && (now < T.view || now > T.view + T.span * 0.9)) T.view = Math.max(0, now - T.span * 0.1);
   tmTapDraw();
@@ -2928,6 +2958,13 @@ function tmTapDraw() {
   const T = tm.tap, a = tmTapAudio(), [v0, span] = tmTapWindow();
   const x = t => ((t - v0) / span * 100).toFixed(3) + '%';
   let html = tmTapWaveSvg(v0, span);
+  const d = tmTapLength();
+  if (T.trim && T.trim[1] < 0 && d) T.trim[1] = d;
+  const [k0, k1] = tmTrimPart();
+  if (T.trim && d) {  // the parts you cut off, greyed out
+    if (k0 > v0) html += `<div style="position:absolute;left:0;width:${x(Math.min(k0, v0 + span))};top:0;bottom:0;background:#64748b55;pointer-events:none"></div>`;
+    if (k1 < v0 + span) html += `<div style="position:absolute;left:${x(Math.max(k1, v0))};right:0;top:0;bottom:0;background:#64748b55;pointer-events:none"></div>`;
+  }
   // Time marks along the bottom: finer as you zoom in (down to a tenth of a second).
   const steps = [0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60];
   const stepS = steps.find(st => span / st <= 14) || 60;
@@ -2942,7 +2979,7 @@ function tmTapDraw() {
   let lastLabel = -1e9;
   T.pins.forEach((p, i) => {
     if (p < v0 || p > v0 + span) return;
-    const c = i === T.sel ? '#dc2626' : '#2563eb', px = (p - v0) / span * width;
+    const c = i === T.sel ? '#dc2626' : T.trim && (p < k0 || p > k1) ? '#94a3b8' : '#2563eb', px = (p - v0) / span * width;
     if (px - lastLabel > (fine ? 70 : 52) || i === T.sel) {
       const m = Math.floor(p / 60), sec = (p % 60).toFixed(fine ? 2 : 1).padStart(fine ? 5 : 4, '0');
       html += `<div style="position:absolute;left:${x(p)};top:-1px;margin-left:8px;font-size:10px;font-weight:600;color:${c};` +
@@ -2953,11 +2990,42 @@ function tmTapDraw() {
             `margin-left:-7px;cursor:ew-resize;display:flex;justify-content:center"><div style="width:3px;background:${c};height:100%"></div>` +
             `<div style="position:absolute;top:-2px;width:12px;height:12px;border-radius:6px;background:${c}"></div></div>`;
   });
-  if (a) html += `<div style="position:absolute;left:${x(a.currentTime)};top:0;bottom:0;width:2px;background:#f97316;pointer-events:none"></div>`;
+  if (T.trim && d) {  // the fades: a purple slope from silent to full volume, with a dot to drag
+    const [f0, f1] = T.fade, cols = [];
+    if (f0 > 0) cols.push([k0, k0 + f0, 0]);
+    if (f1 > 0) cols.push([k1 - f1, k1, 1]);
+    cols.forEach(([s0, s1, out]) => {
+      const a0 = Math.max(s0, v0), a1 = Math.min(s1, v0 + span); if (a1 <= a0) return;
+      const y = t => { const v = out ? (s1 - t) / (s1 - s0) : (t - s0) / (s1 - s0); return (100 - 100 * v).toFixed(2); };
+      html += `<svg viewBox="0 0 100 100" preserveAspectRatio="none" style="position:absolute;left:${x(a0)};width:${((a1 - a0) / span * 100).toFixed(3)}%;top:0;bottom:24px;height:calc(100% - 24px);pointer-events:none">` +
+              `<polygon points="0,0 100,0 100,${y(a1)} 0,${y(a0)}" fill="#7c3aed33"/>` +
+              `<line x1="0" y1="${y(a0)}" x2="100" y2="${y(a1)}" stroke="#7c3aed" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>`;
+    });
+    [k0 + f0, k1 - f1].forEach((t, i) => {
+      if (t < v0 - 0.001 || t > v0 + span + 0.001) return;
+      html += `<div data-fade="${i}" title="Drag to fade ${i ? 'out' : 'in'} (${T.fade[i].toFixed(1)} s)" style="position:absolute;left:${x(t)};top:2px;width:16px;height:16px;` +
+              `margin-left:-8px;border-radius:8px;background:#7c3aed;border:2px solid white;cursor:ew-resize;z-index:4"></div>`;
+      if (T.fade[i] > 0) html += `<div style="position:absolute;left:${x(t)};top:20px;${i ? 'transform:translateX(-100%);margin-left:-4px' : 'margin-left:4px'};font-size:10px;font-weight:700;color:#6d28d9;background:#f1f5f9cc;padding:0 2px;white-space:nowrap;pointer-events:none">fade ${i ? 'out' : 'in'} ${T.fade[i].toFixed(1)} s</div>`;
+    });
+  }
+  if (T.trim && d) [k0, k1].forEach((t, i) => {  // the two trim handles: a green bar with a grip to drag
+    if (t < v0 - 0.001 || t > v0 + span + 0.001) return;
+    const m = Math.floor(t / 60), sec = (t % 60).toFixed(1).padStart(4, '0');
+    html += `<div data-trim="${i}" title="Drag to trim the ${i ? 'end' : 'start'}" style="position:absolute;left:${x(t)};top:0;bottom:0;width:18px;` +
+            `margin-left:${i ? -16 : -2}px;cursor:ew-resize;display:flex;justify-content:${i ? 'flex-end' : 'flex-start'};z-index:2">` +
+            `<div style="width:4px;background:#16a34a;height:100%"></div>` +
+            `<div style="position:absolute;top:50%;${i ? 'right' : 'left'}:0;transform:translateY(-50%);width:14px;height:36px;border-radius:4px;background:#16a34a;color:white;font-size:10px;display:flex;align-items:center;justify-content:center">${i ? ']' : '['}</div>` +
+            `<div style="position:absolute;bottom:26px;${i ? 'right' : 'left'}:6px;font-size:10px;font-weight:700;color:#15803d;background:#f1f5f9cc;padding:0 2px;white-space:nowrap;pointer-events:none">${i ? 'End' : 'Start'} ${m}:${sec}</div></div>`;
+  });
+  if (a) html += `<div style="position:absolute;left:${x(a.currentTime)};top:0;bottom:0;width:2px;background:#f97316;pointer-events:none;z-index:3"></div>`;
   tl.innerHTML = html;
+  const tinfo = document.getElementById('tm-trim-info');
+  if (tinfo) tinfo.textContent = T.trim && d ? (k0 < 0.05 && k1 > d - 0.05 ? `Keeping the whole song (${tmClock(d)}): drag the green handles to trim it` :
+    `Keeping ${tmClock(k0)} to ${tmClock(k1)}: ${tmClock(k1 - k0)} of ${tmClock(d)} (cutting ${tmClock(k0)} at the start, ${tmClock(d - k1)} at the end)`) +
+    ` · fade in ${T.fade[0] > 0 ? T.fade[0].toFixed(1) + ' s' : 'none'}, fade out ${T.fade[1] > 0 ? T.fade[1].toFixed(1) + ' s' : 'none'}` : '';
   const info = document.getElementById('tm-tap-info');
   if (info) {
-    const d = tmTapLength(), n = T.pins.length;
+    const n = T.pins.length;
     const t = a ? a.currentTime : 0;
     const last = n ? T.pins[n - 1] : 0;
     info.textContent = `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')} · ${n} pin${n === 1 ? '' : 's'}` +
@@ -2974,14 +3042,29 @@ function tmTapTimeAt(ev) {
 }
 
 function tmTapPointerDown(ev) {
-  const T = tm.tap, pin = ev.target.closest('[data-pin]');
-  if (pin) { T.sel = T.drag = parseInt(pin.dataset.pin); ev.preventDefault(); }
+  const T = tm.tap, fade = ev.target.closest('[data-fade]'), handle = ev.target.closest('[data-trim]'), pin = ev.target.closest('[data-pin]');
+  if (fade) { T.fdrag = parseInt(fade.dataset.fade); const a = tmTapAudio(); if (a && !a.paused) a.pause(); ev.preventDefault(); }
+  else if (handle) { T.tdrag = parseInt(handle.dataset.trim); const a = tmTapAudio(); if (a && !a.paused) a.pause(); ev.preventDefault(); }
+  else if (pin) { T.sel = T.drag = parseInt(pin.dataset.pin); ev.preventDefault(); }
   else { T.sel = -1; const a = tmTapAudio(); if (a) { a.currentTime = tmTapTimeAt(ev); tmTapUnschedule(); } }
   tmTapDraw();
 }
 
 function tmTapPointerMove(ev) {
   const T = tm.tap;
+  if (T.fdrag >= 0) {  // a fade dot: how far in from its handle the music reaches full volume
+    const t = tmTapTimeAt(ev), [k0, k1] = tmTrimPart(), room = (k1 - k0) / 2;
+    T.fade[T.fdrag] = Math.round(Math.max(0, Math.min(room, T.fdrag ? k1 - t : t - k0)) * 10) / 10;
+    tmTapDraw(); return;
+  }
+  if (T.tdrag >= 0) {  // a trim handle: keep at least 2 seconds between them
+    const t = tmTapTimeAt(ev), d = tmTapLength();
+    if (T.tdrag === 0) T.trim[0] = Math.max(0, Math.min(t, T.trim[1] - 2));
+    else T.trim[1] = Math.min(d, Math.max(t, T.trim[0] + 2));
+    const room = (T.trim[1] - T.trim[0]) / 2; T.fade = T.fade.map(f => Math.min(f, room));
+    const a = tmTapAudio(); if (a) a.currentTime = T.trim[T.tdrag];
+    tmTapDraw(); return;
+  }
   if (T.drag < 0) return;
   T.pins[T.drag] = tmTapTimeAt(ev);
   tmTapDraw();
@@ -3010,12 +3093,45 @@ document.addEventListener('keydown', ev => {
 
 function tmTapPlay() { const a = tmTapAudio(); if (!a) return; tmTapCtx(); if (a.paused) a.play(); else a.pause(); }
 function tmTapSeek(by) { const a = tmTapAudio(); if (!a) return; a.currentTime = Math.max(0, a.currentTime + by); tmTapUnschedule(); tmTapDraw(); }
-function tmTapStart() { const a = tmTapAudio(); if (!a) return; a.currentTime = 0; tmTapUnschedule(); tm.tap.view = 0; tmTapDraw(); }
+function tmTapStart() { const a = tmTapAudio(); if (!a) return; a.currentTime = tm.tap.trim && tm.tap.skip ? tmTrimPart()[0] : 0; tmTapUnschedule(); tm.tap.view = 0; tmTapDraw(); }
 function tmTapDelete() { const T = tm.tap; if (T.sel >= 0) { T.pins.splice(T.sel, 1); T.sel = -1; tmTapUnschedule(); tmTapDraw(); } }
 function tmTapClear() { tm.tap.pins = []; tm.tap.sel = -1; tmTapDraw(); }
 function tmTapZoom(span) {
   const T = tm.tap, a = tmTapAudio(), at = T.sel >= 0 ? T.pins[T.sel] : a ? a.currentTime : 0;
   T.span = span; T.follow = true; T.view = Math.max(0, at - span * (T.sel >= 0 ? 0.5 : 0.1)); tmTapDraw();
+}
+function tmClock(s) { return `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, '0')}`; }
+// The part of the song you keep (the whole song when it can't be trimmed here).
+function tmTrimPart() {
+  const T = tm.tap, d = tmTapLength() || 1e9;
+  return T.trim ? [T.trim[0], T.trim[1] < 0 ? d : T.trim[1]] : [0, d];
+}
+function tmTrimGet() { const d = tmTapLength(); return tm.tap.trim && d ? [...tmTrimPart(), ...tm.tap.fade] : null; }
+// The volume right now: rising over the fade in, falling over the fade out (full volume outside the kept part).
+function tmFadeVolume(t) {
+  const T = tm.tap; if (!T.gain || !T.ctx) return;
+  const [k0, k1] = tmTrimPart(), [f0, f1] = T.trim ? T.fade : [0, 0];
+  let v = 1;
+  if (t >= k0 && t <= k1) {
+    if (f0 > 0 && t < k0 + f0) v = Math.min(v, (t - k0) / f0);
+    if (f1 > 0 && t > k1 - f1) v = Math.min(v, (k1 - t) / f1);
+  }
+  T.gain.gain.setTargetAtTime(Math.max(0, v), T.ctx.currentTime, 0.015);
+}
+function tmFadeSet(fin, fout) {
+  const T = tm.tap; if (!T.trim) return;
+  const [k0, k1] = tmTrimPart(), room = (k1 - k0) / 2;
+  T.fade = [Math.min(fin, room), Math.min(fout, room)]; tmTapDraw();
+}
+// Hear a trim handle: the start plays from there on; the end plays the last 5 seconds and stops at it.
+function tmTrimHear(i) {
+  const T = tm.tap, a = tmTapAudio(); if (!a || !T.trim) return;
+  const [k0, k1] = tmTrimPart(), skip = T.skip;
+  a.currentTime = i ? Math.max(k0, k1 - Math.max(5, T.fade[1] + 3)) : k0; tmTapUnschedule();
+  tmFadeVolume(a.currentTime);
+  tmTapCtx(); T.skip = true; a.play();  // the end preview always stops at the end handle
+  if (!skip) { const back = () => { T.skip = false; a.removeEventListener('pause', back); }; a.addEventListener('pause', back); }
+  tmTapDraw();
 }
 function tmTapGet() { return tm.tap.pins.slice().sort((a, b) => a - b); }
 function tmTapSet(pins) { tm.tap.pins = pins.slice().sort((a, b) => a - b); tm.tap.sel = -1; tmTapUnschedule(); tmTapDraw(); }

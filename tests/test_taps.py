@@ -61,3 +61,21 @@ def test_trim_the_song_and_keep_its_pins(tmp_path):
     assert taps.trimmed_from(str(song), folder) is None
     sound = taps.read_song(part)
     assert np.abs(sound[:200]).max() < 0.2 and np.abs(sound[int(5 * RATE):int(5.1 * RATE)]).max() > 0.1  # fades in
+
+
+def test_trim_with_the_fades_you_chose(tmp_path):
+    import subprocess
+
+    from trip_memory.tools import ffmpeg_paths
+
+    song = tmp_path / "song.wav"
+    subprocess.run([ffmpeg_paths()[0], "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=20",
+                    str(song)], check=True)
+    folder = tmp_path / "taps"
+    part = taps.trim(str(song), 0.0, 20.0, tmp_path / "trimmed", folder, fade_in=3.0, fade_out=4.0)
+    assert taps.fades_of(part, folder) == (3.0, 4.0)
+    sound = np.abs(taps.read_song(part))
+    level = lambda a, b: sound[int(a * RATE):int(b * RATE)].max()
+    assert level(0.5, 0.7) < 0.5 * level(8, 9)  # still quiet early in the 3 s fade in
+    assert level(18.0, 18.2) < 0.6 * level(8, 9) and level(19.6, 19.8) < 0.2 * level(8, 9)  # fading out over 4 s
+    assert taps.fades_of(str(song), folder) is None
