@@ -301,11 +301,17 @@ def by_chapters(rows: list[dict], chapters: list[dict]) -> list[dict]:
     if finale is not None:
         size = int(np.clip(round(0.1 * len(rows)), 2, 10))
         best = sorted(rows, key=excitement, reverse=True)[:size]
+        came_from = {id(r): r.get("chapter") for r in best}
         for r in best:
             if r.get("chapter") is not None and r["chapter"] != finale:
                 groups[r["chapter"]].remove(r)
             r["chapter"] = finale
-        groups[finale] = sorted(best, key=lambda r: (excitement(r), r["taken_at"]))  # building up to the biggest
+        if any(c.get("part") is not None for c in chapters):
+            # My story: the finale keeps your order too (theme by theme), each building up to its biggest
+            groups[finale] = sorted(best, key=lambda r: (came_from[id(r)] if came_from[id(r)] is not None else 1e9,
+                                                         excitement(r), r["taken_at"]))
+        else:
+            groups[finale] = sorted(best, key=lambda r: (excitement(r), r["taken_at"]))  # building up to the biggest
         if groups[finale]:
             groups[finale][-1]["must"] = True
     order = [j for j in range(len(chapters)) if groups.get(j)]
