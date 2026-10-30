@@ -165,6 +165,11 @@ class Page:
         self.theme_shown = ""  # the activity open in the Themes tab
         self.theme_selected: set[str] = set()
         self.theme_limit = 60
+        self.theme_ticks: dict = {}  # path -> (tick box, its mark, sure): ticking changes only that box
+        self.theme_rows_shown: dict = {}
+        self.theme_summary = None
+        self.theme_badge = None
+        self.theme_counts = [0, 0]
         self.theme_tiles: dict = {}  # path -> its tile, to show a selection without building the page again
         self.theme_count = self.theme_move = None
 
@@ -2155,7 +2160,9 @@ class Page:
                 ui.notify("Write or say your idea first (without the AI, the app follows the themes you name).",
                           type="warning", multi_line=True)
                 return
-            story = themes.story_from_words(idea, blocks) | {"by": "words"}
+            words = {a["name"]: a["describe"] for a in self.trip.activities()}
+            story = themes.story_from_words(idea, [b | {"describe": words.get(b["activity"])} for b in blocks]) \
+                | {"by": "words"}
             if not story["parts"]:
                 ui.notify("None of your themes were named. Use their names, e.g. \"boat first, then food\".",
                           type="warning", multi_line=True)
@@ -2266,7 +2273,9 @@ class Page:
         done = sum(r["theme_ok"] for r in rows)
         with ui.row().classes("w-full items-center gap-3"):
             ui.label("What is each shot?").classes("text-lg font-semibold")
-            ui.badge(f"{done} of {len(rows)} confirmed", color="positive" if done == len(rows) else "grey-7")
+            self.theme_badge = ui.badge(f"{done} of {len(rows)} confirmed",
+                                        color="positive" if done == len(rows) else "grey-7")
+            self.theme_counts = [done, len(rows)]
             ui.label("The app suggests the activity; you confirm or change it. Who, where and when are filled in "
                      "for you.").classes("text-sm text-gray-600 flex-1")
         if not self.trip.has_fingerprints():
@@ -2296,11 +2305,16 @@ class Page:
         shown = [r for r in rows if r["theme"] == name]
         todo = [r for r in shown if not r["theme_ok"]]
         self.theme_tiles = {}
+        self.theme_ticks = {}
+        self.theme_rows_shown = {r["path"]: r for r in shown}
         self.theme_selected &= {r["path"] for r in shown}
         with ui.row().classes("w-full items-center gap-2"):
             ui.label(f"{emoji.get(name, '⭐')} {name}").classes("text-lg font-semibold")
-            ui.label(f"{len(shown)} shots · {len(shown) - len(todo)} confirmed · {len(todo)} to check") \
-                .classes("text-sm text-gray-600")
+            if name != themes.OTHER:
+                ui.button("Rename", icon="edit", on_click=lambda: self.rename_dialog(name)) \
+                    .props("flat dense no-caps size=sm")
+            self.theme_summary = ui.label(f"{len(shown)} shots · {len(shown) - len(todo)} confirmed · "
+                                          f"{len(todo)} to check").classes("text-sm text-gray-600")
         with ui.row().classes("w-full items-center gap-2"):
             ui.button("All correct", icon="done_all", on_click=lambda: self.confirm_themes([r["path"] for r in todo])) \
                 .set_enabled(bool(todo))
@@ -2339,15 +2353,126 @@ class Page:
             if r["thumb"]:
                 ui.image(data_url(r["thumb"])).classes("w-full rounded").style("aspect-ratio:16/10") \
                     .props("fit=cover no-spinner")
-            ui.label("✓" if r["theme_ok"] else "?").classes(
-                "absolute top-2 right-2 text-xs text-white rounded-full px-1.5 " +
-                ("bg-green-600" if r["theme_ok"] else "bg-orange-500" if not sure else "bg-gray-400"))
-            if r["kind"] == "video":
-                ui.label("🎬").classes("absolute top-2 left-2 text-xs")
+            # Top left: tick = "right theme" (saved at once). Top right: pick another theme.
+            tick = ui.element("div").classes("absolute top-2 left-2 w-7 h-7 rounded border-2 flex items-center "
+                                             "justify-center text-base font-bold shadow") \
+                .on("click.stop", lambda p=r["path"]: self.tick_theme(p)).tooltip("Right theme: tick to confirm")
+            with tick:
+                mark = ui.label("")
+            self.theme_ticks[r["path"]] = (tick, mark, sure)
+            self._show_tick(r["path"], r["theme_ok"])
+            with ui.element("div").classes("absolute top-2 right-2").on("click.stop", lambda: None):
+                ui.button(icon="swap_horiz", on_click=lambda r=r: self.theme_menu(r)) \
+                    .props("round dense size=sm color=white text-color=primary").classes("shadow") \
+                    .tooltip("Move to another theme")
             with ui.column().classes("gap-0 text-xs leading-tight mt-1"):
-                ui.label(who or "—").classes("font-semibold text-gray-800 truncate")
+                ui.label(("🎬 " if r["kind"] == "video" else "") + (who or "—")) \
+                    .classes("font-semibold text-gray-800 truncate")
                 ui.label(where).classes("text-gray-500 truncate")
                 ui.label(when).classes("text-gray-500")
+
+    def _show_tick(self, path: str, ok: bool) -> None:
+        tick, mark, sure = self.theme_ticks[path]
+        looks = {True: ("✓", "bg-green-600 border-green-600 text-white"),
+                 False: ("" if sure else "?", "bg-white border-gray-500 text-orange-600" if not sure else
+                         "bg-white border-gray-500 text-gray-600")}
+        mark.set_text(looks[ok][0])
+        tick.classes(replace="absolute top-2 left-2 w-7 h-7 rounded border-2 flex items-center justify-center "
+                             "text-base font-bold shadow cursor-pointer " + looks[ok][1])
+
+    async def tick_theme(self, path: str) -> None:
+        """Tick: this shot is in the right theme (saved straight away). Tick again to take it back."""
+        r = self.theme_rows_shown.get(path)
+        if r is None:
+            return
+        r["theme_ok"] = not r["theme_ok"]
+        self._show_tick(path, r["theme_ok"])
+        self._theme_summary(1 if r["theme_ok"] else -1)
+        if r["theme_ok"]:
+            await run.io_bound(self.trip.set_theme, [path], r["theme"])
+        else:
+            await run.io_bound(self.trip.unconfirm_theme, [path])
+
+    def _theme_summary(self, confirmed: int = 0) -> None:
+        self.theme_counts[0] += confirmed
+        self.theme_badge.set_text(f"{self.theme_counts[0]} of {self.theme_counts[1]} confirmed")
+        rows = list(self.theme_rows_shown.values())
+        done = sum(r["theme_ok"] for r in rows)
+        self.theme_summary.set_text(f"{len(rows)} shots · {done} confirmed · {len(rows) - done} to check")
+
+    def theme_menu(self, r: dict) -> None:
+        """A big window: the shot, and every theme as a button. One click moves it there (and confirms it)."""
+        activities = self.trip.activities()
+        with ui.dialog() as dialog, ui.card().classes("w-[760px] max-w-[95vw] gap-3"):
+            with ui.row().classes("w-full no-wrap items-start gap-3"):
+                if r.get("thumb"):
+                    ui.image(data_url(r["thumb"])).classes("w-56 rounded flex-none").style("aspect-ratio:16/10") \
+                        .props("fit=cover no-spinner")
+                with ui.column().classes("gap-1"):
+                    ui.label("Which theme is this?").classes("text-lg font-semibold")
+                    ui.label(f"Now: {r['theme']}" + ("" if r["theme_ok"] else " (the app's guess)")) \
+                        .classes("text-sm text-gray-600")
+                    ui.label("Click the right one: the shot moves there, and the app looks again at the shots you "
+                             "haven't confirmed.").classes("text-xs text-gray-500")
+            with ui.element("div").classes("w-full grid gap-2").style("grid-template-columns:repeat(3,minmax(0,1fr))"):
+                for a in activities:
+                    now = a["name"] == r["theme"]
+                    ui.button(f"{a['emoji']} {a['name']}", on_click=lambda n=a["name"]: self.move_one(dialog, r, n)) \
+                        .props(("unelevated" if now else "outline") + " no-caps").classes("h-12 text-base w-full")
+            with ui.row().classes("w-full items-center gap-2"):
+                new = ui.input(placeholder="Or a new theme, e.g. Kitesurfing").props("dense outlined").classes("flex-grow")
+                ui.button("Add and move here", icon="add",
+                          on_click=lambda: self.move_one(dialog, r, " ".join((new.value or "").split())[:30], True)) \
+                    .props("outline no-caps")
+                ui.button("Cancel", on_click=dialog.close).props("flat no-caps")
+        dialog.open()
+
+    async def move_one(self, dialog, r: dict, name: str, new: bool = False) -> None:
+        if not name:
+            ui.notify("Type the new theme's name first.", type="warning")
+            return
+        dialog.close()
+        if new:
+            await self.add_activity(name, quiet=True)
+        await run.io_bound(self.trip.set_theme, [r["path"]], name)
+        ui.notify(f"Moved to {name}." if name != r["theme"] else f"Confirmed in {name}.", type="positive")
+        was_ok = r["theme_ok"]
+        if name == r["theme"]:
+            r["theme_ok"] = True
+            self._show_tick(r["path"], True)
+        else:
+            self.theme_rows_shown.pop(r["path"], None)
+            self.theme_selected.discard(r["path"])
+        self._theme_summary(0 if was_ok else 1)
+        if name != r["theme"]:
+            tile = self.theme_tiles.pop(r["path"], None)
+            if tile is not None:
+                tile.delete()  # last: the window lived inside it
+        if new:
+            self.themes_view.refresh()
+
+    def rename_dialog(self, name: str) -> None:
+        with ui.dialog() as dialog, ui.card().classes("w-96"):
+            ui.label(f"Rename {name}").classes("text-lg font-semibold")
+            field = ui.input("New name", value=name).props("outlined autofocus").classes("w-full")
+            field.on("keydown.enter", lambda: self.rename_activity(dialog, name, field.value))
+            with ui.row().classes("w-full justify-end"):
+                ui.button("Cancel", on_click=dialog.close).props("flat no-caps")
+                ui.button("Rename", on_click=lambda: self.rename_activity(dialog, name, field.value)).props("no-caps")
+        dialog.open()
+
+    async def rename_activity(self, dialog, old: str, new: str) -> None:
+        new = " ".join((new or "").split())[:30]
+        if not new or new == old:
+            dialog.close()
+            return
+        if not await run.io_bound(self.trip.rename_activity, old, new):
+            ui.notify(f"There is already a theme called {new}.", type="warning")
+            return
+        dialog.close()
+        self.theme_shown = new
+        ui.notify(f"{old} is now {new}.", type="positive")
+        self.themes_view.refresh()
 
     def show_theme(self, name: str) -> None:
         self.theme_shown = name
@@ -2361,7 +2486,7 @@ class Page:
 
     def selected_words(self) -> str:
         return (f"{len(self.theme_selected)} selected" if self.theme_selected else
-                "Click shots to select them. ? marks a suggestion worth a look.")
+                "Tick the right ones, ⇄ moves one, or click shots to select several. ? marks a guess worth a look.")
 
     def pick_theme_shot(self, path: str) -> None:
         """Select or unselect a shot (only that tile changes: quick on a big trip)."""
@@ -2413,7 +2538,7 @@ class Page:
         self.theme_selected = set()
         self.themes_view.refresh()
 
-    async def add_activity(self, name: str) -> None:
+    async def add_activity(self, name: str, quiet: bool = False) -> None:
         name = " ".join((name or "").split())[:30]
         if not name:
             ui.notify("Type the activity's name first, e.g. Kitesurfing.", type="warning")
@@ -2426,6 +2551,8 @@ class Page:
             except Exception:
                 traceback.print_exc()
         await run.io_bound(self.trip.add_activity, name, vector)
+        if quiet:
+            return
         self.theme_shown = name
         self.theme_selected = set()
         ui.notify(f"{name} added. The app put the shots that look like it here; move more in and it learns from them.",

@@ -559,3 +559,11 @@ def test_the_storyline_follows_your_themes(tmp_path, monkeypatch):
     trip.set_storyline(order=themes.TIME)
     plan = trip.auto_edit_steady(autoedit.Limits(max_video=3, max_photo=2, min_shot=1), None, 0.0, "Fade")
     assert [Path(s.path).name for s in plan.shots] == ["p0.jpg", "p2.jpg"]  # as it happened (Other still off)
+    # Renaming a theme takes its shots, its first guesses from tags and the storyline along.
+    trip.set_storyline(order=themes.THEME, blocks=[{k: b[k] for k in ("key", "activity", "person", "on")} for b in blocks])
+    assert trip.rename_activity("Food & drink", "Dinners")
+    assert not trip.rename_activity("Boat", "dinners")  # taken
+    trip.unconfirm_theme([paths[0]])
+    rows = {Path(r["path"]).name: r for r in trip.theme_rows()}
+    assert rows["p0.jpg"]["theme"] == "Dinners"  # the tag guess finds the new name
+    assert [b["key"] for b in trip.storyline_blocks()][:2] == ["Boat|", "Dinners|"]

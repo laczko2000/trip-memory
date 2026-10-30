@@ -117,3 +117,4 @@ def test_an_ai_story_is_cleaned_and_keyed():
         {"name": "Open", "pace": "medium", "entries": [{"key": "Boat|", "pick": "all"}]},
         {"name": "Part 2", "pace": "calm", "entries": [{"key": "Food & drink|", "pick": "late"}]}]
     assert "1. Boat" in director.story_prompt("boat first", [{"name": "Boat", "count": 4}])
+

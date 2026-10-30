@@ -701,6 +701,7 @@ class Trip:
                           "WHERE chosen = 1 AND removed = 0 AND part_of IS NULL ORDER BY taken_at, path")
         activities = self.activities()
         names = {a["name"] for a in activities}
+        renamed = {a["was"]: a["name"] for a in activities if a.get("was")}
         seen = [r for r in rows if r["clip"] is not None]
         vectors = np.array([np.frombuffer(r["clip"], dtype=np.float32) for r in seen]) if seen else np.zeros((0, 512))
         confirmed = [(i, r["theme"]) for i, r in enumerate(seen) if r["theme"] in names]
@@ -712,6 +713,7 @@ class Trip:
             else:  # no picture fingerprint yet: a first guess from its tags
                 tags = json.loads(r["tags_user"]) if r["tags_user"] is not None else json.loads(r["tags"] or "[]")
                 name, sure = themes.by_tags(tags, r["scene_user"] or r["scene"]), 0.3
+                name = renamed.get(name, name) if renamed.get(name, name) in names else themes.OTHER
             updates.append((name, round(sure, 3), r["path"]))
         with self._lock:
             self.db.executemany("UPDATE items SET theme_auto = ?, theme_sure = ? WHERE path = ?", updates)
@@ -743,6 +745,38 @@ class Trip:
         activities.insert(at, new)
         self.save_activities(activities)
         self.suggest_themes()
+
+    def rename_activity(self, old: str, new: str) -> bool:
+        """Give an activity another name ("Water sports" -> "Kite action"): its shots, the ones you confirmed and the
+        storyline go along. False if the name is taken."""
+        activities = self.activities()
+        if old == themes.OTHER or not new or any(a["name"].lower() == new.lower() and a["name"] != old
+                                                 for a in activities):
+            return False
+        for a in activities:
+            if a["name"] == old:
+                a["was"] = a.get("was") or old  # the app's first guesses from tags still find it
+                a["name"] = new
+        self.save_activities(activities)
+        with self._lock:
+            self.db.execute("UPDATE items SET theme = ? WHERE theme = ?", (new, old))
+            self.db.execute("UPDATE items SET theme_auto = ? WHERE theme_auto = ?", (new, old))
+            self.db.commit()
+        line = self.storyline()
+
+        def key(k: str) -> str:
+            activity, _, person = k.partition("|")
+            return themes.block_key(new, person or None) if activity == old else k
+
+        blocks = [b | {"key": key(b["key"]), "activity": new if b["activity"] == old else b["activity"]}
+                  for b in line["blocks"]]
+        split = [new if a == old else a for a in line["split"]]
+        story = line.get("story") or {}
+        if story.get("parts"):
+            story = story | {"parts": [p | {"entries": [e | {"key": key(e["key"])} for e in p["entries"]]}
+                                       for p in story["parts"]]}
+        self.set_storyline(blocks=blocks, split=split, **({"story": story} if story else {}))
+        return True
 
     def remove_activity(self, name: str) -> None:
         """Take an activity away: its shots get a new suggestion (the ones you confirmed for it too)."""
