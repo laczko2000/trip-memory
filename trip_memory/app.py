@@ -27,6 +27,7 @@ from . import stories
 from . import music as free_music
 from . import songmap
 from . import musicmood
+from . import pinfill
 from . import voice
 from . import taps as song_taps
 from .beats import song_length
@@ -1269,10 +1270,14 @@ class Page:
                         .props("outline no-caps").tooltip("How much of the song the line shows (or scroll on it)")
             ui.button("Delete selected pin", icon="delete", on_click=lambda: ui.run_javascript("tmTapDelete()")).props("flat")
             ui.button("Clear all", icon="clear_all", on_click=self.clear_taps).props("flat")
+            ui.button("Finish my pins", icon="auto_fix_high", on_click=self.finish_pins).props("outline no-caps") \
+                .tooltip("Pin the start of the song by hand; the app suggests the rest the same way")
         ui.html('<div id="tm-tl" style="position:relative;width:100%;height:150px;background:#f1f5f9;border-radius:8px;'
                 'touch-action:none;user-select:none;cursor:pointer;overflow:hidden"></div>', sanitize=False).classes("w-full")
         ui.html('<div id="tm-trim-info" style="font-size:14px;font-weight:600;color:#15803d"></div>', sanitize=False)
         ui.html('<div id="tm-tap-info" style="font-size:13px;color:#475569"></div>', sanitize=False)
+        self.suggesting = False  # the line starts afresh with only your own pins
+        self.finish_row()
         if can_trim:
             with ui.row().classes("items-center gap-2"):
                 ui.button("Hear the start", icon="play_arrow",
@@ -1484,6 +1489,53 @@ class Page:
 
     async def clear_taps(self) -> None:
         ui.run_javascript("tmTapClear()")
+        self.suggesting = False
+        self.finish_row.refresh()
+
+    async def finish_pins(self) -> None:
+        """Learn how you pinned the start of the song, and suggest pins for the rest in the same way."""
+        music = self.music_path()
+        if not music:
+            return
+        got = await ui.run_javascript("[tmTapGet(), tm.tap.trim ? tmTrimPart()[1] : null]", timeout=5)
+        pins, until = [float(p) for p in got[0] or []], got[1]
+        if len(pins) < pinfill.LEAST:
+            ui.notify(f"Pin at least {pinfill.LEAST} cuts by hand first (a minute or so of the song works best).",
+                      type="warning")
+            return
+        song = self.song_maps.get(music)
+        if song is None:
+            song = self.song_maps[music] = await run.io_bound(songmap.analyse, music, app_dir() / "music-maps")
+        stretches = musicmood.reading(song, music, app_dir() / "music-taps")["stretches"]
+        suggested = await run.io_bound(pinfill.suggest, song, pins, stretches, until)
+        if not suggested:
+            ui.notify("Your pins already reach the end of the song.", type="info")
+            return
+        ui.run_javascript(f"tmTapSuggest({json.dumps(suggested)})")
+        self.suggesting = True
+        self.finish_row.refresh()
+        ui.notify(f"{len(suggested)} pins suggested in orange, the way you pinned the start. Play it to listen; "
+                  "drag or delete any you don't like, then Keep these pins.", type="positive", multi_line=True, timeout=9000)
+
+    @ui.refreshable
+    def finish_row(self) -> None:
+        if not getattr(self, "suggesting", False):
+            return
+        with ui.row().classes("items-center gap-2 p-2 rounded bg-amber-50"):
+            ui.label("🟠 Suggested pins (not saved yet):").classes("text-sm text-amber-900")
+            ui.button("Keep these pins", icon="check", on_click=self.keep_suggested).props("color=green dense no-caps")
+            ui.button("Take them away", icon="close", on_click=self.drop_suggested).props("flat dense no-caps")
+
+    async def keep_suggested(self) -> None:
+        ui.run_javascript("tmTapKeepAi()")  # they are yours now: saved with your pins within 2 seconds
+        ui.notify("Kept. They are now ordinary pins: drag or delete any of them as before.", type="positive")
+        self.suggesting = False
+        self.finish_row.refresh()  # last: this removes the button you pressed
+
+    def drop_suggested(self) -> None:
+        ui.run_javascript("tmTapDropAi()")
+        self.suggesting = False
+        self.finish_row.refresh()  # last: this removes the button you pressed
 
     # ---------- Stories ----------
 
@@ -3087,7 +3139,8 @@ TAP_SCRIPT = """
 // selected and deleted; on playback every pin you pass makes a click so you hear where it is.
 window.tm = window.tm || {};
 tm.tap = {pins: [], sel: -1, view: 0, span: 0, until: -1, ctx: null, raf: 0, drag: -1, osc: [], srcEl: null,
-          wave: null, waveSrc: '', follow: true, trim: null, tdrag: -1, skip: true, fade: [0, 0], fdrag: -1, gain: null};
+          wave: null, waveSrc: '', follow: true, trim: null, tdrag: -1, skip: true, fade: [0, 0], fdrag: -1, gain: null,
+          ai: new Set()};  // "Finish my pins": the app's suggestions (orange) until you keep them
 const TM_WAVE_STEP = 0.002;  // the waveform keeps the loudest moment of every 2 ms
 
 function tmTapAudio() { return document.getElementById('tm-song'); }
@@ -3263,7 +3316,8 @@ function tmTapDraw() {
   let lastLabel = -1e9;
   T.pins.forEach((p, i) => {
     if (p < v0 || p > v0 + span) return;
-    const c = i === T.sel ? '#dc2626' : T.trim && (p < k0 || p > k1) ? '#94a3b8' : '#2563eb', px = (p - v0) / span * width;
+    const c = i === T.sel ? '#dc2626' : T.trim && (p < k0 || p > k1) ? '#94a3b8' : T.ai.has(p.toFixed(3)) ? '#f59e0b' : '#2563eb',
+          px = (p - v0) / span * width;
     if (px - lastLabel > (fine ? 70 : 52) || i === T.sel) {
       const m = Math.floor(p / 60), sec = (p % 60).toFixed(fine ? 2 : 1).padStart(fine ? 5 : 4, '0');
       html += `<div style="position:absolute;left:${x(p)};top:-1px;margin-left:8px;font-size:10px;font-weight:600;color:${c};` +
@@ -3379,7 +3433,7 @@ function tmTapPlay() { const a = tmTapAudio(); if (!a) return; tmTapCtx(); if (a
 function tmTapSeek(by) { const a = tmTapAudio(); if (!a) return; a.currentTime = Math.max(0, a.currentTime + by); tmTapUnschedule(); tmTapDraw(); }
 function tmTapStart() { const a = tmTapAudio(); if (!a) return; a.currentTime = tm.tap.trim && tm.tap.skip ? tmTrimPart()[0] : 0; tmTapUnschedule(); tm.tap.view = 0; tmTapDraw(); }
 function tmTapDelete() { const T = tm.tap; if (T.sel >= 0) { T.pins.splice(T.sel, 1); T.sel = -1; tmTapUnschedule(); tmTapDraw(); } }
-function tmTapClear() { tm.tap.pins = []; tm.tap.sel = -1; tmTapDraw(); }
+function tmTapClear() { tm.tap.pins = []; tm.tap.ai = new Set(); tm.tap.sel = -1; tmTapDraw(); }
 function tmTapZoom(span) {
   const T = tm.tap, a = tmTapAudio(), at = T.sel >= 0 ? T.pins[T.sel] : a ? a.currentTime : 0;
   T.span = span; T.follow = true; T.view = Math.max(0, at - span * (T.sel >= 0 ? 0.5 : 0.1)); tmTapDraw();
@@ -3418,8 +3472,15 @@ function tmTrimHear(i) {
   if (!skip) { const back = () => { T.skip = false; a.removeEventListener('pause', back); }; a.addEventListener('pause', back); }
   tmTapDraw();
 }
-function tmTapGet() { return tm.tap.pins.slice().sort((a, b) => a - b); }
-function tmTapSet(pins) { tm.tap.pins = pins.slice().sort((a, b) => a - b); tm.tap.sel = -1; tmTapUnschedule(); tmTapDraw(); }
+function tmTapGet() { return tm.tap.pins.filter(p => !tm.tap.ai.has(p.toFixed(3))).sort((a, b) => a - b); }  // yours
+function tmTapSuggest(pins) {  // the app's suggestions join the line in orange; nothing is saved until you keep them
+  const T = tm.tap; tmTapDropAi();
+  pins.forEach(p => { T.pins.push(p); T.ai.add(p.toFixed(3)); });
+  T.pins.sort((a, b) => a - b); T.sel = -1; tmTapUnschedule(); tmTapDraw();
+}
+function tmTapDropAi() { const T = tm.tap; T.pins = T.pins.filter(p => !T.ai.has(p.toFixed(3))); T.ai = new Set(); T.sel = -1; tmTapUnschedule(); tmTapDraw(); }
+function tmTapKeepAi() { tm.tap.ai = new Set(); tmTapDraw(); }
+function tmTapSet(pins) { tm.tap.pins = pins.slice().sort((a, b) => a - b); tm.tap.ai = new Set(); tm.tap.sel = -1; tmTapUnschedule(); tmTapDraw(); }
 </script>
 """
 
