@@ -45,3 +45,29 @@ def test_bursts_become_one_set_and_the_sharpest_is_best(tmp_path):
     assert g["c1"][0] != g["a1"][0]
     assert g["d1"][0] != g["c1"][0]
     assert all(v[2] for k, v in g.items() if k[0] in "bcd")  # single shots are their own best
+
+
+def test_a_burst_stays_together_with_people_moving_and_other_shots_in_between(tmp_path):
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    scene = Image.fromarray(np.kron(rng.integers(0, 255, (8, 12, 3)), np.ones((40, 40, 1))).astype(np.uint8))
+    other = _picture((230, 120, 60))
+
+    def moved(dx, zoom):
+        w, h = scene.size
+        crop = scene.crop((dx, dx // 2, int(w * zoom) + dx, int(h * zoom) + dx // 2)).resize((w, h))
+        a = np.array(crop)
+        a[100:220, 150:250] = np.roll(a[100:220, 150:250], 60, axis=1)  # someone moved
+        return Image.fromarray(a)
+
+    def row(name, minute, img):
+        r = _row(tmp_path, name, f"2025-07-03T10:{minute:02d}:00+02:00", img)
+        r["features"] = stories.features(r["path"])
+        return r
+
+    rows = [row("a1", 0, scene), row("b1", 2, other), row("a2", 4, moved(12, 0.9)), row("a3", 9, moved(30, 0.85))]
+    g = {k.split("/")[-1][:-4]: v[1] for k, v in stories.group(rows).items()}
+    assert g["a1"] == g["a2"] == g["a3"] != g["b1"]
+    strict = {k.split("/")[-1][:-4]: v[1] for k, v in stories.group(rows, "strict").items()}
+    assert strict["a3"] != strict["a1"]  # 5 minutes after the last one: too long for "only near-identical"

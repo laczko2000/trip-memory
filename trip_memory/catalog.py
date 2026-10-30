@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+import cv2
 import numpy as np
 from PIL import Image, ImageOps
 
@@ -97,7 +98,8 @@ CREATE TABLE IF NOT EXISTS items (
     effects_why TEXT,
     ai_caption TEXT,
     ai_score INTEGER,
-    removed INTEGER DEFAULT 0
+    removed INTEGER DEFAULT 0,
+    features BLOB
 );
 CREATE TABLE IF NOT EXISTS story_info (
     key TEXT PRIMARY KEY,  -- the story's first file
@@ -164,7 +166,7 @@ class Trip:
             "look_group INTEGER", "tags_done INTEGER DEFAULT 0", "seconds REAL", "curves TEXT",
             "clip_sound INTEGER DEFAULT 0", "clip_volume REAL DEFAULT 1.0", "cut_out INTEGER DEFAULT 0", "subjects TEXT",
             "transition_why TEXT", "camera_moves TEXT", "speed REAL DEFAULT 1.0", "speed_why TEXT", "fps REAL",
-            "effects TEXT", "effects_why TEXT", "ai_caption TEXT", "ai_score INTEGER", "removed INTEGER DEFAULT 0",
+            "effects TEXT", "effects_why TEXT", "ai_caption TEXT", "ai_score INTEGER", "removed INTEGER DEFAULT 0", "features BLOB",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
@@ -401,7 +403,7 @@ class Trip:
         with self._lock:
             self.db.execute("DELETE FROM faces WHERE path = ?", (path,))
             self.db.execute(
-                "UPDATE items SET rotation = ?, rotation_checked = 1, faces_done = 0, scene_done = 0, tags_done = 0, dhash = NULL "
+                "UPDATE items SET rotation = ?, rotation_checked = 1, faces_done = 0, scene_done = 0, tags_done = 0, dhash = NULL, features = NULL "
                 "WHERE path = ?",
                 (rotation, path),
             )
@@ -647,15 +649,39 @@ class Trip:
             except OSError:
                 continue
             self.execute("UPDATE items SET dhash = ?, colours = ?, sharpness = ? WHERE path = ?", (dhash, colours, sharp, row["path"]))
+        todo = self.query("SELECT path, thumb FROM items WHERE thumb IS NOT NULL AND features IS NULL AND removed = 0")
+        for i, row in enumerate(todo):
+            if i % 50 == 0:
+                self.progress.message = f"Comparing pictures for look-alikes: {i + 1} of {len(todo)}"
+            try:
+                self.execute("UPDATE items SET features = ? WHERE path = ?", (stories.features(row["thumb"]), row["path"]))
+            except (OSError, cv2.error):
+                continue
         rows = [dict(r) for r in self.query(
-            "SELECT path, kind, taken_at, duration, lat, lon, dhash, colours, sharpness FROM items WHERE removed = 0")]
-        groups = stories.group(rows)
+            "SELECT path, kind, taken_at, duration, lat, lon, dhash, colours, sharpness, features FROM items WHERE removed = 0")]
+        groups = stories.group(rows, self.look_alike_level())
         with self._lock:
             self.db.executemany(
                 "UPDATE items SET story = ?, similar_set = ?, best = ? WHERE path = ?",
                 [(st, sim, int(best), path) for path, (st, sim, best) in groups.items()],
             )
             self.db.commit()
+
+    def look_alike_level(self) -> str:
+        rows = self.query("SELECT value FROM meta WHERE key = 'look_alike'")
+        return rows[0]["value"] if rows and rows[0]["value"] in stories.STRICTNESS else "normal"
+
+    def set_look_alike_level(self, level: str) -> None:
+        """How alike shots must be to count as doubles; the sets are worked out again (your ticks stay)."""
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('look_alike', ?)", (level,))
+        self._group_stories()
+
+    def untick_doubles(self) -> int:
+        """Untick every shot that has a better look-alike (the ⭐ of its set); other ticks stay as you set them."""
+        with self._lock:
+            n = self.db.execute("UPDATE items SET chosen = 0 WHERE best = 0 AND chosen = 1 AND removed = 0").rowcount
+            self.db.commit()
+        return n
 
     def suggest_selection(self) -> None:
         """Tick only the best shot of each set of similar shots (single shots stay ticked)."""

@@ -2,11 +2,16 @@
 
 A story is a run of files taken close together in time and place (a new one starts after a long gap,
 on a new day, or after moving more than a kilometre). Inside a story, shots taken within a few minutes
-of each other that look alike form a "similar set": the same scene from slightly different angles.
+of each other that look alike form a "similar set": the same scene or the same people, from slightly
+different angles, a bit closer or further, with people moving a little.
+
+Two shots look alike when many of their small details (corners, edges, patterns) match up, even if the
+picture has shifted, turned or been zoomed a little; or when their layout and colours match closely.
 """
 
 from __future__ import annotations
 
+import io
 import math
 from datetime import datetime
 
@@ -16,9 +21,17 @@ from PIL import Image
 
 STORY_GAP_MINUTES = 45
 STORY_MOVE_KM = 1.0
-SIMILAR_GAP_MINUTES = 3
 SIMILAR_HASH_BITS = 18  # of 64: how different two pictures may look and still count as "the same shot"
 SIMILAR_COLOUR = 40.0
+
+# How strict "look alike" is: minutes between shots, share of matching details, layout and colour closeness.
+STRICTNESS = {
+    "strict": {"minutes": 4, "details": 0.18, "layout": 0.65, "colours": 0.6},
+    "normal": {"minutes": 10, "details": 0.12, "layout": 0.5, "colours": 0.5},
+    "loose": {"minutes": 25, "details": 0.08, "layout": 0.4, "colours": 0.45},
+}
+STRICTNESS_NAMES = {"strict": "Only near-identical shots", "normal": "Same people, same setting (normal)",
+                    "loose": "Anything alike in the same place"}
 
 
 def fingerprint(thumb_path: str) -> tuple[str, bytes, float]:
@@ -31,6 +44,57 @@ def fingerprint(thumb_path: str) -> tuple[str, bytes, float]:
         colours = np.asarray(img.convert("RGB").resize((4, 4), Image.Resampling.BOX), dtype=np.uint8)
         sharpness = float(cv2.Laplacian(np.asarray(gray, dtype=np.uint8), cv2.CV_64F).var())
     return dhash, colours.tobytes(), sharpness
+
+
+def features(thumb_path: str) -> bytes:
+    """A picture's details for comparing it with others: its layout (very blurred), its colours, and the
+    descriptors of up to 400 small details (corners and edges) that survive shifting, turning and zooming."""
+    with Image.open(thumb_path) as img:
+        rgb = np.asarray(img.convert("RGB"))
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    layout = cv2.resize(cv2.GaussianBlur(gray, (0, 0), 8), (12, 12), interpolation=cv2.INTER_AREA).astype(np.float32).ravel()
+    layout = (layout - layout.mean()) / (layout.std() + 1e-6)
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    hist = cv2.calcHist([hsv], [0, 1, 2], None, [12, 4, 4], [0, 180, 0, 256, 0, 256]).ravel()
+    hist = hist / max(hist.sum(), 1)
+    _, details = cv2.ORB_create(400).detectAndCompute(gray, None)
+    out = io.BytesIO()
+    np.savez(out, layout=layout.astype(np.float16), colours=hist.astype(np.float16),
+             details=details if details is not None else np.zeros((0, 32), np.uint8))
+    return out.getvalue()
+
+
+def _unpack(blob: bytes) -> dict:
+    with np.load(io.BytesIO(blob)) as data:
+        return {"layout": data["layout"].astype(np.float32), "colours": data["colours"].astype(np.float32),
+                "details": data["details"]}
+
+
+_MATCHER = cv2.BFMatcher(cv2.NORM_HAMMING)
+
+
+def likeness(a: dict, b: dict) -> tuple[float, float, float]:
+    """(share of matching details, layout match, colour overlap) between two unpacked pictures."""
+    details = 0.0
+    da, db = a["details"], b["details"]
+    if len(da) >= 10 and len(db) >= 10:
+        pairs = _MATCHER.knnMatch(da, db, k=2)
+        good = sum(1 for p in pairs if len(p) == 2 and p[0].distance < 0.75 * p[1].distance)
+        details = good / max(len(da), len(db))
+    layout = float(np.mean(a["layout"] * b["layout"]))
+    colours = float(np.minimum(a["colours"], b["colours"]).sum())
+    return details, layout, colours
+
+
+def alike(a: dict, b: dict, level: str = "normal") -> bool:
+    t = STRICTNESS.get(level, STRICTNESS["normal"])
+    colours = float(np.minimum(a["colours"], b["colours"]).sum())
+    if colours < 0.3:  # quick check first: clearly different colours are never the same shot
+        return False
+    if float(np.mean(a["layout"] * b["layout"])) >= t["layout"] and colours >= t["colours"]:
+        return True
+    details, _, _ = likeness(a, b)
+    return details >= t["details"]
 
 
 def looks_alike(a: dict, b: dict) -> bool:
@@ -60,27 +124,49 @@ def score(row: dict) -> float:
     return s
 
 
-def group(rows: list[dict]) -> dict[str, tuple[int, int, bool]]:
-    """For each file: (story number, similar-set number, is it the best of its set)."""
+def group(rows: list[dict], level: str = "normal") -> dict[str, tuple[int, int, bool]]:
+    """For each file: (story number, similar-set number, is it the best of its set).
+
+    A shot joins a set when it looks like one of that set's last few shots, taken within a few minutes, in the
+    same story; so a burst stays together even with other shots taken in between."""
+    t = STRICTNESS.get(level, STRICTNESS["normal"])
     rows = sorted(rows, key=lambda r: (r["taken_at"], r["path"]))
     result: dict[str, tuple[int, int, bool]] = {}
-    story = similar = 0
+    story = -1
     sets: list[list[dict]] = []
+    open_sets: list[int] = []  # sets of this story that new shots can still join
+    unpacked: dict[str, dict | None] = {}
     prev = None
+
+    def look(row: dict) -> dict | None:
+        if row["path"] not in unpacked:
+            unpacked[row["path"]] = _unpack(row["features"]) if row.get("features") else None
+        return unpacked[row["path"]]
+
     for row in rows:
         when = datetime.fromisoformat(row["taken_at"])
-        if prev is not None:
-            gap = (when - prev[0]).total_seconds() / 60
-            new_story = gap > STORY_GAP_MINUTES or row["taken_at"][:10] != prev[1]["taken_at"][:10] or _km(row, prev[1]) > STORY_MOVE_KM
-            if new_story:
-                story += 1
-            if new_story or gap > SIMILAR_GAP_MINUTES or not looks_alike(row, prev[1]):
-                similar += 1
-                sets.append([])
-        else:
+        if prev is None or ((when - prev[0]).total_seconds() / 60 > STORY_GAP_MINUTES
+                            or row["taken_at"][:10] != prev[1]["taken_at"][:10] or _km(row, prev[1]) > STORY_MOVE_KM):
+            story += 1
+            open_sets = []
+        best_set = None
+        for k in list(reversed(open_sets))[:12]:  # the most recent sets only, so big trips stay quick
+            last = sets[k][-1]
+            if (when - datetime.fromisoformat(last["taken_at"])).total_seconds() / 60 > t["minutes"]:
+                continue
+            for other in sets[k][-2:]:
+                a, b = look(row), look(other)
+                if (alike(a, b, level) if a is not None and b is not None else looks_alike(row, other)):
+                    best_set = k
+                    break
+            if best_set is not None:
+                break
+        if best_set is None:
             sets.append([])
-        sets[-1].append(row)
-        result[row["path"]] = (story, similar, False)
+            best_set = len(sets) - 1
+            open_sets.append(best_set)
+        sets[best_set].append(row)
+        result[row["path"]] = (story, best_set, False)
         prev = (when, row)
     for members in sets:
         best = max(members, key=score)

@@ -19,6 +19,7 @@ from nicegui import app, run, ui
 from .catalog import Trip, app_dir
 from .media import MediaItem
 from . import director
+from . import stories
 from . import music as free_music
 from . import songmap
 from . import taps as song_taps
@@ -358,6 +359,9 @@ class Page:
                 "Your original files on the Mac are not touched."
             ).classes("text-sm text-gray-700")
             with ui.row().classes("items-center gap-2"):
+                ui.select(stories.STRICTNESS_NAMES, value=self.trip.look_alike_level(), label="Doubles are",
+                          on_change=lambda e: self.set_look_alike(e.value)).classes("w-72") \
+                    .tooltip("How alike shots must be to count as doubles of each other")
                 ui.button("Keep only the ⭐ of every set", icon="star", on_click=self.suggest).props("outline") \
                     .tooltip("Untick every double or triple except the best one (sharpest, best exposed)")
                 self.remove_button = ui.button(f"Remove {total - chosen} unticked from the trip", icon="delete_sweep",
@@ -395,6 +399,20 @@ class Page:
         amount = f"{size / 1e9:.1f} GB" if size >= 1e9 else f"{size / 1e6:.0f} MB"
         return (f"{total} files in the trip ({amount}): {chosen} ticked, {total - chosen} unticked"
                 + (f" · {removed} removed earlier" if removed else ""))
+
+    async def set_look_alike(self, level: str) -> None:
+        if self.trip.look_alike_level() == level:
+            return
+        note = ui.notification("Finding doubles again…", spinner=True, timeout=None)
+        try:
+            await run.io_bound(self.trip.set_look_alike_level, level)
+        finally:
+            note.dismiss()
+        self.reload()
+        sets = len(self.all_items) - len({it["similar_set"] for it in self.all_items})
+        ui.notify(f"{sets} files are now doubles of another shot. Click Keep only the ⭐ of every set to untick them.",
+                  multi_line=True, timeout=8000)
+        self.refresh_all()
 
     def confirm_remove(self) -> None:
         n = sum(1 for it in self.all_items if not it["chosen"])
@@ -576,8 +594,8 @@ class Page:
         return box
 
     def suggest(self) -> None:
-        self.trip.suggest_selection()
-        ui.notify("Ticked the best shot of each set of similar shots.")
+        n = self.trip.untick_doubles()
+        ui.notify(f"Unticked {n} doubles: only the ⭐ of each set stays ticked. Everything else you chose is unchanged.")
         self.refresh_all()
 
     def keep_best(self, members: list[dict]) -> None:
