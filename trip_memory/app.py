@@ -33,7 +33,7 @@ from .tags import ALL_TAGS, EDITABLE_TAGS, TAG_GROUP
 OUTPUT_DIR = Path.home() / "Movies" / "Trip Memory"
 RESOLUTIONS = {"Full HD (1080p)": (1920, 1080), "HD (720p, faster)": (1280, 720)}
 PAGE_SIZE = 48
-TILES_PER_PAGE = 60
+TILES_PER_PAGE = 60  # Choose files draws this many at a time as you scroll
 STORY_ROWS = 60
 STORY_PAGE_SIZE = 25
 DEFAULT_TRANSITION = "Default (from Make video)"
@@ -105,8 +105,13 @@ class Page:
         self.choose_filters = {"day": ALL, "kind": ALL, "show": ALL}
         self.stale = False  # quick ticks in Choose files: the other tabs catch up when you open them
         self.board_limit = STORY_ROWS  # Storyboard rows shown (more on request: a long list is slow to draw)
-        self.choose_page = 1
         self.story_page = 1
+        self.choose_rest: list = []  # Choose files: parts of the long list not drawn yet (drawn as you scroll)
+        self.choose_left = 0
+        self.choose_list = None
+        self.choose_more = None
+        self.choose_tiles: dict[str, tuple] = {}
+        self.choose_counts: list[tuple] = []
         self.media_route: str | None = None
         self.auto_length: object = None
         self.auto_limits = AutoLimits(**load_settings().get("limits", {}))
@@ -478,9 +483,10 @@ class Page:
         if self.choose_filters["show"] == "removed":
             self.removed_view(shown)
             return
-        # Pages of about TILES_PER_PAGE files (a big story runs on over several pages), so even thousands stay quick.
-        pages_of: list[list[tuple[int, list[dict]]]] = [[]]
-        on_page = 0
+        # One long list. It is drawn TILES_PER_PAGE files at a time: the next part is added by itself as you scroll
+        # near the bottom, so even thousands of files stay quick (drawing them all at once makes the page reload).
+        parts: list[list[tuple[int, list[dict]]]] = [[]]
+        in_part = 0
         for number in sorted({it["story"] or 0 for it in shown}):
             members = [it for it in shown if (it["story"] or 0) == number]
             sets: dict[int, list[dict]] = {}
@@ -488,25 +494,46 @@ class Page:
                 sets.setdefault(it["similar_set"] or 0, []).append(it)
             chunk: list[dict] = []
             for group in sets.values():  # a set of look-alikes is never split
-                if on_page + len(group) > TILES_PER_PAGE and on_page:
+                if in_part + len(group) > TILES_PER_PAGE and in_part:
                     if chunk:
-                        pages_of[-1].append((number, chunk))
-                    pages_of.append([])
-                    chunk, on_page = [], 0
+                        parts[-1].append((number, chunk))
+                    parts.append([])
+                    chunk, in_part = [], 0
                 chunk += group
-                on_page += len(group)
+                in_part += len(group)
             if chunk:
-                pages_of[-1].append((number, chunk))
-        pages = len(pages_of)
-        self.choose_page = min(self.choose_page, pages)
-        if pages > 1:
-            ui.pagination(1, pages, direction_links=True, value=self.choose_page,
-                          on_change=lambda e: self.go_to_choose_page(e.value)).props("max-pages=12")
-        for number, members in pages_of[self.choose_page - 1]:
-            self.story_block(number, members)
-        if pages > 1:
-            ui.pagination(1, pages, direction_links=True, value=self.choose_page,
-                          on_change=lambda e: self.go_to_choose_page(e.value)).props("max-pages=12")
+                parts[-1].append((number, chunk))
+        self.choose_rest = parts[1:]
+        self.choose_tiles: dict[str, tuple] = {}  # path: (file, checkbox, tile), for ticking without a redraw
+        self.choose_counts: list[tuple] = []  # (story's "x of y chosen" label, its files)
+        self.choose_left = len(shown) - sum(len(m) for _, m in parts[0])
+        with ui.column().classes("w-full gap-0") as self.choose_list:
+            with ui.column().classes("w-full gap-0"):  # each part in its own box: adding one leaves the others alone
+                for number, members in parts[0]:
+                    self.story_block(number, members)
+        self.choose_more = None
+        self.more_files_button()
+
+    def more_files_button(self) -> None:
+        """At the bottom of the list: shows the next files. The page presses it by itself when you scroll near it."""
+        if self.choose_more is not None:
+            self.choose_more.delete()
+            self.choose_more = None
+        if not self.choose_rest:
+            return
+        with self.choose_list:
+            self.choose_more = ui.button(f"Loading more… ({self.choose_left} files below)", icon="expand_more",
+                                         on_click=self.more_files).props("outline").classes("w-full mt-2 tm-more")
+
+    def more_files(self) -> None:
+        if not self.choose_rest:
+            return
+        part = self.choose_rest.pop(0)
+        with self.choose_list, ui.column().classes("w-full gap-0"):
+            for number, members in part:
+                self.story_block(number, members)
+        self.choose_left -= sum(len(m) for _, m in part)
+        self.more_files_button()
 
     def removed_view(self, removed: list[dict]) -> None:
         if not removed:
@@ -533,10 +560,12 @@ class Page:
         places = [it["place"] or it["country"] for it in items if it["place"] or it["country"]]
         place = max(set(places), key=places.count) if places else "Unknown place"
         picked = sum(it["chosen"] for it in items)
-        with ui.card().classes("w-full p-3 mt-2"):
+        # content-visibility: the browser skips stories that are off screen, so a long list stays quick
+        with ui.card().classes("w-full p-3 mt-2").style("content-visibility:auto;contain-intrinsic-size:auto 400px"):
             with ui.row().classes("w-full items-center gap-2"):
                 ui.label(f"Story {number + 1} · {first:%a %d %b, %H:%M}–{last:%H:%M} · {place}").classes("font-semibold")
-                ui.label(f"{picked} of {len(items)} chosen").classes("text-sm text-gray-500")
+                count = ui.label(f"{picked} of {len(items)} chosen").classes("text-sm text-gray-500")
+                self.choose_counts.append((count, items))
                 paths = [it["path"] for it in items]
                 ui.button("Tick story", on_click=lambda p=paths: self.choose_paths(p, True)).props("flat dense size=sm")
                 ui.button("Untick story", on_click=lambda p=paths: self.choose_paths(p, False)).props("flat dense size=sm")
@@ -560,10 +589,11 @@ class Page:
         with ui.column().classes("w-36 gap-0" + ("" if it["chosen"] else " opacity-40")) as tile:
             self.preview(it, "width:144px;height:96px", start=(it["duration"] or 0) * 0.3)
             with ui.row().classes("items-center gap-0 no-wrap"):
-                ui.checkbox(
+                box = ui.checkbox(
                     value=bool(it["chosen"]),
                     on_change=lambda e, it=it, tile=tile: self.quick_tick(it, e.value, tile),
                 ).props("dense size=xs")
+                self.choose_tiles[it["path"]] = (it, box, tile)
                 rotate_buttons(lambda degrees, path=it["path"]: self.rotate(path, degrees))
                 star = "⭐ " if in_set and it["best"] else ""
                 ui.label(f"{star}{datetime.fromisoformat(it['taken_at']).astimezone():%H:%M:%S}").classes("text-xs text-gray-600")
@@ -599,9 +629,8 @@ class Page:
         self.refresh_all()
 
     def keep_best(self, members: list[dict]) -> None:
-        self.trip.set_chosen([m["path"] for m in members if not m["best"]], False)
-        self.trip.set_chosen([m["path"] for m in members if m["best"]], True)
-        self.refresh_choose()
+        self.tick_in_place([m["path"] for m in members if not m["best"]], False)
+        self.tick_in_place([m["path"] for m in members if m["best"]], True)
 
     async def rotate(self, path: str, degrees: int) -> None:
         try:
@@ -615,8 +644,23 @@ class Page:
         self.refresh_all()  # last: this rebuilds the tile the button sits on
 
     def choose_paths(self, paths: list[str], chosen: bool) -> None:
+        self.tick_in_place(paths, chosen)
+
+    def tick_in_place(self, paths: list[str], chosen: bool) -> None:
+        """Tick or untick files without redrawing the list, so you stay where you are in it."""
         self.trip.set_chosen(paths, chosen)
-        self.refresh_choose()
+        for path in paths:
+            if path not in self.choose_tiles:
+                continue
+            it, box, tile = self.choose_tiles[path]
+            it["chosen"] = int(chosen)
+            box.set_value(chosen)  # quick_tick sees nothing changed
+            tile.classes(remove="opacity-40") if chosen else tile.classes(add="opacity-40")
+        for label, items in self.choose_counts:
+            label.set_text(f"{sum(i['chosen'] for i in items)} of {len(items)} chosen")
+        self.items = [x for x in self.all_items if x["chosen"]]
+        self.stale = True
+        self.update_sort_counts()
 
     def quick_tick(self, it: dict, chosen: bool, tile) -> None:
         """Tick or untick one file at once, without rebuilding the page (fast with thousands of files)."""
@@ -625,6 +669,9 @@ class Page:
         self.trip.set_chosen([it["path"]], chosen)
         it["chosen"] = int(chosen)
         tile.classes(remove="opacity-40") if chosen else tile.classes(add="opacity-40")
+        for label, items in self.choose_counts:
+            if any(i is it for i in items):
+                label.set_text(f"{sum(i['chosen'] for i in items)} of {len(items)} chosen")
         self.items = [x for x in self.all_items if x["chosen"]]
         self.stale = True
         self.update_sort_counts()
@@ -637,12 +684,7 @@ class Page:
 
     def set_choose_filter(self, key: str, value: str) -> None:
         self.choose_filters[key] = value
-        self.choose_page = 1
         self.story_page = 1
-        self.choose_view.refresh()
-
-    def go_to_choose_page(self, page: int) -> None:
-        self.choose_page = page
         self.choose_view.refresh()
 
     def choose_shown_files(self, chosen: bool) -> None:
@@ -1914,6 +1956,15 @@ document.addEventListener('mouseleave', (e) => {
   if (!box || e.target !== box) return;
   tmStop(box);
 }, true);
+// Choose files is one long list: when you scroll near its bottom, press "Loading more" for you.
+setInterval(() => {
+  const more = document.querySelector('.tm-more');
+  if (!more || more.dataset.pressed) return;
+  if (more.getBoundingClientRect().top < window.innerHeight + 1200) {
+    more.dataset.pressed = '1';
+    more.click();
+  }
+}, 400);
 </script>
 """
 
@@ -2198,7 +2249,9 @@ def main() -> None:
     ui.page("/")(lambda: Page().build())
     print("\nTrip Memory is running. Your browser should open by itself.")
     print("If it does not, open http://localhost:8765 . Close this window to stop the app.\n")
-    ui.run(title="Trip Memory", host="127.0.0.1", port=8765, reload=False, show=True, favicon="🎬")
+    # A busy moment (drawing many pictures on a MacBook Air) must not count as the page being closed, which reloads it.
+    ui.run(title="Trip Memory", host="127.0.0.1", port=8765, reload=False, show=True, favicon="🎬", reconnect_timeout=30,
+           unocss="wind4")  # UnoCSS styles only what changed; Tailwind re-checked the whole page on every tick
 
 
 if __name__ in {"__main__", "__mp_main__"}:
