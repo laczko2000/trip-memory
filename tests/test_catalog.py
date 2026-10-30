@@ -466,3 +466,28 @@ def test_a_collage_shows_as_one_shot_and_can_be_split(tmp_path, monkeypatch):
     board = trip.storyboard()
     assert [Path(r["path"]).name for r in board] == ["0.jpg", "1.jpg", "2.jpg", "3.jpg"]
     assert [r["seconds"] for r in board[:3]] == [0.5, 0.5, 0.5]
+
+
+def test_a_clip_you_cut_only_ever_uses_the_part_you_kept(tmp_path, monkeypatch):
+    from trip_memory import autoedit
+
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    subprocess.run([ffmpeg_paths()[0], "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=160x90:r=30:d=10",
+                    "-pix_fmt", "yuv420p", str(trip_dir / "clip.mp4")], check=True)
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    path = str(trip_dir / "clip.mp4")
+    trip.set_keep(path, 4.0, 7.0)
+    row = trip.auto_edit_pool()[0]
+    assert row["duration"] == 3.0 and row["keep_offset"] == 4.0  # Auto-edit sees a 3-second clip
+    item = trip.media_items()[0]
+    assert (item.trim_start, item.trim_end) == (4.0, 7.0)  # no trim of its own: the part you kept
+    trip.auto_edit_steady(autoedit.Limits(max_video=2, max_photo=2, min_shot=1), 2.0, 0.5, "Fade")
+    shot = trip.storyboard()[0]
+    assert 4.0 <= shot["trim_start"] < shot["trim_end"] <= 7.0 + 1e-6
+    trip.set_keep(path, None, None)  # Undo cut: the whole clip again
+    assert "keep_offset" not in trip.auto_edit_pool()[0]
+    assert trip.undo_label() == "bringing a whole clip back"

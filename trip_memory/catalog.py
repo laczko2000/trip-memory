@@ -172,7 +172,7 @@ class Trip:
             "transition_why TEXT", "camera_moves TEXT", "speed REAL DEFAULT 1.0", "speed_why TEXT", "fps REAL",
             "effects TEXT", "effects_why TEXT", "ai_caption TEXT", "ai_score INTEGER", "removed INTEGER DEFAULT 0", "features BLOB",
             "plan_role TEXT", "plan_pos REAL", "title_text TEXT", "title_sub TEXT", "title_style TEXT", "title_where TEXT",
-            "focus_x REAL",
+            "focus_x REAL", "keep_start REAL", "keep_end REAL",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
@@ -346,8 +346,8 @@ class Trip:
                     has_audio=bool(r["has_audio"]),
                     hdr=bool(r["hdr"]),
                     rotation=r["rotation"] or 0,
-                    trim_start=r["trim_start"],
-                    trim_end=r["trim_end"],
+                    trim_start=r["trim_start"] if r["trim_start"] is not None else r["keep_start"],
+                    trim_end=r["trim_end"] if r["trim_start"] is not None else r["keep_end"],
                     transition=r["transition"],
                     seconds=r["seconds"],
                     sound=bool(r["clip_sound"]),  # videos are silent unless you switch their sound on
@@ -595,7 +595,7 @@ class Trip:
                 (rotation, path),
             )
             self.db.commit()
-        row = self.query("SELECT path, kind, duration, rotation FROM items WHERE path = ?", (path,))[0]
+        row = self.query("SELECT * FROM items WHERE path = ?", (path,))[0]
         self.execute("UPDATE items SET thumb = ? WHERE path = ?", (str(self._make_thumb(row)), path))
 
     def reset_order(self) -> None:
@@ -615,6 +615,9 @@ class Trip:
                 for r in story["items"]:
                     if r["chosen"] and r["included"] and r["path"] not in left_out:
                         r = r | {"wish": self.wish_match(r, wish)}
+                        if kept_part(r):  # a clip you cut: Auto-edit only sees the part you kept
+                            start, end = kept_part(r)
+                            r = r | {"duration": end - start, "keep_offset": start, "full_duration": r["duration"]}
                         pool.append(r | {"story_rank": rank, "story_name": story["name"]})
         return pool
 
@@ -702,17 +705,24 @@ class Trip:
         for r in videos:
             if r["curves"]:
                 c = json.loads(r["curves"])
-                n = max(len(c["action"]) + 1, int((r["duration"] or 0) * motion.FPS))
-                scores[r["path"]] = autoedit.interest(c["action"], c["shake"], c["loud"], n, c.get("sharp"),
-                                                      c.get("camera"), c.get("bright"))
+                n = max(len(c["action"]) + 1, int((r.get("full_duration") or r["duration"] or 0) * motion.FPS))
+                score = autoedit.interest(c["action"], c["shake"], c["loud"], n, c.get("sharp"),
+                                          c.get("camera"), c.get("bright"))
+                if r.get("keep_offset") is not None:  # only the part you kept
+                    first = int(round(r["keep_offset"] * motion.FPS))
+                    score = score[first:first + max(1, int(round(r["duration"] * motion.FPS)))]
+                scores[r["path"]] = score
         return scores
 
     def _apply_plan(self, result: autoedit.Plan) -> None:
         self.checkpoint("the first cut")
+        offsets = {r["path"]: r["keep_start"] for r in self.query(
+            "SELECT path, keep_start FROM items WHERE keep_start IS NOT NULL AND keep_end IS NOT NULL")}
         with self._lock:
             for shot_no, shot in enumerate(result.shots):
                 used = (shot.seconds - held(shot.effects)) * shot.speed * source_factor(shot.effects)  # of the video
-                trim = (shot.start, shot.start + used) if shot.kind == "video" else (None, None)
+                start = shot.start + offsets.get(shot.path, 0.0)  # Auto-edit only saw the part you kept
+                trim = (start, start + used) if shot.kind == "video" else (None, None)
                 self.db.execute(
                     "UPDATE items SET cut_out = 0, position = ?, trim_start = ?, trim_end = ?, transition = ?, "
                     "transition_why = ?, seconds = ?, speed = ?, speed_why = ?, effects = ?, effects_why = ? "
@@ -750,6 +760,44 @@ class Trip:
         self._apply_plan(result)
         report(1.0, "Done")
         return result
+
+    def set_keep(self, path: str, start: float | None, end: float | None) -> None:
+        """Cut a video down to the part you keep (start, end); (None, None) brings the whole clip back. Your file is
+        not changed: the app simply never uses or shows the rest."""
+        row = self.query("SELECT * FROM items WHERE path = ?", (path,))[0]
+        if start is not None and end is not None:
+            start, end = max(0.0, float(start)), min(float(end), row["duration"] or float(end))
+            if end - start < 0.3:
+                raise ValueError("Keep at least a third of a second")
+            self.checkpoint("cutting a clip")
+        else:
+            start = end = None
+            self.checkpoint("bringing a whole clip back")
+        trim = (row["trim_start"], row["trim_end"])
+        if start is not None and trim[0] is not None and not (start <= trim[0] < trim[1] <= end):
+            trim = (None, None)  # the old trim reached into the part you cut off: it now plays the part you kept
+        self.execute("UPDATE items SET keep_start = ?, keep_end = ?, trim_start = ?, trim_end = ? WHERE path = ?",
+                     (start, end, *trim, path))
+        row = self.query("SELECT * FROM items WHERE path = ?", (path,))[0]
+        try:
+            self.execute("UPDATE items SET thumb = ? WHERE path = ?", (str(self._make_thumb(row)), path))
+        except Exception:
+            traceback.print_exc()  # the old preview picture stays
+
+    def filmstrip(self, path: str, frames: int = 12) -> Path | None:
+        """A row of small pictures from through a video, to show under the handles when you cut it."""
+        row = self.query("SELECT duration, rotation FROM items WHERE path = ?", (path,))[0]
+        rotation, duration = row["rotation"] or 0, row["duration"] or 0
+        out = self.dir / "thumbs" / f"{hashlib.sha1(path.encode()).hexdigest()[:16]}_{rotation}_strip.jpg"
+        if out.exists() or duration <= 0:
+            return out if out.exists() else None
+        subprocess.run(
+            [ffmpeg_paths()[0], "-loglevel", "error", "-y", "-i", path, "-vf",
+             rotate_filter(rotation) + f"fps={frames / duration:.4f},scale=-2:60,tile={frames}x1", "-frames:v", "1",
+             "-q:v", "5", str(out)],
+            capture_output=True,
+        )
+        return out if out.exists() else None
 
     def set_trim(self, path: str, start: float | None, end: float | None) -> None:
         self.execute("UPDATE items SET trim_start = ?, trim_end = ? WHERE path = ?", (start, end, path))
@@ -1184,14 +1232,17 @@ class Trip:
                 img.convert("RGB").save(out, "JPEG", quality=80)
                 out.seek(0)
                 return [out.read()]
-        duration = row["duration"] or 0
+        offset, duration = 0.0, row["duration"] or 0
+        if kept_part(dict(row)):  # only the part you kept
+            offset, end = kept_part(dict(row))
+            duration = end - offset
         frames = []
         shares = (0.2, 0.5, 0.8) if count >= 3 and duration >= 3 else (0.5,)
         with tempfile.TemporaryDirectory() as tmp:
             for i, share in enumerate(shares):
                 out = Path(tmp) / f"{i}.jpg"
                 subprocess.run(
-                    [ffmpeg_paths()[0], "-loglevel", "error", "-y", "-ss", f"{duration * share:.2f}", "-i", row["path"],
+                    [ffmpeg_paths()[0], "-loglevel", "error", "-y", "-ss", f"{offset + duration * share:.2f}", "-i", row["path"],
                      "-frames:v", "1", "-vf", rotate_filter(row["rotation"] or 0) + f"scale={size}:-2", "-q:v", "5", str(out)],
                     capture_output=True,
                 )
@@ -1240,7 +1291,7 @@ class Trip:
             {"name": story["name"], "when": f"{start:%a %d %b %H:%M}–{end:%H:%M}",
              "place": max(set(places), key=places.count) if places else ""},
             [{"caption": it.get("ai_caption"), "highlight": it.get("ai_score"), "kind": it["kind"],
-              "seconds": it["duration"] or 0, "time": f"{datetime.fromisoformat(it['taken_at']).astimezone():%H:%M}"}
+              "seconds": (kept_part(it)[1] - kept_part(it)[0]) if kept_part(it) else it["duration"] or 0, "time": f"{datetime.fromisoformat(it['taken_at']).astimezone():%H:%M}"}
              for it in shots])
         plan = director.clean_plan(ai.plan(prompt), len(shots))  # a DirectorError stops the whole run
         if not plan["parts"]:
@@ -1593,13 +1644,16 @@ class Trip:
         rows = self.query("SELECT value FROM meta WHERE key = 'storyline_used'")
         return int(rows[0]["value"]) if rows else None
 
-    def _thumb_path(self, path: str, rotation: int = 0) -> Path:
-        # The rotation is part of the name so the browser shows the turned picture straight away.
-        return self.dir / "thumbs" / f"{hashlib.sha1(path.encode()).hexdigest()[:16]}_{rotation}.jpg"
+    def _thumb_path(self, path: str, rotation: int = 0, kept: tuple[float, float] | None = None) -> Path:
+        # The rotation (and the part of a video you kept) is part of the name, so the browser shows the new
+        # picture straight away.
+        cut = f"_{kept[0]:.1f}-{kept[1]:.1f}" if kept else ""
+        return self.dir / "thumbs" / f"{hashlib.sha1(path.encode()).hexdigest()[:16]}_{rotation}{cut}.jpg"
 
     def _make_thumb(self, row) -> Path:
         rotation = row["rotation"] or 0
-        out = self._thumb_path(row["path"], rotation)
+        kept = kept_part(dict(row)) if "keep_start" in row.keys() else None
+        out = self._thumb_path(row["path"], rotation, kept)
         if row["kind"] == "photo":
             with Image.open(row["path"]) as img:
                 img.draft("RGB", (960, 960))  # fast for JPEGs
@@ -1608,7 +1662,8 @@ class Trip:
                 img.save(out, quality=85)
         else:
             subprocess.run(
-                [ffmpeg_paths()[0], "-loglevel", "error", "-y", "-ss", f"{(row['duration'] or 0) / 2:.2f}",
+                [ffmpeg_paths()[0], "-loglevel", "error", "-y", "-ss",
+                 f"{sum(kept or (0, row['duration'] or 0)) / 2:.2f}",
                  "-i", row["path"], "-frames:v", "1", "-vf", rotate_filter(rotation) + "scale=480:-2", "-q:v", "4", str(out)],
                 capture_output=True,
             )
@@ -1852,6 +1907,12 @@ def _upright_rotation(faces, frame: Path) -> int:
         turns[turn] = max((f.score for f in found), default=0.0)
     turn = max(turns, key=turns.get)
     return turn if turns[turn] >= 0.8 else 0
+
+
+def kept_part(row: dict) -> tuple[float, float] | None:
+    """The part of a video you kept when you cut it (Choose files or Library), or None for the whole clip."""
+    start, end = row.get("keep_start"), row.get("keep_end")
+    return (float(start), float(end)) if start is not None and end is not None and end > start else None
 
 
 def _frames(path: Path, kind: str, duration: float, out_dir: Path, rotation: int = 0) -> list[Path]:

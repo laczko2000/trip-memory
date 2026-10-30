@@ -17,7 +17,7 @@ from urllib.parse import quote
 from nicegui import app, run, ui
 from starlette.requests import Request
 
-from .catalog import Trip, app_dir
+from .catalog import Trip, app_dir, kept_part
 from .media import MediaItem
 from . import director
 from . import looks
@@ -670,7 +670,7 @@ class Page:
         with ui.column().classes("w-36 gap-0" + ("" if it["chosen"] else " opacity-40")) as tile:
             if it["path"] == self.choose_focus_path:
                 self.choose_focus_card = tile
-            self.preview(it, "width:144px;height:96px", start=(it["duration"] or 0) * 0.3)
+            self.preview(it, "width:144px;height:96px", start=self.hover_start(it))
             with ui.row().classes("items-center gap-0 no-wrap"):
                 box = ui.checkbox(
                     value=bool(it["chosen"]),
@@ -678,6 +678,7 @@ class Page:
                 ).props("dense size=xs")
                 self.choose_tiles[it["path"]] = (it, box, tile)
                 rotate_buttons(lambda degrees, path=it["path"]: self.rotate(path, degrees))
+                self.cut_button(it)
                 star = "⭐ " if in_set and it["best"] else ""
                 ui.label(f"{star}{datetime.fromisoformat(it['taken_at']).astimezone():%H:%M:%S}").classes("text-xs text-gray-600")
 
@@ -694,6 +695,11 @@ class Page:
             return box
         src = f"{self.media_route}/{quote(str(Path(it['path']).relative_to(self.trip.folder)))}"
         end = (it["duration"] or 0) if end is None else end
+        kept = kept_part(it)
+        if kept:  # a clip you cut: only the part you kept plays
+            end = min(end, kept[1])
+            start = start if kept[0] <= start < end else kept[0]
+        length = f"✂ {fmt_length(kept[1] - kept[0])}" if kept else fmt_length(it["duration"])
         ui.html(
             f'<div id="{box}" class="tm-hover" data-start="{start:.2f}" data-end="{end:.2f}" data-rot="{it.get("rotation") or 0}" '
             f'style="position:relative;overflow:hidden;border-radius:4px;background:#222;{size}">'
@@ -701,10 +707,90 @@ class Page:
             f'<video data-src="{src}" {"" if sound else "muted "}playsinline preload="none" '
             f'style="display:none;position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#222"></video>'
             f'<span style="position:absolute;left:4px;bottom:2px;color:white;font-size:11px;text-shadow:0 0 3px black">'
-            f'▶ {fmt_length(it["duration"])}</span></div>',
+            f'▶ {length}</span></div>',
             sanitize=False,
         ).style("width:100%" if "100%" in size else "")  # else a tall picture squeezes a full-width frame
         return box
+
+    @staticmethod
+    def hover_start(it: dict) -> float:
+        start, end = kept_part(it) or (0.0, it["duration"] or 0)
+        return start + (end - start) * 0.3
+
+    def cut_button(self, it: dict) -> None:
+        if it["kind"] == "video":
+            ui.button(icon="content_cut", on_click=lambda it=it: self.cut_clip(it)) \
+                .props("flat dense round size=sm" + (" color=green" if kept_part(it) else "")) \
+                .tooltip("Cut this clip: keep only the part you want" + (" (cut: ✂ " + fmt_length(
+                    kept_part(it)[1] - kept_part(it)[0]) + " kept)" if kept_part(it) else ""))
+
+    async def cut_clip(self, it: dict) -> None:
+        """Drag the two handles in to the part you want, then Cut and remove the rest. Your file is not changed:
+        the app just never uses or shows the cut-off part (Undo cut brings it back)."""
+        duration = round(it["duration"] or 0, 1)
+        start, end = kept_part(it) or (0.0, duration)
+        part = {"min": round(start, 1), "max": round(min(end, duration), 1)}
+        strip = await run.io_bound(self.trip.filmstrip, it["path"])
+        with ui.dialog() as dialog, ui.card().classes("w-[680px] max-w-full"):
+            ui.label(f"✂ Cut {Path(it['path']).name}").classes("text-lg font-semibold")
+            ui.label("Drag the two green handles in to the part you want. You see where each handle is as you drag; "
+                     "Play plays just that part. Your file on the Mac is not changed.").classes("text-sm text-gray-600")
+            box = self.preview(it | {"keep_start": None, "keep_end": None}, "width:100%;height:340px", start,
+                               end, view="cut", sound=True)
+            if strip:  # the clip as a row of pictures; the parts you cut off are greyed out, as on the song's line
+                shade = "position:absolute;top:0;bottom:0;background:rgba(15,23,42,.65)"
+                ui.html(f'<div style="position:relative;height:48px;margin:8px 10px 0;border-radius:4px;overflow:hidden">'
+                        f'<img src="{data_url(str(strip))}" style="width:100%;height:100%;object-fit:fill">'
+                        f'<div id="{box}-l" style="{shade};left:0"></div><div id="{box}-r" style="{shade};right:0"></div>'
+                        f'</div>', sanitize=False).classes("w-full")
+            ui.range(min=0, max=duration, step=0.1, value=dict(part),
+                     on_change=lambda e: moved(e.value["min"], e.value["max"])) \
+                .props("color=green").classes("w-full")
+            label = ui.label().classes("text-sm font-medium text-green-800")
+
+            def show() -> None:
+                label.text = (f"Keeping {fmt_length(part['min'])} to {fmt_length(part['max'])}: "
+                              f"{part['max'] - part['min']:.1f} s of {fmt_length(duration)}")
+                left, right = 100 * part["min"] / (duration or 1), 100 * (1 - part["max"] / (duration or 1))
+                ui.run_javascript(f"for (const [s, w] of [['l', {left:.2f}], ['r', {right:.2f}]]) {{"
+                                  f"const e = document.getElementById('{box}-' + s); if (e) e.style.width = w + '%'; }}")
+
+            def moved(lo: float, hi: float) -> None:
+                # Show the handle you just moved: its frame, then a moment of what follows (or leads up to the end).
+                at = lo if lo != part["min"] else max(lo, hi - 1.5)
+                part.update(min=lo, max=hi)
+                show()
+                ui.run_javascript(f"tmPlayPart('{box}', {lo}, {hi}, {at})")
+
+            show()
+            ui.timer(0.3, show, once=True)  # once the dialog is on screen: grey out what you cut off before
+            with ui.row().classes("w-full items-center gap-2 mt-2"):
+                ui.button("Play the part", icon="play_arrow",
+                          on_click=lambda: ui.run_javascript(f"tmPlayPart('{box}', {part['min']}, {part['max']}, {part['min']})")) \
+                    .props("outline no-caps")
+                ui.button("Cut and remove the rest", icon="content_cut", on_click=lambda: dialog.submit("cut")) \
+                    .props("color=green no-caps")
+                if kept_part(it):
+                    ui.button("Undo cut: the whole clip again", icon="undo", on_click=lambda: dialog.submit("whole")) \
+                        .props("flat no-caps")
+                ui.space()
+                ui.button("Close", on_click=lambda: dialog.submit(None)).props("flat no-caps")
+        dialog.open()
+        answer = await dialog
+        dialog.clear()
+        if answer is None:
+            return
+        whole = answer == "whole" or (part["min"] <= 0.05 and part["max"] >= duration - 0.05)
+        try:
+            await run.io_bound(self.trip.set_keep, it["path"], None if whole else part["min"], None if whole else part["max"])
+        except Exception as exc:
+            traceback.print_exc()
+            ui.notify(f"Could not cut {Path(it['path']).name}: {exc}", type="negative", multi_line=True)
+            return
+        ui.notify(f"{Path(it['path']).name}: the whole clip again." if whole else
+                  f"{Path(it['path']).name}: kept {fmt_length(part['min'])} to {fmt_length(part['max'])}. "
+                  "Auto-edit and the video only use this part.", type="positive")
+        self.refresh_all()  # last: this rebuilds the tile the button sits on
 
     def suggest(self) -> None:
         n = self.trip.untick_doubles()
@@ -849,7 +935,7 @@ class Page:
     def card(self, it: dict) -> None:
         with ui.card().tight().classes("w-full" + ("" if it["included"] else " opacity-50")) as card:
             if it["thumb"]:
-                self.preview(it, "width:100%;height:150px", start=(it["duration"] or 0) * 0.3)
+                self.preview(it, "width:100%;height:150px", start=self.hover_start(it))
             else:
                 ui.label("Analysing…").classes("w-full thumb flex items-center justify-center bg-gray-100 text-gray-400")
             with ui.column().classes("p-2 gap-1 w-full"):
@@ -901,6 +987,7 @@ class Page:
                             ui.label(f"↻ {it['rotation']}°").classes("text-xs text-orange-700") \
                                 .tooltip("Turned by the app or by you; use the arrows to change it")
                         rotate_buttons(lambda degrees, path=it["path"]: self.rotate(path, degrees))
+                        self.cut_button(it)
 
     def set_tags(self, path: str, tags: list[str]) -> None:
         self.trip.set_tags(path, tags)
@@ -2363,8 +2450,10 @@ class Page:
         why.text = "Your choice"
 
     def kept_part(self, it: dict) -> tuple[float, float]:
+        own = it["trim_start"] is not None
         item = MediaItem(path=Path(it["path"]), kind="video", taken_at=datetime.now(), duration=it["duration"],
-                         trim_start=it["trim_start"], trim_end=it["trim_end"])
+                         trim_start=it["trim_start"] if own else it.get("keep_start"),
+                         trim_end=it["trim_end"] if own else it.get("keep_end"))
         return clip_range(item, self.settings_now())
 
     def sound_control(self, it: dict) -> None:
@@ -2405,8 +2494,9 @@ class Page:
         it["_show_trim"] = lambda: show(*self.kept_part(it))
 
         show(start, end)
+        lo, hi = kept_part(it) or (0.0, it["duration"])  # a clip you cut: only the part you kept
         ui.range(
-            min=0, max=round(it["duration"], 1), step=0.1, value={"min": round(start, 1), "max": round(end, 1)},
+            min=round(lo, 1), max=round(hi, 1), step=0.1, value={"min": round(start, 1), "max": round(end, 1)},
             on_change=lambda e: trimmed(e.value["min"], e.value["max"]),
         ).props("dense").classes("w-full")
 
