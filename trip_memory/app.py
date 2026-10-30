@@ -754,9 +754,10 @@ class Page:
             ui.button("Play / pause", icon="play_arrow", on_click=lambda: ui.run_javascript("tmTapPlay()"))
             ui.button("5 s back", icon="replay_5", on_click=lambda: ui.run_javascript("tmTapSeek(-5)")).props("outline")
             ui.button("From the start", icon="skip_previous", on_click=lambda: ui.run_javascript("tmTapStart()")).props("outline")
-            ui.select({0: "Whole song", 30: "30 seconds", 10: "10 seconds", 4: "4 seconds", 1.5: "1.5 seconds"}, value=0,
-                      label="Show",
-                      on_change=lambda e: ui.run_javascript(f"tmTapZoom({e.value})")).classes("w-36")
+            with ui.button_group().props("outline"):
+                for span, label in ((0, "Whole song"), (30, "30 s"), (10, "10 s"), (4, "4 s")):
+                    ui.button(label, on_click=lambda span=span: ui.run_javascript(f"tmTapZoom({span})")) \
+                        .props("outline no-caps").tooltip("How much of the song the line shows (or scroll on it)")
             ui.button("Delete selected pin", icon="delete", on_click=lambda: ui.run_javascript("tmTapDelete()")).props("flat")
             ui.button("Clear all", icon="clear_all", on_click=self.clear_taps).props("flat")
         ui.html('<div id="tm-tl" style="position:relative;width:100%;height:150px;background:#f1f5f9;border-radius:8px;'
@@ -1831,9 +1832,18 @@ function tmTapDraw() {
     html += `<div style="position:absolute;left:${x(s)};bottom:0;height:10px;border-left:1px solid #94a3b8"></div>` +
             `<div style="position:absolute;left:${x(s)};bottom:10px;font-size:10px;color:#64748b;transform:translateX(-50%)">${m}:${sec}</div>`;
   }
+  // Each pin's own time next to its head (when there is room), so you can read exactly where it is.
+  const width = tl.clientWidth || 1000, fine = span <= 20;
+  let lastLabel = -1e9;
   T.pins.forEach((p, i) => {
     if (p < v0 || p > v0 + span) return;
-    const c = i === T.sel ? '#dc2626' : '#2563eb';
+    const c = i === T.sel ? '#dc2626' : '#2563eb', px = (p - v0) / span * width;
+    if (px - lastLabel > (fine ? 70 : 52) || i === T.sel) {
+      const m = Math.floor(p / 60), sec = (p % 60).toFixed(fine ? 2 : 1).padStart(fine ? 5 : 4, '0');
+      html += `<div style="position:absolute;left:${x(p)};top:-1px;margin-left:8px;font-size:10px;font-weight:600;color:${c};` +
+              `background:#f1f5f9cc;padding:0 2px;pointer-events:none">${m}:${sec}</div>`;
+      lastLabel = px;
+    }
     html += `<div data-pin="${i}" title="${p.toFixed(3)} s" style="position:absolute;left:${x(p)};top:0;bottom:24px;width:14px;` +
             `margin-left:-7px;cursor:ew-resize;display:flex;justify-content:center"><div style="width:3px;background:${c};height:100%"></div>` +
             `<div style="position:absolute;top:-2px;width:12px;height:12px;border-radius:6px;background:${c}"></div></div>`;
@@ -1844,8 +1854,10 @@ function tmTapDraw() {
   if (info) {
     const d = tmTapLength(), n = T.pins.length;
     const t = a ? a.currentTime : 0;
-    info.textContent = `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')} · ${n} cut${n === 1 ? '' : 's'}` +
-      (d && n ? ` → ${n + 1} shots, about ${(d / (n + 1)).toFixed(1)} s each` : '') +
+    const last = n ? T.pins[n - 1] : 0;
+    info.textContent = `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')} · ${n} pin${n === 1 ? '' : 's'}` +
+      (n ? ` → ${n} shots up to ${Math.floor(last / 60)}:${String(Math.floor(last % 60)).padStart(2, '0')}` +
+           (d - last > 1 ? ', then the app cuts the rest' : '') : '') +
       (T.sel >= 0 ? ` · selected cut at ${T.pins[T.sel].toFixed(3)} s (← → move it 10 ms, with Alt 1 ms; Delete removes it)` : '') +
       ` · showing ${span < 10 ? span.toFixed(1) : Math.round(span)} s (scroll on the line to zoom, sideways to move)`;
   }
