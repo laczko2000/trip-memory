@@ -26,7 +26,7 @@ from PIL import Image, ImageOps
 
 from .faces import FaceFinder, group_faces
 from .media import MediaItem, scan_folder
-from . import autoedit, director, motion, stories
+from . import autoedit, director, lengths, motion, stories
 from .scenes import SceneTagger, mean_vector
 from .tags import TAG_GROUP, Tagger, group_name, look_alike_groups, people_tag, story_subject
 from .tools import ffmpeg_paths, probe
@@ -1407,7 +1407,7 @@ class Trip:
             })
         return described, self.person_names()
 
-    def make_wish(self, ai, wish: str, song_seconds: float | None = None) -> dict:
+    def make_wish(self, ai, wish: str, song_seconds: float | None = None, length: dict | None = None) -> dict:
         """Ask the AI for 3 versions of the video you described (nothing typed: it surprises you) and use the first.
         What you set yourself (story names, stories you switched on or off, your title) is kept."""
         stories, people = self._wish_stories()
@@ -1419,6 +1419,13 @@ class Trip:
         if self._stopped(mine):
             raise director.Stopped("Stopped: nothing was changed.")
         self.checkpoint("the AI's answer to your wish")
+        # The length: as the app read it from your words (the AI is not trusted with numbers), else the AI's.
+        said = length or lengths.read_length(wish)
+        if said and "ask" not in said:
+            answer["length"] = said
+            answer["length_seconds"] = round(said["seconds"]) if "seconds" in said else 0
+        else:
+            answer["length"] = {"seconds": answer["length_seconds"]} if answer["length_seconds"] else None
         saved = {"wish": " ".join(wish.split()), **answer, "used": 0,
                  "names": {stories[n - 1]["key"]: name for n, name in answer["names"].items()},
                  "versions": [{**v, "stories": [stories[n - 1]["key"] for n in v["stories"]],
@@ -1451,6 +1458,16 @@ class Trip:
         if version["look"]:
             self.set_look(version["look"])
         saved["used"] = index
+        self._save_wish(saved)
+
+    def set_wish_length(self, length: dict | None) -> None:
+        """Change the length of the video you asked for: {"seconds": 80} or {"song": 0.5}."""
+        rows = self.query("SELECT value FROM meta WHERE key = 'wish'")
+        if not rows:
+            return
+        saved = json.loads(rows[0]["value"])
+        saved["length"] = length
+        saved["length_seconds"] = round(length["seconds"]) if length and "seconds" in length else 0
         self._save_wish(saved)
 
     def _save_wish(self, saved: dict) -> None:

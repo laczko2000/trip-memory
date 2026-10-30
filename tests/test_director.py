@@ -332,3 +332,17 @@ def test_a_stopped_storyline_or_wish_changes_nothing(trip):
         trip.make_wish(FakeStopper(trip), "beach only", 60.0)
     assert [(s["name"], s["enabled"]) for s in trip.stories()] == before and trip.wish() is None
     assert trip.suggest_storylines(FakeDirector())["storylines"]  # a new request works again
+
+
+def test_the_length_you_wrote_wins_over_the_ais(trip):
+    trip.describe_clips(FakeDirector())
+    wish = trip.make_wish(FakeWisher(), "a 1:20 video, beach only", 200.0)  # the AI said 60 s
+    assert wish["length"] == {"seconds": 80} and wish["length_seconds"] == 80
+    trip.make_wish(FakeWisher(), "half the song, calm", 200.0)
+    assert trip.wish()["length"] == {"song": 0.5} and trip.wish()["length_seconds"] == 0
+    trip.make_wish(FakeWisher(), "a 1.2 minute video", 200.0, length={"seconds": 72})  # you chose 1:12 when asked
+    assert trip.wish()["length_seconds"] == 72
+    trip.set_wish_length({"seconds": 95})
+    assert trip.wish()["length"] == {"seconds": 95}
+    trip.make_wish(FakeWisher(), "beach only", 200.0)  # nothing said: the AI's length
+    assert trip.wish()["length"] == {"seconds": 60}
