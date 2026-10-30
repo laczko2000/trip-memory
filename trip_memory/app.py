@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import subprocess
 import sys
 import time
@@ -26,7 +27,6 @@ from . import stories
 from . import music as free_music
 from . import songmap
 from . import musicmood
-from .lengths import as_words, read_length
 from . import voice
 from . import taps as song_taps
 from .beats import song_length
@@ -143,12 +143,12 @@ class Page:
         self.last_story = 0
         self.open_plans: set[str] = set()  # stories whose plan is shown in the Stories tab
         self.media_route: str | None = None
-        self.auto_length: object = None
         self.auto_limits = AutoLimits(**load_settings().get("limits", {}))
         self.library_columns = load_settings().get("library_columns", 3)  # pictures in a row in the Library
         self.look_previews: dict[tuple[str, str], str] = {}  # (picture, look) -> a small preview
         self.song_maps: dict = {}
         self.track_lengths: dict = {}
+        self.own_length_open = False  # "Use a different length" switched on, length not typed yet
         self.dirty = False
         self.last_refresh = 0.0
         self.filters = {"day": ALL, "place": ALL, "scene": ALL, "tag": ALL, "look": ALL, "person": ALL, "show": ALL}
@@ -2028,7 +2028,6 @@ class Page:
                 name = f"Version {wish.get('used', 0) + 1}: {wish['name']}" if wish.get("name") else "Your wish"
                 ui.label(f"Following: {name} · {self.length_words()} · {self.version_words(wish)} · {size}") \
                     .classes("text-sm font-medium text-amber-900")
-                self.length_field(lambda length: self.set_wish_length(length))
                 if wish.get("summary"):
                     ui.label(wish["summary"]).classes("text-xs text-gray-600")
                 if wish.get("people") or wish.get("focus"):
@@ -2051,13 +2050,9 @@ class Page:
                     ui.button("Stop following the wish", icon="close", on_click=self.forget_wish) \
                         .props("flat dense no-caps size=sm")
 
-    async def make_wish(self, text: str, length: dict | None = None) -> None:
+    async def make_wish(self, text: str) -> None:
         if self.busy():
             return
-        if length is None:
-            length = await self.understood_length(read_length(text or ""))
-            if length is False:
-                return
         ai = self.make_director()
         if not ai:
             return
@@ -2066,8 +2061,9 @@ class Page:
         note = ui.notification("The AI is thinking about your video…", spinner=True, timeout=None)
         self.ai_busy = True
         try:
-            wish = await self.stoppable(self.trip.make_wish, ai, text or "", song.duration if song else None, length,
-                                        self.music_words())
+            target = self.length_now()
+            seconds = (song.duration if song else self.track_seconds(music)) if target == "song" else target
+            wish = await self.stoppable(self.trip.make_wish, ai, text or "", seconds, self.music_words())
             if wish is None:
                 return
         except director.DirectorError as exc:
@@ -2142,24 +2138,12 @@ class Page:
         return limits
 
     def length_now(self) -> object:
-        """How long the first cut should be, in seconds, or "song" for the whole song: the wish's length (as the app
-        read it from your words), else the one you typed in Auto-edit, else as long as the song."""
-        music = self.music_path()
-        wish = self.trip.wish() if self.trip else None
-        length = (wish.get("length") or ({"seconds": wish["length_seconds"]} if wish.get("length_seconds") else None)
-                  ) if wish else self.auto_length
-        if isinstance(length, dict) and "seconds" in length:
-            return float(length["seconds"])
-        share = length.get("song", 1.0) if isinstance(length, dict) else 1.0
-        if not music:
-            return 180
-        if share >= 0.999:
-            return "song"
-        song = self.song_maps.get(music)
-        try:
-            return round((song.duration if song else song_length(music)) * share, 1)
-        except Exception:
-            return "song"
+        """How long the video is, in seconds, or "song": as long as your (trimmed) track, unless you set your own
+        length on the Storyboard. Nothing else changes it."""
+        own = self.trip.own_length() if self.trip else None
+        if own:
+            return own
+        return "song" if self.music_path() else 180
 
     def track_seconds(self, music: str | None) -> float | None:
         """How long the track is (the part you trimmed, if you did): the video's length unless you name another."""
@@ -2181,72 +2165,62 @@ class Page:
         return f"{fmt_length(seconds)}, {what}" if seconds else what
 
     def length_words(self) -> str:
-        target = self.length_now()
-        if target == "song":
-            music = self.music_path()
-            return f"{self.track_words(music)}" if music else "as long as the song"
-        wish = self.trip.wish() if self.trip else None
-        length = wish.get("length") if wish else self.auto_length
-        share = ""
-        if isinstance(length, dict) and "song" in length:
-            share = f" ({as_words(length)})" if self.music_path() else f" (for now: {as_words(length)} once you choose one)"
-        elif not length:  # no song yet
-            share = " for now (choose a song in Music & audio: the video then lasts as long as its track)"
-        elif self.music_path():
-            share = f" (your words; the track is {fmt_length(self.track_seconds(self.music_path()) or 0)})"
-        return f"{fmt_length(float(target))}{share}"
+        music = self.music_path()
+        own = self.trip.own_length() if self.trip else None
+        if own:
+            track = f"; the track is {fmt_length(self.track_seconds(music) or 0)}" if music else ""
+            return f"{fmt_length(own)} (your own length{track})"
+        if music:
+            return self.track_words(music)
+        return "3:00 for now (choose a song in Music & audio: the video then lasts as long as its track)"
 
     def video_length_line(self, music: str) -> None:
-        """In Music & audio: the track sets how long the video is, unless your wish or Auto-edit names a length."""
-        own = self.trip.wish().get("length") if self.trip and self.trip.wish() else self.auto_length
+        """In Music & audio: the track sets how long the video is (unless you set your own on the Storyboard)."""
+        own = self.trip.own_length() if self.trip else None
         text = f"🎬 Video length: {self.length_words()}"
-        if not own:
-            text += ". Trim the song above to make the video shorter or longer." if not song_taps.trimmed_from(
-                music, app_dir() / "music-taps") else ". Trim again to change it."
+        if own:
+            text += ". To go back to the track's length, switch off \"Use a different length\" on the Storyboard."
+        else:
+            text += (". Trim again to change it." if song_taps.trimmed_from(music, app_dir() / "music-taps")
+                     else ". Trim the song above to make the video shorter or longer.")
         ui.label(text).classes("font-medium text-green-800 mt-2")
 
-    def length_field(self, on_set) -> None:
-        """Type any length: 1:20, 90 s, 2 and a half minutes, the whole song, half the song."""
-        with ui.row().classes("items-center gap-2"):
-            field = ui.input("Length", placeholder="e.g. 1:20, 90 s, half the song") \
-                .props("dense outlined").classes("w-64")
+    def length_card(self) -> None:
+        """The video's one length: your track's, unless you switch on your own and type it as m:ss."""
+        own = self.trip.own_length()
+        with ui.column().classes("w-full gap-1 mt-2"):
+            with ui.row().classes("w-full items-center gap-4"):
+                ui.label(f"Video length: {self.length_words()}").classes("font-medium")
+                ui.switch("Use a different length", value=bool(own), on_change=lambda e: self.own_length_switched(e.value)) \
+                    .tooltip("Off: the video lasts as long as the track you saved in Music & audio")
+            if own is not None or self.own_length_open:
+                with ui.row().classes("items-center gap-2"):
+                    field = ui.input("Length (m:ss)", value=fmt_length(own) if own else "", placeholder="e.g. 1:05") \
+                        .props("dense outlined").classes("w-36")
+                    field.on("keydown.enter", lambda: self.set_own_length(field.value))
+                    ui.button("Set", on_click=lambda: self.set_own_length(field.value)).props("outline dense no-caps")
 
-            async def apply() -> None:
-                said = read_length(field.value or "")
-                if said is None:
-                    ui.notify("Write a length like 1:20, 90 seconds, 2 minutes or half the song.", type="warning")
-                    return
-                length = await self.understood_length(said)
-                if length:
-                    on_set(length)
-
-            field.on("keydown.enter", apply)
-            ui.button("Set length", on_click=apply).props("outline dense no-caps")
-
-    async def understood_length(self, said: dict | None):
-        """The length your words give; when they could mean two lengths, ask which (False: you cancelled)."""
-        if not said or "ask" not in said:
-            return said
-        with ui.dialog() as dialog, ui.card():
-            ui.label(f'How long is "{said["said"]}"?').classes("text-lg font-semibold")
-            with ui.row().classes("gap-2"):
-                for seconds in said["ask"]:
-                    ui.button(f"{fmt_length(seconds)} ({seconds} seconds)",
-                              on_click=lambda s=seconds: dialog.submit({"seconds": s}))
-                ui.button("Cancel", on_click=lambda: dialog.submit(False)).props("flat")
-        dialog.open()
-        answer = await dialog
-        return answer if answer is not None else False
-
-    def set_wish_length(self, length: dict) -> None:
-        self.trip.set_wish_length(length)
-        ui.notify(f"Length: {self.length_words()}. Press Make a new cut to use it.", type="positive")
+    def own_length_switched(self, on: bool) -> None:
+        self.own_length_open = on
+        if not on and self.trip.own_length():
+            self.trip.set_own_length(None)
+            ui.notify(f"Video length: {self.length_words()}.", type="positive")
         self.storyboard_view.refresh()
+        self.music_tab_view.refresh()
 
-    def set_auto_length(self, length: dict) -> None:
-        self.auto_length = length
-        ui.notify(f"Length: {self.length_words()}.", type="positive")
+    def set_own_length(self, text: str) -> None:
+        m = re.fullmatch(r"\s*(\d{1,2}):([0-5]\d)\s*", text or "")
+        if not m:
+            ui.notify("Write the length as minutes:seconds, for example 1:05 or 0:45.", type="warning")
+            return
+        seconds = int(m.group(1)) * 60 + int(m.group(2))
+        if seconds < 5:
+            ui.notify("Make it at least 0:05.", type="warning")
+            return
+        self.trip.set_own_length(seconds)
+        ui.notify(f"Video length: {self.length_words()}. Press Make a new cut to use it.", type="positive")
         self.storyboard_view.refresh()
+        self.music_tab_view.refresh()
 
     def auto_edit_card(self) -> None:
         music = self.music_path()
@@ -2255,17 +2229,15 @@ class Page:
             ui.label("✨ Auto-edit: the music leads, the shots follow").classes("text-lg font-semibold")
             pins = song_taps.final_taps(music, app_dir() / "music-taps") if music else None
             self.song_line(music, pins)
+            self.length_card()
             wish = self.trip.wish()
-            if wish:  # the wish sets length, pace and effects: one button, nothing to contradict it
+            if wish:  # the wish sets pace and effects: one button, nothing to contradict it
                 with ui.row().classes("w-full items-center gap-4 mt-2"):
                     ui.button("Make a new cut", icon="auto_fix_high", on_click=self.run_auto_edit)
-                    ui.label(f"Following your wish: {self.length_words()}, {wish.get('pace', 'medium')} pace. To set length and pace yourself, stop following "
-                             "the wish (above).").classes("text-sm text-gray-600 flex-1")
+                    ui.label(f"Following your wish: {wish.get('pace', 'medium')} pace. To set the pace yourself, stop "
+                             "following the wish (above).").classes("text-sm text-gray-600 flex-1")
                 return
-            # Length, then go
             with ui.row().classes("w-full items-center gap-4 mt-2"):
-                ui.label(f"Length: {self.length_words()}").classes("font-medium")
-                self.length_field(self.set_auto_length)
                 ui.button("Make a first cut", icon="auto_fix_high", on_click=self.run_auto_edit) \
                     .tooltip("Replaces the storyboard's order, trims and transitions; Undo (above) brings them back")
             with ui.expansion("More settings: shot lengths, storyline, beats, effects", icon="tune") \
@@ -2361,7 +2333,6 @@ class Page:
         if hasattr(self, "music_credit"):
             credit = free_music.credit_for(self.music_input.value, app_dir() / "music") if self.music_input.value else None
             self.music_credit.text = f"Free song: {credit}. A credits file is saved next to your video." if credit else ""
-        self.auto_length = None  # back to the default: as long as the song, if there is one
         self.storyboard_view.refresh()
         self.music_tab_view.refresh()
         self.music_line.refresh()

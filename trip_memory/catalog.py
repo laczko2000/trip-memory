@@ -28,7 +28,7 @@ from PIL import Image, ImageOps
 
 from .faces import FaceFinder, group_faces
 from .media import MediaItem, scan_folder
-from . import autoedit, director, lengths, motion, musicmood, stories
+from . import autoedit, director, motion, musicmood, stories
 from .scenes import SceneTagger, mean_vector
 from .tags import TAG_GROUP, Tagger, group_name, look_alike_groups, people_tag, story_subject
 from .tools import ffmpeg_paths, probe
@@ -1485,8 +1485,7 @@ class Trip:
             })
         return described, self.person_names()
 
-    def make_wish(self, ai, wish: str, song_seconds: float | None = None, length: dict | None = None,
-                  music: str = "") -> dict:
+    def make_wish(self, ai, wish: str, song_seconds: float | None = None, music: str = "") -> dict:
         """Ask the AI for 3 versions of the video you described (nothing typed: it surprises you) and use the first.
         What you set yourself (story names, stories you switched on or off, your title) is kept."""
         stories, people = self._wish_stories()
@@ -1498,14 +1497,9 @@ class Trip:
         if self._stopped(mine):
             raise director.Stopped("Stopped: nothing was changed.")
         self.checkpoint("the AI's answer to your wish")
-        # The length: only as the app read it from your words (the AI is not trusted with numbers). Nothing said:
-        # the video lasts as long as your track (trim the song in Music & audio to choose it).
-        said = length or lengths.read_length(wish)
-        if said and "ask" not in said:
-            answer["length"] = said
-            answer["length_seconds"] = round(said["seconds"]) if "seconds" in said else 0
-        else:
-            answer["length"], answer["length_seconds"] = None, 0
+        # The length is not the wish's: the video lasts as long as your track (trim the song in Music & audio), or
+        # the length you set yourself on the Storyboard.
+        answer["length"], answer["length_seconds"] = None, 0
         saved = {"wish": " ".join(wish.split()), **answer, "used": 0,
                  "names": {stories[n - 1]["key"]: name for n, name in answer["names"].items()},
                  "versions": [{**v, "stories": [stories[n - 1]["key"] for n in v["stories"]],
@@ -1570,6 +1564,18 @@ class Trip:
         """'landscape' or 'phone' (upright 9:16)."""
         rows = self.query("SELECT value FROM meta WHERE key = 'video_size'")
         return rows[0]["value"] if rows and rows[0]["value"] in ("landscape", "phone") else "landscape"
+
+    def own_length(self) -> float | None:
+        """The length you typed on the Storyboard ("Use a different length"), or None: as long as your track."""
+        rows = self.query("SELECT value FROM meta WHERE key = 'own_length'")
+        try:
+            return float(rows[0]["value"]) if rows and rows[0]["value"] else None
+        except ValueError:
+            return None
+
+    def set_own_length(self, seconds: float | None) -> None:
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('own_length', ?)",
+                     (str(round(seconds, 1)) if seconds else "",))
 
     def set_video_size(self, size: str) -> None:
         self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('video_size', ?)", (size,))

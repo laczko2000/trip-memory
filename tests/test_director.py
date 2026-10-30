@@ -229,7 +229,7 @@ def test_type_the_video_you_want(trip):
     assert '"a lively minute, beach only"' in ai.prompts[0] and "Anna" in ai.prompts[0] and "1.6 minutes" in ai.prompts[0]
     assert [Path(k).name for k in wish["stories"]] == ["c.jpg", "a.jpg"] and wish["name"] == "Beach only"
     assert wish["people"] == ["Anna"] and wish["focus"] == ["beaches"] and len(wish["versions"]) == 2
-    assert wish["length_seconds"] == 0 and wish["pace"] == "lively"  # no length the app can read: as long as the track and not wish["slow_motion"]
+    assert wish["length_seconds"] == 0 and wish["pace"] == "lively"  # the length is the music's and not wish["slow_motion"]
     assert trip.title_settings()["trip_title"] == "Sun and sand" and trip.look() == "summer"
     assert trip.video_size() == "phone"  # "Instagram" means an upright video
     stories = trip.stories()
@@ -334,15 +334,14 @@ def test_a_stopped_storyline_or_wish_changes_nothing(trip):
     assert trip.suggest_storylines(FakeDirector())["storylines"]  # a new request works again
 
 
-def test_the_length_you_wrote_wins_over_the_ais(trip):
+def test_the_video_length_is_the_music_s_never_the_wish_s(trip):
     trip.describe_clips(FakeDirector())
-    wish = trip.make_wish(FakeWisher(), "a 1:20 video, beach only", 200.0)  # the AI said 60 s
-    assert wish["length"] == {"seconds": 80} and wish["length_seconds"] == 80
-    trip.make_wish(FakeWisher(), "half the song, calm", 200.0)
-    assert trip.wish()["length"] == {"song": 0.5} and trip.wish()["length_seconds"] == 0
-    trip.make_wish(FakeWisher(), "a 1.2 minute video", 200.0, length={"seconds": 72})  # you chose 1:12 when asked
-    assert trip.wish()["length_seconds"] == 72
-    trip.set_wish_length({"seconds": 95})
-    assert trip.wish()["length"] == {"seconds": 95}
-    trip.make_wish(FakeWisher(), "beach only", 200.0)  # nothing said: as long as your track, whatever the AI says
-    assert trip.wish()["length"] is None and trip.wish()["length_seconds"] == 0
+    ai = FakeWisher()
+    wish = trip.make_wish(ai, "a 1:20 video, beach only", 200.0)  # the AI said 60 s
+    assert wish["length"] is None and wish["length_seconds"] == 0
+    assert "3.3 minutes (set by the music)" in ai.prompts[0]
+    assert trip.own_length() is None
+    trip.set_own_length(65)  # "Use a different length" on the Storyboard
+    assert trip.own_length() == 65.0
+    trip.set_own_length(None)
+    assert trip.own_length() is None
