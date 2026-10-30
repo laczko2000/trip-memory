@@ -124,8 +124,11 @@ def score(row: dict) -> float:
     return s
 
 
-def group(rows: list[dict], level: str = "normal") -> dict[str, tuple[int, int, bool]]:
+def group(rows: list[dict], level: str = "normal", links: list[str] | None = None) -> dict[str, tuple[int, int, bool]]:
     """For each file: (story number, similar-set number, is it the best of its set).
+
+    links: places where you joined two stories, each as "taken_at|path" of the later story's first file; no new
+    story starts there (still true when that file is later removed: any break just after it is joined).
 
     A shot joins a set when it looks like one of that set's last few shots, taken within a few minutes, in the
     same story; so a burst stays together even with other shots taken in between."""
@@ -143,12 +146,15 @@ def group(rows: list[dict], level: str = "normal") -> dict[str, tuple[int, int, 
             unpacked[row["path"]] = _unpack(row["features"]) if row.get("features") else None
         return unpacked[row["path"]]
 
+    joins = sorted(tuple(link.split("|", 1)) for link in links or [] if "|" in link)
     for row in rows:
         when = datetime.fromisoformat(row["taken_at"])
         if prev is None or ((when - prev[0]).total_seconds() / 60 > STORY_GAP_MINUTES
                             or row["taken_at"][:10] != prev[1]["taken_at"][:10] or _km(row, prev[1]) > STORY_MOVE_KM):
-            story += 1
-            open_sets = []
+            here, before = (row["taken_at"], row["path"]), prev and (prev[1]["taken_at"], prev[1]["path"])
+            if not (before and any(before < j <= here for j in joins)):
+                story += 1
+                open_sets = []
         best_set = None
         for k in list(reversed(open_sets))[:12]:  # the most recent sets only, so big trips stay quick
             last = sets[k][-1]

@@ -350,6 +350,7 @@ class Trip:
     def remove_unchosen(self) -> int:
         """Take every file that isn't ticked out of the trip: it disappears from every tab and is never analysed.
         The file itself stays where it is on your computer. Returns how many were removed."""
+        self._move_links_off_removed()
         with self._lock:
             n = self.db.execute("UPDATE items SET removed = 1, included = 0, position = NULL "
                                 "WHERE chosen = 0 AND removed = 0").rowcount
@@ -357,6 +358,24 @@ class Trip:
             self.db.commit()
         self._group_stories()
         return n
+
+    def _move_links_off_removed(self) -> None:
+        """Before files are removed: a link that starts at one of them moves to the next file of the same story,
+        or goes if that whole story is removed (so the stories around it stay apart)."""
+        links = self.story_links()
+        if not links:
+            return
+        rows = self.query("SELECT path, taken_at, story, chosen FROM items WHERE removed = 0 ORDER BY taken_at, path")
+        keep = []
+        for link in links:
+            at = next((i for i, r in enumerate(rows) if f"{r['taken_at']}|{r['path']}" >= link), None)
+            if at is None:
+                continue
+            story = rows[at]["story"]
+            nxt = next((r for r in rows[at:] if r["chosen"]), None)
+            if nxt is not None and nxt["story"] == story:
+                keep.append(f"{nxt['taken_at']}|{nxt['path']}")
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('story_links', ?)", (json.dumps(sorted(set(keep))),))
 
     def restore(self, paths: list[str]) -> None:
         """Bring removed files back into the trip (unticked, so you can tick the ones you want)."""
@@ -659,13 +678,49 @@ class Trip:
                 continue
         rows = [dict(r) for r in self.query(
             "SELECT path, kind, taken_at, duration, lat, lon, dhash, colours, sharpness, features FROM items WHERE removed = 0")]
-        groups = stories.group(rows, self.look_alike_level())
+        groups = stories.group(rows, self.look_alike_level(), self.story_links())
         with self._lock:
             self.db.executemany(
                 "UPDATE items SET story = ?, similar_set = ?, best = ? WHERE path = ?",
                 [(st, sim, int(best), path) for path, (st, sim, best) in groups.items()],
             )
             self.db.commit()
+
+    def story_links(self) -> list[str]:
+        rows = self.query("SELECT value FROM meta WHERE key = 'story_links'")
+        return json.loads(rows[0]["value"]) if rows else []
+
+    def _save_links(self, links: list[str]) -> None:
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('story_links', ?)", (json.dumps(sorted(set(links))),))
+        self._group_stories()
+
+    def link_story(self, number: int, to_next: bool) -> None:
+        """Join a story with the one before it (or after it, to_next) in time: they become one story."""
+        firsts = {}
+        for r in self.query("SELECT path, taken_at, story FROM items WHERE removed = 0 AND story IS NOT NULL "
+                            "ORDER BY taken_at DESC, path DESC"):
+            firsts[r["story"]] = f"{r['taken_at']}|{r['path']}"
+        later = number + 1 if to_next else number
+        if later in firsts and later - 1 in firsts:
+            self._save_links(self.story_links() + [firsts[later]])
+
+    def unlink_story(self, number: int) -> None:
+        """Split a story you joined back into the stories it was made of."""
+        rows = self.query("SELECT path, taken_at FROM items WHERE removed = 0 AND story = ?", (number,))
+        if not rows:
+            return
+        first, last = min((r["taken_at"], r["path"]) for r in rows), max((r["taken_at"], r["path"]) for r in rows)
+        keep = [link for link in self.story_links() if not (first < tuple(link.split("|", 1)) <= last)]
+        self._save_links(keep)
+
+    def joined_stories(self) -> set[int]:
+        """Story numbers that you made by joining stories."""
+        links = [tuple(link.split("|", 1)) for link in self.story_links()]
+        spans: dict[int, list] = {}
+        for r in self.query("SELECT story, MIN(taken_at || '|' || path) AS a, MAX(taken_at || '|' || path) AS b "
+                            "FROM items WHERE removed = 0 AND story IS NOT NULL GROUP BY story"):
+            spans[r["story"]] = [tuple(r["a"].split("|", 1)), tuple(r["b"].split("|", 1))]
+        return {n for n, (a, b) in spans.items() if any(a < j <= b for j in links)}
 
     def look_alike_level(self) -> str:
         rows = self.query("SELECT value FROM meta WHERE key = 'look_alike'")

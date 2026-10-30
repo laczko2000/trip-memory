@@ -335,3 +335,30 @@ def test_unticked_files_can_be_removed_from_the_trip_and_brought_back(tmp_path, 
     trip.restore([str(gone)])
     back = [i for i in trip.items() if i["path"] == str(gone)]
     assert back and not back[0]["chosen"] and trip.removed_count() == 0
+
+
+def test_stories_can_be_linked_and_split_again(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    for n, when in enumerate(["2025:07:03 10:00:00", "2025:07:03 12:00:00", "2025:07:03 14:00:00", "2025:07:03 16:00:00"]):
+        _gps_photo(trip_dir / f"{n}.jpg", when, 38.7, -9.1, ["red", "blue", "green", "white"][n])
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    story = lambda: [it["story"] for it in sorted(trip.items(), key=lambda r: r["path"])]
+    assert story() == [0, 1, 2, 3]
+
+    trip.link_story(2, to_next=False)  # story 3 onto story 2
+    assert story() == [0, 1, 1, 2]
+    trip.link_story(0, to_next=True)  # story 1 with story 2
+    assert story() == [0, 0, 0, 1]
+    assert trip.joined_stories() == {0}
+
+    trip.set_chosen([str(trip_dir / "2.jpg")], False)  # the link survives removing the file it started at
+    trip.remove_unchosen()
+    assert [it["story"] for it in trip.items()] == [0, 0, 1]
+
+    trip.unlink_story(0)
+    assert [it["story"] for it in trip.items()] == [0, 1, 2]
+    assert trip.joined_stories() == set()

@@ -112,6 +112,12 @@ class Page:
         self.choose_more = None
         self.choose_tiles: dict[str, tuple] = {}
         self.choose_counts: list[tuple] = []
+        self.choose_focus: int | None = None  # a story to scroll to after the list is drawn again
+        self.choose_focus_card = None
+        self.choose_focus_path: str | None = None  # ...or the file to scroll to
+        self.choose_whole: dict[int, list[dict]] = {}
+        self.joined: set[int] = set()
+        self.last_story = 0
         self.media_route: str | None = None
         self.auto_length: object = None
         self.auto_limits = AutoLimits(**load_settings().get("limits", {}))
@@ -485,6 +491,9 @@ class Page:
             return
         # One long list. It is drawn TILES_PER_PAGE files at a time: the next part is added by itself as you scroll
         # near the bottom, so even thousands of files stay quick (drawing them all at once makes the page reload).
+        self.choose_whole = {}  # story number: all its files shown (a long story is drawn in parts)
+        for it in shown:
+            self.choose_whole.setdefault(it["story"] or 0, []).append(it)
         parts: list[list[tuple[int, list[dict]]]] = [[]]
         in_part = 0
         for number in sorted({it["story"] or 0 for it in shown}):
@@ -503,6 +512,16 @@ class Page:
                 in_part += len(group)
             if chunk:
                 parts[-1].append((number, chunk))
+        self.joined = self.trip.joined_stories()
+        self.last_story = max((it["story"] or 0 for it in self.all_items), default=0)
+        self.choose_focus_card = None
+        drawn = 1
+        while self.choose_focus is not None and drawn < len(parts) \
+                and not any(n == self.choose_focus and (self.choose_focus_path is None
+                                                        or any(it["path"] == self.choose_focus_path for it in m))
+                            for part in parts[:drawn] for n, m in part):
+            drawn += 1  # after a link: draw down to that story, then scroll to it
+        parts = [[x for part in parts[:drawn] for x in part]] + parts[drawn:]
         self.choose_rest = parts[1:]
         self.choose_tiles: dict[str, tuple] = {}  # path: (file, checkbox, tile), for ticking without a redraw
         self.choose_counts: list[tuple] = []  # (story's "x of y chosen" label, its files)
@@ -513,6 +532,11 @@ class Page:
                     self.story_block(number, members)
         self.choose_more = None
         self.more_files_button()
+        if self.choose_focus_card is not None:
+            ui.run_javascript(f"setTimeout(() => getHtmlElement({self.choose_focus_card.id})"
+                              f".scrollIntoView({{block: 'center'}}), 300)")
+        self.choose_focus = None
+        self.choose_focus_path = None
 
     def more_files_button(self) -> None:
         """At the bottom of the list: shows the next files. The page presses it by itself when you scroll near it."""
@@ -555,22 +579,41 @@ class Page:
         if len(removed) > 120:
             ui.label(f"…and {len(removed) - 120} more (Bring them all back covers them too).").classes("text-sm")
 
-    def story_block(self, number: int, items: list[dict]) -> None:
+    def story_block(self, number: int, chunk: list[dict]) -> None:
+        """A story (or, for a long one, the next part of it) in Choose files."""
+        items = self.choose_whole.get(number, chunk)
+        continued = chunk[0] is not items[0]
         first, last = datetime.fromisoformat(items[0]["taken_at"]).astimezone(), datetime.fromisoformat(items[-1]["taken_at"]).astimezone()
         places = [it["place"] or it["country"] for it in items if it["place"] or it["country"]]
         place = max(set(places), key=places.count) if places else "Unknown place"
         picked = sum(it["chosen"] for it in items)
         # content-visibility: the browser skips stories that are off screen, so a long list stays quick
-        with ui.card().classes("w-full p-3 mt-2").style("content-visibility:auto;contain-intrinsic-size:auto 400px"):
-            with ui.row().classes("w-full items-center gap-2"):
-                ui.label(f"Story {number + 1} · {first:%a %d %b, %H:%M}–{last:%H:%M} · {place}").classes("font-semibold")
+        until = f"{last:%H:%M}" if first.date() == last.date() else f"{last:%a %d %b, %H:%M}"
+        with ui.card().classes("w-full p-3 mt-2").style("content-visibility:auto;contain-intrinsic-size:auto 400px") as card:
+            if number == self.choose_focus and not continued and self.choose_focus_path is None:
+                self.choose_focus_card = card
+            if continued:
+                ui.label(f"Story {number + 1}, continued").classes("text-sm text-gray-500")
+            with ui.row().classes("w-full items-center gap-2") as head:
+                head.set_visibility(not continued)
+                ui.label(f"Story {number + 1} · {first:%a %d %b, %H:%M}–{until} · {place}").classes("font-semibold")
                 count = ui.label(f"{picked} of {len(items)} chosen").classes("text-sm text-gray-500")
                 self.choose_counts.append((count, items))
                 paths = [it["path"] for it in items]
                 ui.button("Tick story", on_click=lambda p=paths: self.choose_paths(p, True)).props("flat dense size=sm")
                 ui.button("Untick story", on_click=lambda p=paths: self.choose_paths(p, False)).props("flat dense size=sm")
+                ui.space()
+                if number > 0:
+                    ui.button("Link to previous", icon="north", on_click=lambda n=number: self.link_story(n, False)) \
+                        .props("flat dense size=sm").tooltip(f"Join story {number + 1} onto story {number}: they become one story")
+                if number < self.last_story:
+                    ui.button("Link to next", icon="south", on_click=lambda n=number: self.link_story(n, True)) \
+                        .props("flat dense size=sm").tooltip(f"Join story {number + 2} onto this one: they become one story")
+                if number in self.joined:
+                    ui.button("Split again", icon="call_split", on_click=lambda n=number: self.unlink_story(n)) \
+                        .props("flat dense size=sm").tooltip("Undo the links: back to the stories it was made of")
             sets: dict[int, list[dict]] = {}
-            for it in items:
+            for it in chunk:
                 sets.setdefault(it["similar_set"] or 0, []).append(it)
             with ui.row().classes("w-full gap-2 items-start"):
                 for members in sets.values():
@@ -587,6 +630,8 @@ class Page:
 
     def choose_tile(self, it: dict, in_set: bool) -> None:
         with ui.column().classes("w-36 gap-0" + ("" if it["chosen"] else " opacity-40")) as tile:
+            if it["path"] == self.choose_focus_path:
+                self.choose_focus_card = tile
             self.preview(it, "width:144px;height:96px", start=(it["duration"] or 0) * 0.3)
             with ui.row().classes("items-center gap-0 no-wrap"):
                 box = ui.checkbox(
@@ -627,6 +672,21 @@ class Page:
         n = self.trip.untick_doubles()
         ui.notify(f"Unticked {n} doubles: only the ⭐ of each set stays ticked. Everything else you chose is unchanged.")
         self.refresh_all()
+
+    async def link_story(self, number: int, to_next: bool) -> None:
+        later = [it for it in self.all_items if it["story"] == number + (1 if to_next else 0)]
+        await run.io_bound(self.trip.link_story, number, to_next)
+        self.choose_focus = number - (0 if to_next else 1)
+        if later:  # stay where the two stories now meet
+            self.choose_focus_path = min(later, key=lambda r: (r["taken_at"], r["path"]))["path"]
+        self.stale = True
+        self.refresh_choose()
+
+    async def unlink_story(self, number: int) -> None:
+        await run.io_bound(self.trip.unlink_story, number)
+        self.choose_focus = number
+        self.stale = True
+        self.refresh_choose()
 
     def keep_best(self, members: list[dict]) -> None:
         self.tick_in_place([m["path"] for m in members if not m["best"]], False)
