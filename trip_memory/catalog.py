@@ -350,7 +350,14 @@ class Trip:
                     else f"{a:%-d %b} – {b:%-d %b %Y}")
         return {"opening": True, "trip_title": self.folder.name.replace("_", " "), "trip_sub": span,
                 "stories": True, "story_style": "caption", "ending": True, "end_text": "Until next time",
-                "end_sub": self.folder.name.replace("_", " "), "style": "bold", **saved}
+                "end_sub": self.folder.name.replace("_", " "), "style": "bold", "end_black": 3.0, **saved}
+
+    def end_card(self) -> tuple[float, dict | None]:
+        """(seconds of black at the end, the words on it) for the video's ending."""
+        t = self.title_settings()
+        words = ({"text": t["end_text"], "sub": t["end_sub"], "style": "elegant", "where": "center"}
+                 if t["ending"] and (t["end_text"] or t["end_sub"]) else None)
+        return float(t["end_black"] or 0), words
 
     def set_title_settings(self, **values) -> None:
         rows = self.query("SELECT value FROM meta WHERE key = 'titles'")
@@ -388,7 +395,8 @@ class Trip:
         if t["opening"] and (t["trip_title"] or t["trip_sub"]):
             result[board[0]["path"]] = {"text": t["trip_title"], "sub": t["trip_sub"], "style": t["style"],
                                         "where": "center", "auto": "opening"}
-        if t["ending"] and len(board) > 1 and (t["end_text"] or t["end_sub"]):
+        if t["ending"] and not t["end_black"] and len(board) > 1 and (t["end_text"] or t["end_sub"]):
+            # (with a black ending, the end card shows on the black instead: see end_card)
             result[board[-1]["path"]] = {"text": t["end_text"], "sub": t["end_sub"], "style": "elegant",
                                          "where": "center", "auto": "ending"}
         for r in board:

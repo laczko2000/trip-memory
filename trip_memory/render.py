@@ -81,6 +81,8 @@ class RenderSettings:
     clip_volume: float = 1.0
     music_path: str | None = None
     music_volume: float = 0.5
+    end_black: float = 0.0  # seconds of black at the very end (the last shot fades into it, the music fades out)
+    end_title: dict | None = None  # words shown on that black ending (see titles.py)
 
 
 def _fit_with_blur(src: str, w: int, h: int, out: str) -> str:
@@ -450,15 +452,50 @@ def render(
                 report(prep_share * done / len(unique), f"Prepared {done} of {len(unique)} clips")
         segments = [ready[_segment_key(item, settings)] for item in items]
         lengths = [_segment_length(seg) for seg in segments]
+        styles = [_transition_between(items[k - 1], k, settings) for k in range(1, len(items))]
+        if settings.end_black > 0:
+            # The last shot fades to black; the end title fades in on the black.
+            seconds = settings.end_black + END_FADE
+            black = cache / f"black-{_black_key(settings, seconds)}.mp4"
+            if not black.exists():
+                _black_segment(settings, seconds, workdir / "black.mp4")
+                shutil.move(workdir / "black.mp4", black)
+            segments.append(black)
+            lengths.append(_segment_length(black))
+            styles.append(("fadeblack", END_FADE))
 
         report(prep_share, "Joining everything together")
-        styles = [_transition_between(items[k - 1], k, settings) for k in range(1, len(items))]
         _join(segments, lengths, styles, settings, out_path,
               lambda f, message="Joining everything together": report(prep_share + (1 - prep_share) * f, message))
         report(1.0, "Done")
         return out_path
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+END_FADE = 1.2  # seconds for the last shot to fade to black
+
+
+def _black_key(s: RenderSettings, seconds: float) -> str:
+    return hashlib.sha1(repr([SEGMENT_VERSION, s.width, s.height, round(seconds, 3),
+                              sorted((s.end_title or {}).items())]).encode()).hexdigest()[:20]
+
+
+def _black_segment(s: RenderSettings, seconds: float, out: Path) -> None:
+    """The black ending, with the end title fading in once the picture has gone dark."""
+    inputs = ["-f", "lavfi", "-t", f"{seconds:.3f}", "-i", f"color=black:s={s.width}x{s.height}:r={FPS}",
+              "-f", "lavfi", "-t", f"{seconds:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
+    graph = "[0:v]format=yuv420p[v];[1:a]anull[a]"
+    title = s.end_title or {}
+    if title.get("text") or title.get("sub"):
+        png = out.with_suffix(".title.png")
+        titles.draw(title, s.width, s.height).save(png)
+        inputs += ["-loop", "1", "-t", f"{seconds:.3f}", "-i", str(png)]
+        appear = min(END_FADE * 0.8, seconds / 3)  # as the last shot is nearly gone
+        graph = (f"[0:v]format=yuv420p[v0];[2:v]format=rgba,setpts=PTS-STARTPTS,"
+                 f"fade=t=in:st={appear:.3f}:d=0.8:alpha=1[title];"
+                 f"[v0][title]overlay=0:0:shortest=1:format=auto,format=yuv420p[v];[1:a]anull[a]")
+    _encode_segment(inputs, graph, seconds, out, s)
 
 
 def _transition_between(before: MediaItem, k: int, s: RenderSettings) -> tuple[str | None, float]:
@@ -596,7 +633,7 @@ def _join_once(
 
     if s.music_path:
         inputs += ["-stream_loop", "-1", "-i", s.music_path]
-        fade = min(3.0, total / 4)
+        fade = min(max(3.0, s.end_black + END_FADE), total / 4)  # the music fades out across the black ending
         parts.append(f"{sound}[clips]")
         parts.append(
             f"[{n}:a]aformat=sample_rates=48000:channel_layouts=stereo,atrim=0:{total:.3f},"

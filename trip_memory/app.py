@@ -2006,6 +2006,10 @@ class Page:
                 end.on("blur", lambda: save(end_text=end.value))
                 end_sub = ui.input("Second line", value=t["end_sub"]).classes("w-64")
                 end_sub.on("blur", lambda: save(end_sub=end_sub.value))
+                ui.select({0.0: "No black ending", 2.0: "2 s of black", 3.0: "3 s of black", 4.0: "4 s of black",
+                           5.0: "5 s of black"}, value=float(t["end_black"] or 0), label="Ending",
+                          on_change=lambda e: save(end_black=e.value)).classes("w-48") \
+                    .tooltip("The last shot fades to black, the end card fades in on the black, and the music fades out.")
 
     @ui.refreshable
     def video_summary(self) -> None:
@@ -2156,6 +2160,7 @@ class Page:
             music_path=str(Path(music).expanduser()) if music else None,
             music_volume=self.music_vol.value,
         )
+        settings.end_black, settings.end_title = self.trip.end_card()
         title = (self.name_input.value or "").strip() or self.trip.folder.name or "My trip"
         safe = "".join(c for c in title if c.isalnum() or c in " -_").strip() or "My trip"
         out = OUTPUT_DIR / f"{safe} {datetime.now():%Y-%m-%d %H%M}.mp4"

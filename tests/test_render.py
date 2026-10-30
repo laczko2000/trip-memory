@@ -216,3 +216,23 @@ def test_titles_fade_in_over_videos_and_photos(tmp_path):
         plain, titled = _frame(out, 0.05), _frame(out, 1.5)
         centre = (slice(150, 210), slice(200, 440))
         assert titled[centre].min(axis=2).max() > 220 > plain[centre].min(axis=2).max(), item.kind  # letters fade in
+
+
+def test_the_video_ends_on_black_with_the_end_card_and_the_music_fading(tmp_path):
+    trip = tmp_path / "trip"
+    trip.mkdir()
+    Image.new("RGB", (640, 360), (200, 200, 200)).save(trip / "a.jpg")
+    music = tmp_path / "song.wav"
+    subprocess.run([ffmpeg_paths()[0], "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=f=440:d=20", str(music)],
+                   check=True)
+    settings = RenderSettings(width=640, height=360, photo_seconds=3, music_path=str(music), music_volume=1.0,
+                              end_black=2.0, end_title={"text": "THE END", "style": "bold", "where": "center"})
+    out = render(scan_folder(trip)[0], settings, tmp_path / "out.mp4")
+    length = float(probe(str(out))["format"]["duration"])
+    assert abs(length - (3 + 2.0 + 1.2 - 1.2)) < 0.2  # the photo, then black (the fade overlaps the two)
+    black = _frame(out, 3.8)
+    assert black[:100].max() < 30  # dark above the title
+    assert black[150:210, 200:440].max() > 200  # the end card's letters
+    loud = subprocess.run([ffmpeg_paths()[0], "-ss", f"{length - 0.4:.2f}", "-i", str(out), "-af", "volumedetect",
+                           "-f", "null", "-"], capture_output=True, text=True).stderr
+    assert float(loud.split("max_volume:")[1].split("dB")[0]) < -12  # the music has faded out

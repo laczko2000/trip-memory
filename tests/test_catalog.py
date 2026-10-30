@@ -378,8 +378,10 @@ def test_titles_opening_story_end_and_your_own(tmp_path, monkeypatch):
     trip = catalog.Trip(trip_dir)
     trip.prepare()
     shown = lambda: {Path(p).name: (t["auto"], t["text"]) for p, t in trip.shot_titles().items()}
-    assert shown() == {"0.jpg": ("opening", "Portugal 2025"), "2.jpg": ("story", trip.stories()[1]["name"]),
-                       "3.jpg": ("ending", "Until next time")}
+    assert shown() == {"0.jpg": ("opening", "Portugal 2025"), "2.jpg": ("story", trip.stories()[1]["name"])}
+    assert trip.end_card() == (3.0, {"text": "Until next time", "sub": "Portugal 2025", "style": "elegant", "where": "center"})
+    trip.set_title_settings(end_black=0)  # no black ending: the end card goes on the last shot
+    assert shown()["3.jpg"] == ("ending", "Until next time")
     assert trip.title_settings()["trip_sub"] == "3 – 4 July 2025"
 
     trip.set_shot_title(str(trip_dir / "2.jpg"), "Beach day", "", "bold", "center")
