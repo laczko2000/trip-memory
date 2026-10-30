@@ -272,7 +272,7 @@ class Page:
                 themes_tab = self.themes_tab = ui.tab("Themes", icon="category")
                 music_tab = ui.tab("Music & audio", icon="graphic_eq")
                 story_tab = self.storyboard_tab = ui.tab("Storyboard", icon="view_timeline")
-                video_tab = ui.tab("Make video", icon="movie")
+                video_tab = self.video_tab = ui.tab("Make video", icon="movie")
                 ui.separator().props("vertical").classes("mx-2")
                 library_tab = ui.tab("Library", icon="photo_library").classes("opacity-70")
                 people_tab = ui.tab("People", icon="people").classes("opacity-70")
@@ -2305,6 +2305,10 @@ class Page:
             with ui.row().classes("w-full items-center gap-3"):
                 ui.button("Make the first cut", icon="auto_fix_high", on_click=self.run_auto_edit) \
                     .tooltip("Replaces the storyboard's order, trims and transitions; Undo brings them back")
+                ui.button("Update the video", icon="published_with_changes", on_click=self.update_video) \
+                    .props("outline no-caps") \
+                    .tooltip("Make the video again with your changes here, keeping this cut: only the clips you "
+                             "changed are made again, the rest is reused")
                 ui.label("The music decides how many shots there are and where the cuts go." if music else
                          "Without a song the cuts follow a steady pace.").classes("text-sm text-gray-600 flex-1")
                 undo = self.trip.undo_label()
@@ -4259,6 +4263,15 @@ class Page:
         if path:
             self.music_input.value = path
 
+    async def update_video(self) -> None:
+        """Your changes in the Storyboard (a longer clip, another part, a new order) into the video, without a new
+        cut: only the changed clips are made again."""
+        if not self.trip or not self.trip.storyboard():
+            ui.notify("Make the first cut first.", type="warning")
+            return
+        self.panels.set_value(self.video_tab)
+        await self.make()
+
     async def make(self) -> None:
         r = self.rendering
         if r["busy"] or not self.trip:
@@ -4293,6 +4306,7 @@ class Page:
             r["progress"], r["message"] = fraction, message
 
         r.update(busy=True, progress=0.0, message="Starting…")
+        self.render_status.text = ""
         self.make_button.disable()
         self.render_progress.set_visibility(True)
         self.result_box.clear()

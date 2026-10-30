@@ -577,12 +577,15 @@ def render(
         # The same file used twice is prepared once.
         unique = {_segment_key(item, settings): item for item in items}
         ready: dict[str, Path] = {}
-        report(0.0, f"Preparing {len(unique)} clips")
+        new = sum(1 for key in unique if not (cache / f"{key}.mp4").exists())
+        report(0.0, f"Preparing {new} new or changed clips" + (f" (reusing {len(unique) - new} made before)"
+                                                                 if new < len(unique) else ""))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             jobs = {pool.submit(_prepare_segment, item, settings, cache, workdir): key for key, item in unique.items()}
             for done, job in enumerate(as_completed(jobs), 1):
                 ready[jobs[job]] = job.result()
-                report(prep_share * done / len(unique), f"Prepared {done} of {len(unique)} clips")
+                report(prep_share * done / len(unique), f"Prepared {done} of {len(unique)} clips"
+                       + (f" ({len(unique) - new} reused)" if new < len(unique) else ""))
         segments = [ready[_segment_key(item, settings)] for item in items]
         lengths = [_segment_length(seg) for seg in segments]
         styles = [_transition_between(items[k - 1], k, settings) for k in range(1, len(items))]
