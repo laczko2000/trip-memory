@@ -46,6 +46,27 @@ def save(song: str, folder: Path, taps: list[float], final: bool) -> None:
     _file(song, folder).write_text(json.dumps({**data, "song": song, "taps": clean, "final": final}))
 
 
+def extra(song: str, folder: Path, key: str):
+    """Something else kept with the song (your mood stretches, its style), or None."""
+    try:
+        return json.loads(_file(song, folder).read_text()).get(key)
+    except (OSError, ValueError):
+        return None
+
+
+def set_extra(song: str, folder: Path, key: str, value) -> None:
+    folder.mkdir(parents=True, exist_ok=True)
+    try:
+        data = json.loads(_file(song, folder).read_text())
+    except (OSError, ValueError):
+        data = {"song": song, "taps": [], "final": True}
+    if value is None:
+        data.pop(key, None)
+    else:
+        data[key] = value
+    _file(song, folder).write_text(json.dumps(data))
+
+
 def fades_of(song: str, folder: Path) -> tuple[float, float] | None:
     """(fade in, fade out) in seconds, for a track you cut out of a song."""
     try:

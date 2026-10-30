@@ -25,6 +25,7 @@ from . import titles
 from . import stories
 from . import music as free_music
 from . import songmap
+from . import musicmood
 from .lengths import as_words, read_length
 from . import voice
 from . import taps as song_taps
@@ -218,7 +219,7 @@ class Page:
                 self.choose_tab = ui.tab("Choose files", icon="checklist")
                 self.panels = None
                 stories_tab = ui.tab("Stories", icon="auto_stories")
-                music_tab = ui.tab("Music", icon="graphic_eq")
+                music_tab = ui.tab("Music & audio", icon="graphic_eq")
                 story_tab = ui.tab("Storyboard", icon="view_timeline")
                 video_tab = ui.tab("Make video", icon="movie")
                 ui.separator().props("vertical").classes("mx-2")
@@ -1130,9 +1131,87 @@ class Page:
         ui.button("Snap to the music", icon="center_focus_strong", on_click=self.snap_taps).props("outline")
         self.saved_pins = saved["taps"]
         self.pin_summary(music, saved["taps"])
+        self.music_reading(music)
         ui.timer(0.2, lambda: ui.run_javascript(f"tmTapInit({json.dumps(saved['taps'])}, 0, {json.dumps(can_trim)}); "
                                                 f"tm.tap.song = {json.dumps(music)}"), once=True)
         ui.timer(2.0, self.autosave_taps)  # pins are kept as you place them: no save button to forget
+
+    @ui.refreshable
+    def music_reading(self, music: str) -> None:
+        """The song's calm, medium and lively stretches (lined up with your pins), what fits in each, and its style.
+        Change any of it; Auto-edit and the AI follow it."""
+        ui.label("Read the music").classes("font-semibold mt-3")
+        song = self.song_maps.get(music)
+        if song is None:
+            with ui.row().classes("items-center"):
+                ui.spinner()
+                ui.label("Listening to the song…").classes("text-sm text-gray-600")
+
+            async def study() -> None:
+                try:
+                    self.song_maps[music] = await run.io_bound(songmap.analyse, music, app_dir() / "music-maps")
+                except Exception as exc:
+                    traceback.print_exc()
+                    ui.notify(f"Could not study the song: {exc}", type="negative")
+                    return
+                self.music_reading.refresh(music)
+
+            ui.timer(0.1, study, once=True)
+            return
+        folder = app_dir() / "music-taps"
+        reading = musicmood.reading(song, music, folder)
+        stretches = reading["stretches"]
+        ui.timer(0.3, lambda: ui.run_javascript(
+            "window.tmMoodsSet && tmMoodsSet(" + json.dumps([[b["start"], b["end"], musicmood.COLOURS[b["mood"]]]
+                                                             for b in stretches]) + ")"), once=True)
+        ui.label("The coloured strip on the line shows how the music feels: light blue calm, blue medium, orange lively, "
+                 "each change moved onto your nearest pin. Auto-edit puts the fitting shots in each stretch. Change any "
+                 "stretch you hear differently.").classes("text-sm text-gray-600")
+        with ui.row().classes("w-full gap-2"):
+            for n, b in enumerate(stretches):
+                with ui.card().classes("p-2 gap-1").style(f"border-left: 6px solid {musicmood.COLOURS[b['mood']]}"):
+                    ui.label(f"{fmt_length(b['start'])}–{fmt_length(b['end'])}").classes("text-xs text-gray-500")
+                    ui.select(list(musicmood.MOODS), value=b["mood"],
+                              on_change=lambda e, n=n: self.set_mood(music, n, e.value)).props("dense").classes("w-28")
+                    ui.label(musicmood.FITS[b["mood"]]).classes("text-xs text-gray-600 w-28")
+        if reading["mine"]:
+            ui.button("Back to what the app heard", icon="restart_alt",
+                      on_click=lambda: self.reset_moods(music)).props("flat dense no-caps")
+        styles = {k: v["label"] + (" (suggested)" if k == reading["suggested"] else "") for k, v in musicmood.STYLES.items()}
+        with ui.row().classes("items-center gap-3 mt-1"):
+            ui.select(styles, value=reading["style"], label="The song's style",
+                      on_change=lambda e: self.set_song_style(music, e.value)).classes("w-56")
+            ui.label(musicmood.STYLES[reading["style"]]["what"] + ".").classes("text-sm text-gray-600")
+
+    def set_mood(self, music: str, n: int, mood: str) -> None:
+        song = self.song_maps.get(music)
+        if not song:
+            return
+        folder = app_dir() / "music-taps"
+        stretches = [dict(b) for b in musicmood.reading(song, music, folder)["stretches"]]
+        stretches[n]["mood"] = mood
+        stretches[n]["energy"] = musicmood.MOODS[mood]
+        song_taps.set_extra(music, folder, "moods", stretches)
+        self.music_reading.refresh(music)
+
+    def reset_moods(self, music: str) -> None:
+        song_taps.set_extra(music, app_dir() / "music-taps", "moods", None)
+        self.music_reading.refresh(music)
+
+    def set_song_style(self, music: str, style: str) -> None:
+        song_taps.set_extra(music, app_dir() / "music-taps", "style", style)
+        ui.notify(f"Style: {musicmood.STYLES[style]['label']}. Auto-edit follows it at the next cut.", type="positive")
+        self.music_reading.refresh(music)
+
+    def music_words(self) -> str:
+        """The song's style and stretches, for the AI's versions."""
+        music = self.music_path()
+        song = self.song_maps.get(music) if music else None
+        if not song:
+            return ""
+        reading = musicmood.reading(song, music, app_dir() / "music-taps")
+        return (f"The song's style: {musicmood.STYLES[reading['style']]['label']}. "
+                f"How the music feels: {musicmood.words(reading['stretches'])}.")
 
     def trim_card(self, music: str) -> bool:
         """Whether the song can still be trimmed (on the pin line); for a track already cut out of a song, says so."""
@@ -1187,7 +1266,7 @@ class Page:
 
     async def autosave_taps(self) -> None:
         music = self.music_path()
-        if not music or not self.showing("Music"):
+        if not music or not self.showing("Music & audio"):
             return
         try:
             # Only the pins of this song (just after you change songs, the line may still show the last one's).
@@ -1203,6 +1282,7 @@ class Page:
         song_taps.save(music, app_dir() / "music-taps", pins, True)
         self.saved_pins = pins
         self.pin_summary.refresh(music, pins)
+        self.music_reading.refresh(music)  # the stretches line up with the pins
 
     def tap_lengths(self, music: str, taps: list[float]) -> None:
         """The shots your pins make, one box each."""
@@ -1821,7 +1901,8 @@ class Page:
         note = ui.notification("The AI is thinking about your video…", spinner=True, timeout=None)
         self.ai_busy = True
         try:
-            wish = await self.stoppable(self.trip.make_wish, ai, text or "", song.duration if song else None, length)
+            wish = await self.stoppable(self.trip.make_wish, ai, text or "", song.duration if song else None, length,
+                                        self.music_words())
             if wish is None:
                 return
         except director.DirectorError as exc:
@@ -1886,6 +1967,13 @@ class Page:
             limits.storyline = "teaser" if wish.get("teaser") else "stories"
             limits.speed_effects = bool(wish.get("slow_motion", True))
             limits.camera_effects = bool(wish.get("camera_effects", True))
+        else:
+            music = self.music_path()
+            song = self.song_maps.get(music) if music else None
+            if song:  # the song's style sets the pace
+                style = musicmood.reading(song, music, app_dir() / "music-taps")["style"]
+                for key, value in self.PACES[musicmood.STYLES[style]["pace"]].items():
+                    setattr(limits, key, value)
         return limits
 
     def length_now(self) -> object:
@@ -1969,8 +2057,6 @@ class Page:
             ui.label("✨ Auto-edit: the music leads, the shots follow").classes("text-lg font-semibold")
             pins = song_taps.final_taps(music, app_dir() / "music-taps") if music else None
             self.song_line(music, pins)
-            if music:
-                self.music_map_view(music)
             wish = self.trip.wish()
             if wish:  # the wish sets length, pace and effects: one button, nothing to contradict it
                 with ui.row().classes("w-full items-center gap-4 mt-2"):
@@ -1993,15 +2079,29 @@ class Page:
         with ui.row().classes("w-full items-center gap-3"):
             ui.label("Song:").classes("font-medium")
             ui.label(Path(music).name if music else "none chosen yet").classes("text-gray-700")
-            ui.button("Choose or change it in the Music tab" if music else "Choose one in the Music tab",
+            ui.button("Change it in Music & audio" if music else "Choose one in Music & audio",
                       icon="graphic_eq", on_click=lambda: self.panels.set_value(self.music_tab)).props("flat dense no-caps")
+        if music:
+            bits = []
+            source = song_taps.trimmed_from(music, app_dir() / "music-taps")
+            if source:
+                bits.append(f"{fmt_length(source[1])}–{fmt_length(source[2])} of {Path(source[0]).name}")
+            fades = song_taps.fades_of(music, app_dir() / "music-taps")
+            if fades and any(fades):
+                bits.append(f"fades {fades[0]:g} s / {fades[1]:g} s")
+            song = self.song_maps.get(music)
+            if song:
+                reading = musicmood.reading(song, music, app_dir() / "music-taps")
+                bits.append(f"Style: {musicmood.STYLES[reading['style']]['label']}")
+            if bits:
+                ui.label(" · ".join(bits)).classes("text-sm text-gray-600")
         if not music:
             ui.label("Without a song the cuts follow a steady pace.").classes("text-sm text-gray-600")
         elif pins:
-            ui.label(f"Cuts: on your {len(pins)} pins from the Music tab; after the last pin, on the beat.") \
+            ui.label(f"Cuts: on your {len(pins)} pins from Music & audio; after the last pin, on the beat.") \
                 .classes("text-sm text-green-700")
         else:
-            ui.label("Cuts: on the song's beats, found by the app (place pins in the Music tab to choose them "
+            ui.label("Cuts: on the song's beats, found by the app (place pins in Music & audio to choose them "
                      "yourself).").classes("text-sm text-gray-600")
 
     def auto_edit_settings(self, limits: AutoLimits, pins: list[float] | None) -> None:
@@ -2050,59 +2150,13 @@ class Page:
         setattr(self.auto_limits, key, value)
         save_settings(limits=asdict(self.auto_limits))
 
-    def music_map_view(self, music: str) -> None:
-        """A small picture of the song: one bar per musical bar, tall when lively, with its parts named."""
-        song = self.song_maps.get(music)
-        if song is None:
-            with ui.row().classes("items-center"):
-                ui.spinner()
-                ui.label("Listening to the song…").classes("text-sm text-gray-600")
-
-            async def study() -> None:
-                try:
-                    self.song_maps[music] = await run.io_bound(songmap.analyse, music, app_dir() / "music-maps")
-                except Exception as exc:
-                    traceback.print_exc()
-                    ui.notify(f"Could not study the song: {exc}", type="negative")
-                    return
-                self.storyboard_view.refresh()
-
-            ui.timer(0.1, study, once=True)
-            return
-        colours = {"Calm": "#93c5fd", "Medium": "#60a5fa", "Lively": "#f97316"}
-        width = max(1, len(song.bar_energy))
-        bars = []
-        bar_len = song.period * songmap.BEATS_PER_BAR
-        starts = song.bar_starts()
-        for k, e in enumerate(song.bar_energy):
-            t = starts[k] if k < len(starts) else song.duration
-            level = next((s.level for s in song.sections if s.start <= t < s.end), "Medium")
-            h = 8 + 52 * e
-            bars.append(f'<rect x="{k}" y="{60 - h:.1f}" width="0.8" height="{h:.1f}" fill="{colours[level]}"/>')
-        # The strong beats: small marks along the top, taller for a harder hit.
-        first_bar = starts[0] if len(starts) else song.first_beat
-        for t, a in zip(song.beat_times(), song.accents):
-            if a >= 0.6 and bar_len:
-                x = (t - first_bar) / bar_len
-                bars.append(f'<line x1="{x:.2f}" y1="0" x2="{x:.2f}" y2="{3 + 6 * a:.1f}" stroke="#be123c" stroke-width="0.3"/>')
-        for s in song.sections[1:]:
-            x = (s.start - song.first_beat) / bar_len if bar_len else 0
-            bars.append(f'<line x1="{x:.2f}" y1="0" x2="{x:.2f}" y2="60" stroke="#1e3a8a" stroke-width="0.25"/>')
-        ui.html(f'<svg viewBox="0 0 {width} 60" preserveAspectRatio="none" style="width:100%;height:60px">{"".join(bars)}</svg>',
-                sanitize=False).classes("w-full")
-        parts = " → ".join(f"{s.level} {fmt_length(s.end - s.start)}" for s in song.sections)
-        beat = f"{song.bpm:.0f} beats a minute" if song.clear_beat else "no clear beat (steady pace)"
-        strong = sum(a >= 0.6 for a in song.accents)
-        beat += f" · {strong} strong beats (red marks)" if strong else ""
-        ui.label(f"{fmt_length(song.duration)} · {beat} · {parts}").classes("text-xs text-gray-600")
-
     @ui.refreshable
     def music_line(self) -> None:
         music = self.music_path()
         with ui.row().classes("w-full items-center gap-3"):
             ui.label("Music:").classes("font-medium")
-            ui.label(Path(music).name if music else "none (choose a song in the Music tab)").classes("text-gray-700")
-            ui.button("Music tab", icon="graphic_eq", on_click=lambda: self.panels.set_value(self.music_tab)) \
+            ui.label(Path(music).name if music else "none (choose a song in Music & audio)").classes("text-gray-700")
+            ui.button("Music & audio", icon="graphic_eq", on_click=lambda: self.panels.set_value(self.music_tab)) \
                 .props("flat dense no-caps")
 
     def music_changed(self) -> None:
@@ -2124,6 +2178,11 @@ class Page:
         style = s.transition if TRANSITIONS.get(s.transition, "fade") not in (None, "mixed") else "Fade"
         if self.trip.progress.running:
             return
+        if music and music not in self.song_maps:  # the song's style sets the pace: read the music first
+            try:
+                self.song_maps[music] = await run.io_bound(songmap.analyse, music, app_dir() / "music-maps")
+            except Exception:
+                traceback.print_exc()
         target = self.length_now()
         limits = self.limits_now()
         note = ui.notification("Making a first cut…", spinner=True, timeout=None)
@@ -2964,6 +3023,10 @@ function tmTapDraw() {
   const T = tm.tap, a = tmTapAudio(), [v0, span] = tmTapWindow();
   const x = t => ((t - v0) / span * 100).toFixed(3) + '%';
   let html = tmTapWaveSvg(v0, span);
+  (T.moods || []).forEach(([s0, s1, col]) => {  // how the music feels: a coloured strip along the bottom
+    const a0 = Math.max(s0, v0), a1 = Math.min(s1, v0 + span); if (a1 <= a0) return;
+    html += `<div style="position:absolute;left:${x(a0)};width:${((a1 - a0) / span * 100).toFixed(3)}%;bottom:22px;height:8px;background:${col};pointer-events:none"></div>`;
+  });
   const d = tmTapLength();
   if (T.trim && T.trim[1] < 0 && d) T.trim[1] = d;
   const [k0, k1] = tmTrimPart();
@@ -3124,6 +3187,7 @@ function tmFadeVolume(t) {
   }
   T.gain.gain.setTargetAtTime(Math.max(0, v), T.ctx.currentTime, 0.015);
 }
+function tmMoodsSet(list) { if (!window.tm || !tm.tap) return; tm.tap.moods = list; tmTapDraw(); }
 function tmFadeSet(fin, fout) {
   const T = tm.tap; if (!T.trim) return;
   const [k0, k1] = tmTrimPart(), room = (k1 - k0) / 2;

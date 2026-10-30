@@ -26,7 +26,7 @@ from PIL import Image, ImageOps
 
 from .faces import FaceFinder, group_faces
 from .media import MediaItem, scan_folder
-from . import autoedit, director, lengths, motion, stories
+from . import autoedit, director, lengths, motion, musicmood, stories
 from .scenes import SceneTagger, mean_vector
 from .tags import TAG_GROUP, Tagger, group_name, look_alike_groups, people_tag, story_subject
 from .tools import ffmpeg_paths, probe
@@ -637,6 +637,12 @@ class Trip:
         report(0.95, "Listening to the music")
         song = songmap.analyse(song_path, app_dir() / "music-maps")
         song.taps = taps.final_taps(song_path, app_dir() / "music-taps")  # your own cuts, if you tapped this song
+        # The calm and lively stretches (yours, if you changed them) and the song's style.
+        music = musicmood.reading(song, song_path, app_dir() / "music-taps")
+        musicmood.apply(song, music["stretches"])
+        gap = musicmood.STYLES[music["style"]]["pin_gap"]
+        if gap and song.taps:
+            song.taps = musicmood.thin(song.taps, gap)  # a calm style cuts only on some of your pins
         result = autoedit.plan_to_music(rows, scores, song, limits, target, transition_seconds, soft_transition)
         self._apply_plan(result)
         report(1.0, "Done")
@@ -1407,14 +1413,15 @@ class Trip:
             })
         return described, self.person_names()
 
-    def make_wish(self, ai, wish: str, song_seconds: float | None = None, length: dict | None = None) -> dict:
+    def make_wish(self, ai, wish: str, song_seconds: float | None = None, length: dict | None = None,
+                  music: str = "") -> dict:
         """Ask the AI for 3 versions of the video you described (nothing typed: it surprises you) and use the first.
         What you set yourself (story names, stories you switched on or off, your title) is kept."""
         stories, people = self._wish_stories()
         if not stories:
             raise director.DirectorError("No stories yet. Click Analyse first.")
         mine = self._new_turn()
-        answer = director.clean_wish(ai.wish(director.wish_prompt(wish, stories, people, song_seconds)),
+        answer = director.clean_wish(ai.wish(director.wish_prompt(wish, stories, people, song_seconds, music)),
                                      len(stories), people)
         if self._stopped(mine):
             raise director.Stopped("Stopped: nothing was changed.")

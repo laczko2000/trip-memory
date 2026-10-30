@@ -496,7 +496,7 @@ def clean_plan(answer: dict, count: int) -> dict:
     return {"theme": theme, "idea": " ".join(str(answer.get("idea", "")).split())[:300], "parts": parts}
 
 
-def wish_prompt(wish: str, stories: list[dict], people: list[str], song_seconds: float | None) -> str:
+def wish_prompt(wish: str, stories: list[dict], people: list[str], song_seconds: float | None, music: str = "") -> str:
     """The question for "type the video you want". stories: as for storyline_prompt, plus the people in each."""
     lines = []
     for n, s in enumerate(stories, 1):
@@ -505,6 +505,8 @@ def wish_prompt(wish: str, stories: list[dict], people: list[str], song_seconds:
         lines.extend(f"  - {c}" for c in [c for c in s["captions"] if c][:6])
     song = (f"The chosen song lasts {song_seconds / 60:.1f} minutes.\n" if song_seconds
             else "No song is chosen yet.\n")
+    if music:
+        song += f"{music}\nUnless the wish says otherwise, let the pace of your versions suit the music.\n"
     return WISH_PROMPT.format(wish=" ".join(wish.split())[:1000] or SURPRISE, stories="\n".join(lines),
                               people=", ".join(people) or "nobody yet", song=song)
 
