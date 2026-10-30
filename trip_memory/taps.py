@@ -42,8 +42,10 @@ def save(song: str, folder: Path, taps: list[float], final: bool) -> None:
 
 
 def final_taps(song: str, folder: Path) -> list[float] | None:
+    """Your pins for this song, if any: they are the cuts (pins are saved as you place them; older versions also
+    kept "not final yet" pins, which count too)."""
     data = load(song, folder)
-    return data["taps"] if data["final"] and data["taps"] else None
+    return data["taps"] or None
 
 
 def _rises(samples: np.ndarray, a: float, b: float) -> tuple[np.ndarray, np.ndarray]:

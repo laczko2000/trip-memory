@@ -18,9 +18,8 @@ def test_taps_snap_onto_the_hits_and_are_saved(tmp_path):
     assert snapped[2] == 3.5
     song = tmp_path / "song.mp3"
     song.write_bytes(b"x")
-    taps.save(str(song), tmp_path / "taps", [2.5, 1.0], final=False)
-    assert taps.final_taps(str(song), tmp_path / "taps") is None
-    taps.save(str(song), tmp_path / "taps", [2.5, 1.0], final=True)
+    assert taps.final_taps(str(song), tmp_path / "taps") is None  # not tapped yet
+    taps.save(str(song), tmp_path / "taps", [2.5, 1.0], final=False)  # older "not final yet" pins count too
     assert taps.final_taps(str(song), tmp_path / "taps") == [1.0, 2.5]
     assert taps.shot_lengths([1.0, 2.5], 4.0) == [1.0, 1.5, 1.5]
 

@@ -322,7 +322,7 @@ def music_slots(song, limits: Limits, end: float, longest: float | None = None) 
     """Cut the music into shot-sized pieces: every cut on a beat, every change in the music a cut."""
     longest = longest or max(limits.max_video, limits.max_photo)
     beats = song.beat_times()
-    taps = getattr(song, "taps", None) if limits.cut_on == "taps" else None
+    taps = getattr(song, "taps", None)  # your pins (Music tab) always lead; "Cut on" is for a song without them
     # Your taps decide the cuts up to your last tap; any part of the song after it is cut automatically.
     tapped = min(end, max(taps)) if taps else 0.0
     slots: list[Slot] = _tap_slots(song, taps, tapped) if taps else []

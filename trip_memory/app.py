@@ -204,32 +204,35 @@ class Page:
             ui.label("Trip Memory").classes("text-3xl font-bold")
             self.build_folder_row()
             with ui.tabs().classes("w-full") as tabs:
+                # The path to a video, left to right; then the extra tabs for looking things up.
                 self.choose_tab = ui.tab("Choose files", icon="checklist")
                 self.panels = None
-                library_tab = ui.tab("Library", icon="photo_library")
-                people_tab = ui.tab("People", icon="people")
-                music_tab = ui.tab("Music", icon="graphic_eq")
                 stories_tab = ui.tab("Stories", icon="auto_stories")
+                music_tab = ui.tab("Music", icon="graphic_eq")
                 story_tab = ui.tab("Storyboard", icon="view_timeline")
                 video_tab = ui.tab("Make video", icon="movie")
+                ui.separator().props("vertical").classes("mx-2")
+                library_tab = ui.tab("Library", icon="photo_library").classes("opacity-70")
+                people_tab = ui.tab("People", icon="people").classes("opacity-70")
             self.library_tab = library_tab
+            self.music_tab = music_tab
             self.people_tab = people_tab
             with ui.tab_panels(tabs, value=self.choose_tab, on_change=self.tab_opened).classes("w-full") as self.panels:
                 with ui.tab_panel(self.choose_tab):
                     self.choose_view()
-                with ui.tab_panel(library_tab):
-                    self.build_library()
-                with ui.tab_panel(people_tab):
-                    self.people_view()
-                with ui.tab_panel(music_tab):
-                    self.music_tab_view()
                 with ui.tab_panel(stories_tab):
                     self.director_card()
                     self.stories_view()
+                with ui.tab_panel(music_tab):
+                    self.music_tab_view()
                 with ui.tab_panel(story_tab):
                     self.storyboard_view()
                 with ui.tab_panel(video_tab):
                     self.build_video()
+                with ui.tab_panel(library_tab):
+                    self.build_library()
+                with ui.tab_panel(people_tab):
+                    self.people_view()
         ui.timer(1.0, self.tick)
         last = load_settings().get("folder")
         if last and Path(last).is_dir():
@@ -1055,7 +1058,8 @@ class Page:
             "Press Play and tap the RIGHT Shift key wherever you want the video to cut. Each tap puts a pin on the "
             "line below. Play it back to check: every pin makes a click as it passes. Scroll on the line to zoom in "
             "(the spikes are the hits), drag a pin to move it, or click it and nudge it with the arrow keys; Delete "
-            "removes it. Then let the app snap the pins onto the exact hits, and mark them final."
+            "removes it. Then let the app snap the pins onto the exact hits. Your pins are saved as you go, and "
+            "Auto-edit always cuts on them."
         ).classes("text-sm text-gray-600")
         ui.html(f'<audio id="tm-song" preload="auto" src="{serve_song(music)}" onloadedmetadata="tmTapDraw()" '
                 f'onplay="tmTapOnPlay()" onpause="tmTapUnschedule(); tmTapDraw()"></audio>', sanitize=False)
@@ -1072,15 +1076,40 @@ class Page:
         ui.html('<div id="tm-tl" style="position:relative;width:100%;height:150px;background:#f1f5f9;border-radius:8px;'
                 'touch-action:none;user-select:none;cursor:pointer;overflow:hidden"></div>', sanitize=False).classes("w-full")
         ui.html('<div id="tm-tap-info" style="font-size:13px;color:#475569"></div>', sanitize=False)
-        with ui.row().classes("w-full items-center gap-3"):
-            ui.button("Snap to the music", icon="center_focus_strong", on_click=self.snap_taps).props("outline")
-            ui.button("Save for later", icon="save", on_click=lambda: self.save_taps(final=False)).props("outline")
-            ui.button("These are final", icon="check_circle", on_click=lambda: self.save_taps(final=True))
-            state = ("✓ Final: Auto-edit cuts here" if saved["final"] else "Saved, not final yet") if saved["taps"] else ""
-            ui.label(state).classes("text-sm " + ("text-green-700" if saved["final"] else "text-gray-500"))
-        if saved["taps"]:
-            self.tap_lengths(music, saved["taps"])
-        ui.timer(0.2, lambda: ui.run_javascript(f"tmTapInit({json.dumps(saved['taps'])}, 0)"), once=True)
+        ui.button("Snap to the music", icon="center_focus_strong", on_click=self.snap_taps).props("outline")
+        self.saved_pins = saved["taps"]
+        self.pin_summary(music, saved["taps"])
+        ui.timer(0.2, lambda: ui.run_javascript(f"tmTapInit({json.dumps(saved['taps'])}, 0); "
+                                                f"tm.tap.song = {json.dumps(music)}"), once=True)
+        ui.timer(2.0, self.autosave_taps)  # pins are kept as you place them: no save button to forget
+
+    @ui.refreshable
+    def pin_summary(self, music: str, taps: list[float]) -> None:
+        if taps:
+            ui.label(f"✓ {len(taps)} pins saved: Auto-edit (in the Storyboard) cuts exactly there.") \
+                .classes("text-sm text-green-700")
+            self.tap_lengths(music, taps)
+        else:
+            ui.label("No pins yet: Auto-edit finds the beats by itself.").classes("text-sm text-gray-500")
+
+    async def autosave_taps(self) -> None:
+        music = self.music_path()
+        if not music or not self.showing("Music"):
+            return
+        try:
+            # Only the pins of this song (just after you change songs, the line may still show the last one's).
+            pins = await ui.run_javascript(f"(window.tm && tm.tap && tm.tap.song === {json.dumps(music)}) "
+                                           "? tmTapGet() : null", timeout=3)
+        except Exception:
+            return  # the page is busy or reloading: next time
+        if pins is None:
+            return
+        pins = sorted(round(float(p), 3) for p in pins or [])
+        if pins == [round(p, 3) for p in self.saved_pins]:
+            return
+        song_taps.save(music, app_dir() / "music-taps", pins, True)
+        self.saved_pins = pins
+        self.pin_summary.refresh(music, pins)
 
     def tap_lengths(self, music: str, taps: list[float]) -> None:
         """The shots your pins make, one box each."""
@@ -1114,20 +1143,6 @@ class Page:
                  "that is taken off every pin." if abs(delay) >= 0.02 else "")
         ui.notify(f"Snapped {len(snapped)} pins onto the beats and hits.{habit} Play it back to check.",
                   type="positive", multi_line=True, timeout=8000)
-
-    async def save_taps(self, final: bool) -> None:
-        music = self.music_path()
-        pins = await ui.run_javascript("tmTapGet()", timeout=5)
-        if not music:
-            return
-        song_taps.save(music, app_dir() / "music-taps", [float(p) for p in pins or []], final)
-        if final and pins:
-            self.set_limit("cut_on", "taps")
-            ui.notify(f"{len(pins)} cuts saved. Auto-edit (in the Storyboard) now cuts exactly there.", type="positive")
-        else:
-            ui.notify("Saved." if pins else "Saved: no pins.")
-        self.music_tab_view.refresh()
-        self.storyboard_view.refresh()
 
     async def clear_taps(self) -> None:
         ui.run_javascript("tmTapClear()")
@@ -1518,7 +1533,8 @@ class Page:
             return
         with ui.row().classes("w-full items-center gap-4"):
             ui.label(f"{len(board)} clips in this order").classes("text-lg font-semibold")
-            ui.button("Back to date order", icon="restart_alt", on_click=self.reset_order).props("flat dense")
+            ui.button("Back to story order", icon="restart_alt", on_click=self.reset_order).props("flat dense") \
+                .tooltip("Forget the order you set here: the shots follow the stories and their plans again")
         ui.label(
             "Use the arrows to change the order. For videos, drag the two ends of the bar to choose which part to keep. "
             "The transition setting is for the cut after that clip."
@@ -1618,57 +1634,12 @@ class Page:
         limits = self.auto_limits
         with ui.card().classes("w-full bg-blue-50"):
             ui.label("✨ Auto-edit: the music leads, the shots follow").classes("text-lg font-semibold")
-            # 1. The song
-            with ui.row().classes("w-full items-center gap-3"):
-                ui.label("1. Song:").classes("font-medium")
-                ui.label(Path(music).name if music else "none chosen yet").classes("text-gray-700")
-                if sys.platform == "darwin":
-                    ui.button("Choose song…", icon="music_note", on_click=self.browse_music).props("outline dense")
-                ui.button("Find free music", icon="library_music", on_click=self.find_music).props("flat dense")
+            pins = song_taps.final_taps(music, app_dir() / "music-taps") if music else None
+            self.song_line(music, pins)
             if music:
                 self.music_map_view(music)
-            else:
-                ui.label(
-                    "Without a song the cuts follow a steady pace. With one, the app studies its beats and calm and "
-                    "lively parts first, and cuts to them."
-                ).classes("text-sm text-gray-600")
-            # 2. Your limits
-            ui.label("2. Your limits").classes("font-medium mt-2")
-            with ui.row().classes("w-full gap-8"):
-                for key, label, lo, hi in (("max_video", "Longest video clip", 1.0, 10.0),
-                                           ("max_photo", "Longest photo", 0.5, 6.0),
-                                           ("min_shot", "Shortest shot", 0.5, 3.0)):
-                    with ui.column().classes("min-w-48 flex-grow gap-0"):
-                        ui.label(label).classes("text-sm text-gray-600")
-                        ui.slider(min=lo, max=hi, step=0.5, value=getattr(limits, key),
-                                  on_change=lambda e, k=key: self.set_limit(k, e.value)).props("label-always").classes("mt-6")
-            with ui.row().classes("w-full items-center gap-3"):
-                ui.select(STORYLINES, value=limits.storyline if limits.storyline in STORYLINES else "teaser",
-                          label="Storyline", on_change=lambda e: self.set_limit("storyline", e.value)).classes("w-56")
-                ui.select(CUT_ON, value=limits.cut_on if limits.cut_on in CUT_ON else "strong", label="Cut on",
-                          on_change=lambda e: self.set_limit("cut_on", e.value)).classes("w-56")
-                ui.label({
-                    "strong": "Cuts on the hardest hits (drums, accents), keeping the pace of each part of the song.",
-                    "bass": "Cuts on the kick drum and bass notes.",
-                    "changes": "Few cuts: shots held as long as you allow, cut on the biggest moments.",
-                    "beats": "Cuts on a steady count of beats, lined up with the bars.",
-                    "taps": "Cuts exactly on the pins you tapped in the Music tab.",
-                }.get(limits.cut_on, "")).classes("text-sm text-gray-600")
-            ui.switch("Speed effects: slow motion in calm, cinematic moments; slow shots sped up in lively music",
-                      value=limits.speed_effects, on_change=lambda e: self.set_limit("speed_effects", e.value))
-            ui.switch("Camera effects: zoom transitions, punch-ins on big hits, speed ramps, slow push-ins on still shots",
-                      value=limits.camera_effects, on_change=lambda e: self.set_limit("camera_effects", e.value))
-            ui.label({
-                "teaser": "Storyline: opens with a quick teaser of the most exciting shots, then tells each story; every "
-                          "story starts with a wide, calm view, look-alike shots never come back to back, and the "
-                          "video ends on a calm shot.",
-                "stories": "Storyline: each story starts with a wide, calm view, look-alike shots never come back to "
-                           "back, and the video ends on a calm shot.",
-                "date": "Storyline: everything in the order it was taken.",
-            }.get(limits.storyline, "")).classes("text-sm text-gray-600")
-            # 3. Length, then go
+            # Length, then go
             with ui.row().classes("w-full items-center gap-4 mt-2"):
-                ui.label("3.").classes("font-medium")
                 lengths = {60: "1 minute", 120: "2 minutes", 180: "3 minutes", 300: "5 minutes", 600: "10 minutes",
                            "all": "Use everything"}
                 if music:
@@ -1681,17 +1652,70 @@ class Page:
                 ui.select(lengths, value=self.auto_length, label="Length",
                           on_change=lambda e: setattr(self, "auto_length", e.value)).classes("w-48")
                 ui.button("Make a first cut", icon="auto_fix_high", on_click=self.confirm_auto_edit)
-            ui.label(
-                "Cuts land on the beat: quick shots in the lively parts, longer ones in the calm parts, and a cut at every "
-                "change in the music. Action clips go to lively music, calm and cinematic clips and photos to calm music, "
-                "following your storyline, each at its best moment."
-            ).classes("text-sm text-gray-600")
+            with ui.expansion("More settings: shot lengths, storyline, beats, effects", icon="tune") \
+                    .classes("w-full").props("dense"):
+                self.auto_edit_settings(limits, pins)
+
+    def song_line(self, music: str | None, pins: list[float] | None) -> None:
+        """The song (chosen in the Music tab, the one place for it) and what the cuts follow."""
+        with ui.row().classes("w-full items-center gap-3"):
+            ui.label("Song:").classes("font-medium")
+            ui.label(Path(music).name if music else "none chosen yet").classes("text-gray-700")
+            ui.button("Choose or change it in the Music tab" if music else "Choose one in the Music tab",
+                      icon="graphic_eq", on_click=lambda: self.panels.set_value(self.music_tab)).props("flat dense no-caps")
+        if not music:
+            ui.label("Without a song the cuts follow a steady pace.").classes("text-sm text-gray-600")
+        elif pins:
+            ui.label(f"Cuts: on your {len(pins)} pins from the Music tab; after the last pin, on the beat.") \
+                .classes("text-sm text-green-700")
+        else:
+            ui.label("Cuts: on the song's beats, found by the app (place pins in the Music tab to choose them "
+                     "yourself).").classes("text-sm text-gray-600")
+
+    def auto_edit_settings(self, limits: AutoLimits, pins: list[float] | None) -> None:
+        with ui.row().classes("w-full gap-8"):
+            for key, label, lo, hi in (("max_video", "Longest video clip", 1.0, 10.0),
+                                       ("max_photo", "Longest photo", 0.5, 6.0),
+                                       ("min_shot", "Shortest shot", 0.5, 3.0)):
+                with ui.column().classes("min-w-48 flex-grow gap-0"):
+                    ui.label(label).classes("text-sm text-gray-600")
+                    ui.slider(min=lo, max=hi, step=0.5, value=getattr(limits, key),
+                              on_change=lambda e, k=key: self.set_limit(k, e.value)).props("label-always").classes("mt-6")
+        with ui.row().classes("w-full items-center gap-3"):
+            ui.select(STORYLINES, value=limits.storyline if limits.storyline in STORYLINES else "teaser",
+                      label="Storyline", on_change=lambda e: self.set_limit("storyline", e.value)).classes("w-56")
+            beats = {k: v for k, v in CUT_ON.items() if k != "taps"}  # your pins always lead when there are some
+            meaning = {
+                "strong": "The hardest hits (drums, accents), keeping the pace of each part of the song.",
+                "bass": "The kick drum and bass notes.",
+                "changes": "Few cuts: shots held as long as you allow, cut on the biggest moments.",
+                "beats": "A steady count of beats, lined up with the bars.",
+            }
+            choice = ui.select(beats, value=limits.cut_on if limits.cut_on in beats else "strong",
+                               label="Without pins, cut on" if not pins else "After your last pin, cut on").classes("w-56")
+            note = ui.label(meaning.get(choice.value, "")).classes("text-sm text-gray-600")
+            choice.on_value_change(lambda e: (self.set_limit("cut_on", e.value), note.set_text(meaning.get(e.value, ""))))
+        ui.switch("Speed effects: slow motion in calm, cinematic moments; slow shots sped up in lively music",
+                  value=limits.speed_effects, on_change=lambda e: self.set_limit("speed_effects", e.value))
+        ui.switch("Camera effects: zoom transitions, punch-ins on big hits, speed ramps, slow push-ins on still shots",
+                  value=limits.camera_effects, on_change=lambda e: self.set_limit("camera_effects", e.value))
+        ui.label({
+            "teaser": "Storyline: opens with a quick teaser of the most exciting shots, then tells each story; every "
+                      "story starts with a wide, calm view, look-alike shots never come back to back, and the "
+                      "video ends on a calm shot.",
+            "stories": "Storyline: each story starts with a wide, calm view, look-alike shots never come back to "
+                       "back, and the video ends on a calm shot.",
+            "date": "Storyline: everything in the order it was taken.",
+        }.get(limits.storyline, "")).classes("text-sm text-gray-600")
+        ui.label(
+            "Cuts land on the beat: quick shots in the lively parts, longer ones in the calm parts, and a cut at every "
+            "change in the music. Action clips go to lively music, calm and cinematic clips and photos to calm music, "
+            "following your storyline, each at its best moment."
+        ).classes("text-sm text-gray-600")
 
     def set_limit(self, key: str, value) -> None:
         setattr(self.auto_limits, key, value)
         save_settings(limits=asdict(self.auto_limits))
-        if key == "cut_on":
-            self.storyboard_view.refresh()
 
     def music_map_view(self, music: str) -> None:
         """A small picture of the song: one bar per musical bar, tall when lively, with its parts named."""
@@ -1739,6 +1763,15 @@ class Page:
         beat += f" · {strong} strong beats (red marks)" if strong else ""
         ui.label(f"{fmt_length(song.duration)} · {beat} · {parts}").classes("text-xs text-gray-600")
 
+    @ui.refreshable
+    def music_line(self) -> None:
+        music = self.music_path()
+        with ui.row().classes("w-full items-center gap-3"):
+            ui.label("Music:").classes("font-medium")
+            ui.label(Path(music).name if music else "none (choose a song in the Music tab)").classes("text-gray-700")
+            ui.button("Music tab", icon="graphic_eq", on_click=lambda: self.panels.set_value(self.music_tab)) \
+                .props("flat dense no-caps")
+
     def music_changed(self) -> None:
         if hasattr(self, "music_credit"):
             credit = free_music.credit_for(self.music_input.value, app_dir() / "music") if self.music_input.value else None
@@ -1746,6 +1779,7 @@ class Page:
         self.auto_length = None  # back to the default: as long as the song, if there is one
         self.storyboard_view.refresh()
         self.music_tab_view.refresh()
+        self.music_line.refresh()
 
     def music_path(self) -> str | None:
         music = (self.music_input.value or "").strip().strip("'\"") if hasattr(self, "music_input") else ""
@@ -1790,10 +1824,8 @@ class Page:
         note.dismiss()
         beat = result.beat
         on_beat = f", cuts on the beat ({beat.bpm:.0f} BPM)" if music and beat and beat.clear else ""
-        if music and limits.cut_on == "taps":
-            on_beat = (f", cut exactly on your {result.pins} pins" if result.pins else
-                       ". This song has no final pins, so it cut on the beat: in the Music tab, place pins and click "
-                       "These are final")
+        if music and result.pins:
+            on_beat = f", cut exactly on your {result.pins} pins"
         song = self.song_maps.get(music) if music else None
         wanted = song.duration if song and target == "song" else (float(target) if target not in ("song", "all") else None)
         pool = self.trip.auto_edit_pool()
@@ -2030,24 +2062,24 @@ class Page:
                 with ui.column():
                     ui.label("Transition length (seconds)").classes("text-sm text-gray-500")
                     self.t_len = ui.slider(min=0.3, max=2.0, step=0.1, value=0.8).props("label-always").classes("mt-8")
-                with ui.column():
-                    ui.label("Each photo shows for (seconds)").classes("text-sm text-gray-500")
-                    self.photo_len = ui.slider(min=2, max=8, step=0.5, value=4).props("label-always").classes("mt-8")
-                with ui.column():
-                    ui.label("Longest part of each video (seconds, 0 = whole video)").classes("text-sm text-gray-500")
-                    self.clip_len = ui.slider(min=0, max=60, step=1, value=10).props("label-always").classes("mt-8")
-            with ui.row().classes("w-full items-center"):
-                self.music_input = ui.input(
-                    "Music (optional)", placeholder="/Users/you/Music/song.mp3",
-                    on_change=self.music_changed,  # Auto-edit uses the music's beat
-                ).classes("flex-grow")
-                if sys.platform == "darwin":
-                    ui.button("Browse…", on_click=self.browse_music).props("outline")
-                ui.button("Find free music", icon="library_music", on_click=self.find_music).props("outline")
+            # The song is chosen in the Music tab; this field only holds it.
+            self.music_input = ui.input(on_change=self.music_changed).classes("hidden")
+            self.music_line()
             self.music_credit = ui.label("").classes("text-xs text-gray-500")
             with ui.column().classes("w-full"):
                 ui.label("Music volume").classes("text-sm text-gray-500")
                 self.music_vol = ui.slider(min=0.1, max=1.0, step=0.05, value=0.5).props("label-always").classes("mt-8")
+
+            with ui.expansion("Only for a video made without Auto-edit", icon="tune").classes("w-full").props("dense"):
+                ui.label("Auto-edit sets each shot's length itself; these are used only for shots it has not timed.") \
+                    .classes("text-xs text-gray-500")
+                with ui.grid(columns=2).classes("w-full gap-4"):
+                    with ui.column():
+                        ui.label("Each photo shows for (seconds)").classes("text-sm text-gray-500")
+                        self.photo_len = ui.slider(min=2, max=8, step=0.5, value=4).props("label-always").classes("mt-8")
+                    with ui.column():
+                        ui.label("Longest part of each video (seconds, 0 = whole video)").classes("text-sm text-gray-500")
+                        self.clip_len = ui.slider(min=0, max=60, step=1, value=10).props("label-always").classes("mt-8")
 
         with ui.card().classes("w-full"):
             self.name_input = ui.input("Video name", placeholder="My trip").classes("w-full")
@@ -2102,7 +2134,7 @@ class Page:
         if not self.items:
             ui.label("Open a trip first, then pick what goes in the video in the Library.").classes("text-gray-500")
             return
-        chosen = [it for it in self.items if it["included"] and not it["cut_out"]]
+        chosen = self.trip.storyboard()  # exactly what the Storyboard shows and the video is made of
         videos = sum(it["kind"] == "video" for it in chosen)
         ui.label(
             f"The video will use {len(chosen)} items ({videos} videos, {len(chosen) - videos} photos) in the Storyboard order. "
