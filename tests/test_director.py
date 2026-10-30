@@ -374,3 +374,20 @@ def test_claude_code_explains_failures(tmp_path, monkeypatch):
     monkeypatch.setattr(director, "claude_code_path", lambda: None)
     with pytest.raises(director.DirectorError, match="not installed"):
         director.ClaudeCode()
+
+
+def test_understood_idea_and_questions():
+    raw = {"idea": " Start with the  boat, end with the kite jump ",
+           "questions": [{"question": "How should it end?", "answers": ["Big jumps", "", "Sunset"]},
+                         {"question": "", "answers": ["x"]}, "odd",
+                         {"question": "A?", "answers": ["1"]}, {"question": "B?", "answers": ["2"]},
+                         {"question": "C?", "answers": ["3"]}]}
+    out = director.clean_understood(raw, "boat then kite job")
+    assert out["idea"] == "Start with the boat, end with the kite jump"
+    assert out["questions"][0] == {"question": "How should it end?", "answers": ["Big jumps", "Sunset"]}
+    assert len(out["questions"]) == 3
+    assert director.clean_understood({}, "mine")["idea"] == "mine"
+    assert director.with_answers("Idea.", [("How should it end?", "Big jumps"), ("B?", " ")]) == \
+        "Idea.\nMy answers: How should it end? Big jumps"
+    prompt = director.understand_prompt("kite job", ["Kitesurfing · Laszlo"], ["kite jump (in Kitesurfing)"])
+    assert "kite jump (in Kitesurfing)" in prompt and "Kitesurfing · Laszlo" in prompt

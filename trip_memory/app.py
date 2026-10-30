@@ -2281,6 +2281,8 @@ class Page:
                       type="warning", multi_line=True, timeout=20000)
 
     async def make_story(self, again: bool) -> None:
+        """Make my story: first the AI reads your idea back to you (fixing dictation slips, a few questions), then
+        it writes the story. Try another idea skips the reading and uses your last answers."""
         if not self.trip:
             return
         if self.ai_busy:  # (analysing files in the background doesn't stop you)
@@ -2290,38 +2292,100 @@ class Page:
         blocks = [b for b in self.trip.storyline_blocks() if b["on"]]
         if not blocks:
             return
+        try:
+            ai, failed = director.make(load_settings().get("ai", {})), ""
+        except director.DirectorError as exc:
+            ai, failed = None, str(exc)
+        old = self.trip.storyline().get("story") or {}
+        if ai is None or not idea or again:
+            await self.write_story(again, idea, old.get("answers") or [] if again else [], ai, failed)
+            return
+        moments = [f"{m['name']} (in {m['activity']})" for m in self.trip.moments()]
+        prompt = director.understand_prompt(idea, [themes.block_name(b) for b in blocks], moments)
+        try:
+            answer = await self._think(ai, ai.understand, prompt, "reading your idea")
+        except Exception as exc:  # no reading: straight on to the story
+            print(f"My story: the AI couldn't read the idea back ({exc}); making the story.", flush=True)
+            await self.write_story(False, idea, [], ai, "")
+            return
+        if answer is None:
+            ui.notify("Stopped: your story stays as it was. Press Make my story to try again.")
+            return
+        self.understood_dialog(director.clean_understood(answer, idea), idea, ai)
+
+    def understood_dialog(self, understood: dict, said: str, ai) -> None:
+        """What the AI understood: your idea, cleaned up (change anything), and its few questions to click."""
+        picked: list[dict] = []
+        with ui.dialog() as dialog, ui.card().classes("w-[44rem] max-w-full gap-3"):
+            ui.label("🤖 What I understood").classes("text-lg font-semibold")
+            box = ui.textarea("Your idea (change anything)", value=understood["idea"]) \
+                .props("outlined autogrow").classes("w-full")
+            if understood["idea"] != said:
+                ui.label(f"You said: {said}").classes("text-xs text-gray-500 italic")
+            for q in understood["questions"]:
+                ui.label(q["question"]).classes("text-sm font-medium mt-2")
+                choice = ui.toggle(q["answers"], value=None, clearable=True) \
+                    .props("no-caps unelevated toggle-color=primary color=white text-color=primary") \
+                    .classes("border border-blue-600 rounded")
+                own = ui.input(placeholder="or type your own answer").props("dense").classes("w-full")
+                picked.append({"question": q["question"], "choice": choice, "own": own})
+
+            async def go() -> None:
+                answers = [[p["question"], (p["own"].value or "").strip() or (p["choice"].value or "")] for p in picked]
+                answers = [a for a in answers if a[1]]
+                idea = (box.value or "").strip() or said
+                if self.wish_box is not None:
+                    self.wish_box.value = idea
+                dialog.close()
+                await self.write_story(False, idea, answers, ai, "")
+
+            with ui.row().classes("w-full justify-end gap-2 mt-2"):
+                ui.button("Cancel", on_click=dialog.close).props("flat no-caps")
+                ui.button("Make my story", icon="auto_awesome", on_click=go).props("no-caps")
+        dialog.open()
+
+    async def _think(self, ai, ask, prompt: str, what: str):
+        """Ask the AI with a running clock and Stop; None if you stopped it (errors are raised)."""
+        self.ai_busy = True
+        note = ui.notification("", spinner=True, timeout=None, multi_line=True, close_button="Hide")
+        started = time.time()
+
+        def thinking() -> None:
+            gone = int(time.time() - started)
+            usual = ("Claude usually takes under a minute." if isinstance(ai, director.ClaudeCode) else
+                     "On a MacBook Air it usually takes 1 to 3 minutes (longer the first time, while the model "
+                     "loads).")
+            note.message = (f"🤖 The AI is {what}: {gone // 60}:{gone % 60:02d} so far. {usual} "
+                            "Stop is next to the story buttons.")
+
+        thinking()
+        ticker = ui.timer(1.0, thinking)
+        if self.story_stop is not None:
+            self.story_stop.set_visibility(True)
+        print(f"My story: the AI ({type(ai).__name__}) is {what}…", flush=True)
+        try:
+            answer = await self.stoppable(ask, prompt)
+            print(f"My story: the AI answered after {time.time() - started:.0f} s." if answer is not None else
+                  "My story: stopped.", flush=True)
+            return answer
+        finally:
+            self.ai_busy = False
+            ticker.cancel()
+            note.dismiss()
+            if self.story_stop is not None:
+                self.story_stop.set_visibility(False)
+
+    async def write_story(self, again: bool, idea: str, answers: list, ai, failed: str) -> None:
+        blocks = [b for b in self.trip.storyline_blocks() if b["on"]]
         old = self.trip.storyline().get("story") or {}
         before = (old.get("before") or []) + ([old["title"]] if again and old.get("title") else []) if again else []
         story = None
-        failed = ""
-        try:
-            ai = director.make(load_settings().get("ai", {}))
-        except director.DirectorError as exc:
-            ai, failed = None, str(exc)
         if ai is not None:
-            self.ai_busy = True
-            note = ui.notification("", spinner=True, timeout=None, multi_line=True, close_button="Hide")
-            started = time.time()
-
-            def thinking() -> None:
-                gone = int(time.time() - started)
-                usual = ("Claude usually takes under a minute." if isinstance(ai, director.ClaudeCode) else
-                         "On a MacBook Air it usually takes 1 to 3 minutes (longer the first time, while the model "
-                         "loads).")
-                note.message = (f"🤖 The AI is working on your story: {gone // 60}:{gone % 60:02d} so far. {usual} "
-                                "Stop is next to the story buttons.")
-
-            thinking()
-            ticker = ui.timer(1.0, thinking)
-            if self.story_stop is not None:
-                self.story_stop.set_visibility(True)
-            print(f"My story: asking the AI ({type(ai).__name__})…", flush=True)
             try:
-                prompt = director.story_prompt(idea, self._story_blocks_info(blocks), before[-4:] or None,
+                prompt = director.story_prompt(director.with_answers(idea, [tuple(a) for a in answers]),
+                                               self._story_blocks_info(blocks), before[-4:] or None,
                                                self.video_seconds())
-                answer = await self.stoppable(ai.story, prompt)
-                print(f"My story: the AI answered after {time.time() - started:.0f} s." if answer is not None else
-                      "My story: stopped.", flush=True)
+                answer = await self._think(ai, ai.story, prompt, "working on your story")
                 if answer is None:
                     ui.notify("Stopped: your story stays as it was. Press Make my story to try again.")
                     return
@@ -2330,12 +2394,6 @@ class Page:
             except Exception as exc:  # Ollama not running, a bad answer...: your words still work
                 print(f"My story: the AI couldn't make a story ({exc}); following your words instead.", flush=True)
                 failed = str(exc)
-            finally:
-                self.ai_busy = False
-                ticker.cancel()
-                note.dismiss()
-                if self.story_stop is not None:
-                    self.story_stop.set_visibility(False)
         if not story or not story.get("parts"):
             if not idea:
                 ui.notify("Write or say your idea first (without the AI, the app follows the themes you name).",
@@ -2366,7 +2424,7 @@ class Page:
         for p, t in zip(story["parts"], themes.fit_times(story["parts"], self.video_seconds())):
             p["seconds"] = t
         self.trip.checkpoint("story")
-        self.trip.set_storyline(story=story | {"idea": idea, "before": before})
+        self.trip.set_storyline(story=story | {"idea": idea, "before": before, "answers": answers})
         self.storyboard_view.refresh()
 
     def _edit_story(self, change) -> None:

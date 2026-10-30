@@ -253,7 +253,75 @@ Answer:
     sunset"), use pick "moment" and write what it looks like in "moment", in a few English words a photo caption
     would use (e.g. "a kitesurfer jumping high in the air"). Otherwise "moment" is "".
 - finale: always false (the last part ends the video; for an action ending, make a last part with "action" picks).
+Make it a story worth watching, inside the person's order (never against it):
+- Open strong: the first part grabs attention (a striking or lively start, or a calm, beautiful one that sets the
+  scene), then build up, reach a peak (the most exciting shots, "action" or "moment" picks), and land the ending
+  the way the person wants (a gentle wind-down unless they ask for a big finish).
+- Vary the pace between parts (not every part "lively"), and use "early"/"late"/"action" picks to spread a big
+  theme over the build-up and the peak instead of showing it all at once.
+- Name the parts like chapters of a film ("Wheels down", "Finding the wind", "Sky high", "Golden hour"), not
+  "Part 1".
 Answer in JSON."""
+
+UNDERSTAND_PROMPT = """You help a person make a holiday memory video. They described the story they want, often
+by speaking (so the text can have dictation mistakes like "kite job" for "kite jump"):
+
+"{idea}"
+
+The trip's themes (activities, sometimes with a person): {themes}
+Moments already marked inside themes: {moments}
+
+1. Rewrite their description cleanly in their own voice and order, as one short paragraph: fix dictation mistakes,
+   use the exact theme and moment names above where they clearly mean one, and keep everything they said (order,
+   what comes first and last, people, feelings). Don't add ideas of your own.
+2. If something important is unclear, ask up to 3 short questions (fewer is better, none if it's clear), each
+   with 2 to 4 short answers to click. Good questions: how it should end, which theme is the highlight, whether
+   the rest of the themes can go anywhere, how lively the video should feel. Don't ask what they already said.
+Answer in JSON."""
+
+UNDERSTAND_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "idea": {"type": "string"},
+        "questions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"question": {"type": "string"},
+                               "answers": {"type": "array", "items": {"type": "string"}}},
+                "required": ["question", "answers"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["idea", "questions"],
+    "additionalProperties": False,
+}
+
+
+def understand_prompt(idea: str, themes: list[str], moments: list[str]) -> str:
+    return UNDERSTAND_PROMPT.format(idea=" ".join(idea.split())[:2000], themes="; ".join(themes) or "none",
+                                   moments="; ".join(moments) or "none")
+
+
+def clean_understood(answer: dict, idea: str) -> dict:
+    """The AI's reading of your idea: a cleaned-up idea (yours if it gave none) and at most 3 questions."""
+    text = " ".join(str(answer.get("idea") or "").split())[:2000] or idea
+    questions = []
+    for q in answer.get("questions") or []:
+        if not isinstance(q, dict):
+            continue
+        ask = " ".join(str(q.get("question") or "").split())[:160]
+        answers = [a for a in (" ".join(str(x).split())[:60] for x in q.get("answers") or []) if a][:4]
+        if ask and answers:
+            questions.append({"question": ask, "answers": answers})
+    return {"idea": text, "questions": questions[:3]}
+
+
+def with_answers(idea: str, answers: list[tuple[str, str]]) -> str:
+    """Your idea plus your answers to the AI's questions, for the story prompt."""
+    said = [f"{q} {a}" for q, a in answers if a.strip()]
+    return idea + ("\nMy answers: " + " | ".join(said) if said else "")
 
 STORY_SCHEMA = {
     "type": "object",
@@ -416,6 +484,9 @@ class Ollama:
     def story(self, prompt: str) -> dict:
         return self._ask(prompt, STORY_SCHEMA)
 
+    def understand(self, prompt: str) -> dict:
+        return self._ask(prompt, UNDERSTAND_SCHEMA)
+
 
 # ---------- Claude ----------
 
@@ -493,6 +564,9 @@ class Claude:
 
     def story(self, prompt: str) -> dict:
         return self._ask([{"type": "text", "text": prompt}], STORY_SCHEMA, self.story_model)
+
+    def understand(self, prompt: str) -> dict:
+        return self._ask([{"type": "text", "text": prompt}], UNDERSTAND_SCHEMA, self.story_model)
 
 
 def make(settings: dict):
@@ -587,6 +661,9 @@ class ClaudeCode:
 
     def story(self, prompt: str) -> dict:
         return self._ask(prompt, STORY_SCHEMA)
+
+    def understand(self, prompt: str) -> dict:
+        return self._ask(prompt, UNDERSTAND_SCHEMA)
 
 
 def test_claude_code() -> str:
