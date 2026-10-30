@@ -1151,7 +1151,9 @@ class Page:
             self.ai_bar.set_visibility(self.ai_busy)
             with ui.row().classes("items-center gap-2"):
                 left = len(chosen) - described
-                ui.button(f"Describe clips ({left} to go)" if left else "Describe clips", icon="visibility",
+                looks = len({it["similar_set"] if it["similar_set"] is not None else it["path"]
+                             for it in chosen if not it["ai_caption"]})  # doubles share their set's description
+                ui.button(f"Describe clips ({looks} to look at)" if left else "Describe clips", icon="visibility",
                           on_click=lambda: self.describe_clips(again=False)).props("" if left else "outline")
                 if described:
                     ui.button("Describe all again", on_click=lambda: self.describe_clips(again=True)).props("flat dense no-caps")
@@ -1202,6 +1204,10 @@ class Page:
             ui.select(found[0], value=model, label="Model",
                       on_change=lambda e: self.save_ai(ollama_model=e.value)).classes("w-72")
             ui.label("Ollama is ready. Bigger models describe better but are slower.").classes("text-xs text-green-700")
+            if director.OLLAMA_FASTEST not in " ".join(found[0]):
+                ui.markdown(f"Too slow? A smaller model is about 3× faster (simpler descriptions): in Terminal run "
+                            f"`ollama pull {director.OLLAMA_FASTEST}`, click **Check again** and pick it above.") \
+                    .classes("text-xs")
         ui.button("Check again", icon="refresh", on_click=self.check_ollama).props("flat dense no-caps")
 
     async def check_ollama(self) -> None:
@@ -1210,8 +1216,9 @@ class Page:
 
     def claude_settings(self, ai: dict) -> None:
         ui.markdown(
-            "Very good descriptions and storylines. Costs a little per use, roughly 1 cent per clip described, "
-            "paid to Anthropic. **One-time setup:** at [console.anthropic.com](https://console.anthropic.com) add some "
+            "Very good descriptions and storylines, and much faster than on this Mac. Paid per use to Anthropic: "
+            "describing a trip costs a few cents with the fast model; thinking about the stories (always the best "
+            "model) a few cents more. **One-time setup:** at [console.anthropic.com](https://console.anthropic.com) add some "
             "credit, create an API key, and paste it here. It is kept only on this Mac."
         ).classes("text-sm")
         key = ai.get("api_key", "")
@@ -1222,8 +1229,10 @@ class Page:
                 .props("dense")
             if key:
                 ui.button("Forget key", on_click=lambda: self.save_ai(api_key="")).props("flat dense no-caps")
-        model = ui.input("Model", value=ai.get("claude_model") or director.CLAUDE_MODEL).classes("w-72")
-        model.on("blur", lambda: self.save_ai(refresh=False, claude_model=model.value.strip() or director.CLAUDE_MODEL))
+        current = ai.get("claude_model") or director.CLAUDE_MODEL
+        ui.select({**director.CLAUDE_MODELS, **({} if current in director.CLAUDE_MODELS else {current: current})},
+                  value=current, label="Describing pictures with",
+                  on_change=lambda e: self.save_ai(refresh=False, claude_model=e.value)).classes("w-96")
 
     def save_ai(self, refresh: bool = True, **values) -> None:
         save_settings(ai={**load_settings().get("ai", {}), **values})
@@ -1340,7 +1349,9 @@ class Page:
                     name.on("keydown.enter", lambda e, k=story["key"], box=name: self.rename_story(k, box.value))
                     places = [it["place"] or it["country"] for it in members if it["place"] or it["country"]]
                     place = max(set(places), key=places.count) if places else ""
-                    start, end = fmt_time(story["start"]), datetime.fromisoformat(story["end"]).astimezone().strftime("%H:%M")
+                    begin, finish = (datetime.fromisoformat(story[k]).astimezone() for k in ("start", "end"))
+                    start = fmt_time(story["start"])
+                    end = finish.strftime("%H:%M" if finish.date() == begin.date() else "%a %d %b, %H:%M")
                     ui.label(f"{start}–{end}" + (f" · {place}" if place else "") +
                              f" · {len(members)} files, {included} in the video").classes("text-xs text-gray-600")
                     if story["renamed"]:

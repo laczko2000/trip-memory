@@ -1,5 +1,7 @@
 """The AI director: clip descriptions, storyline ideas, and putting the stories in the chosen order."""
 
+from pathlib import Path
+
 import pytest
 
 from trip_memory import catalog, director
@@ -90,3 +92,20 @@ def test_missing_setup_explains_what_to_do(monkeypatch):
         director.make({"provider": "claude"})
     with pytest.raises(director.DirectorError, match="ollama pull"):
         director.make({"provider": "ollama"})
+
+
+def test_look_alikes_are_described_once(trip, tmp_path):
+    folder = trip.folder
+    _gps_photo(folder / "a2.jpg", "2025:07:03 09:00:20", 38.7223, -9.1393, "red")  # a double of a.jpg
+    trip.prepare()
+    trip.set_chosen([str(folder / "a2.jpg")], True)
+    by_name = {Path(i["path"]).name: i for i in trip.items()}
+    trip.execute("UPDATE items SET similar_set = ?, best = 0 WHERE path = ?", (by_name["a.jpg"]["similar_set"], by_name["a2.jpg"]["path"]))
+
+    ai = FakeDirector()
+    looked = []
+    describe = ai.describe
+    ai.describe = lambda clips: (looked.append(len(clips)), describe(clips))[1]
+    trip.describe_clips(ai)
+    assert sum(looked) == 3  # four files, but the double shares its set's description
+    assert {i["ai_caption"] for i in trip.items() if Path(i["path"]).name.startswith("a")} == {"Waves on a sandy beach"}

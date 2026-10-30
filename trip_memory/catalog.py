@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import threading
 import traceback
 from collections.abc import Callable
@@ -180,6 +181,11 @@ class Trip:
     def query(self, sql: str, args: tuple = ()) -> list[sqlite3.Row]:
         with self._lock:
             return self.db.execute(sql, args).fetchall()
+
+    def db_write_many(self, sql: str, rows: list[tuple]) -> None:
+        with self._lock:
+            self.db.executemany(sql, rows)
+            self.db.commit()
 
     def execute(self, sql: str, args: tuple = ()) -> None:
         with self._lock:
@@ -884,32 +890,54 @@ class Trip:
         self._run(lambda notify: self._describe(ai, notify, again), on_change)
 
     def _describe(self, ai, notify: Callable[[], None], again: bool) -> None:
+        """Describe each chosen file. Look-alike shots are described once: the ⭐ of the set is shown to the AI and
+        its doubles get the same description, which often halves the work."""
         p = self.progress
-        rows = self.query("SELECT * FROM items WHERE chosen = 1 AND thumb IS NOT NULL"
-                          + ("" if again else " AND ai_caption IS NULL") + " ORDER BY taken_at, path")
+        chosen = self.query("SELECT * FROM items WHERE chosen = 1 AND thumb IS NOT NULL AND removed = 0 "
+                            "ORDER BY taken_at, path")
+        sets: dict[object, list] = {}
+        for row in chosen:
+            sets.setdefault(row["similar_set"] if row["similar_set"] is not None else row["path"], []).append(row)
+        todo = []  # (the shot the AI looks at, the shots that get its description)
+        for members in sets.values():
+            if not again and all(m["ai_caption"] for m in members):
+                continue
+            known = next((m for m in members if m["ai_caption"]), None)
+            if not again and known:  # a double ticked later: it gets its set's description, no AI needed
+                self.db_write_many("UPDATE items SET ai_caption = ?, ai_score = ? WHERE path = ?",
+                                   [(known["ai_caption"], known["ai_score"], m["path"]) for m in members])
+                continue
+            star = next((m for m in members if m["best"]), members[0])
+            todo.append((star, members))
         done = 0
-        for start in range(0, len(rows), ai.batch):
-            batch = rows[start : start + ai.batch]
-            p.fraction = start / len(rows)
-            p.message = f"The AI is looking at {start + 1}–{start + len(batch)} of {len(rows)}: {Path(batch[0]['path']).name}"
+        started = time.monotonic()
+        for start in range(0, len(todo), ai.batch):
+            batch = todo[start : start + ai.batch]
+            p.fraction = start / len(todo)
+            left = ""
+            if start:
+                minutes = (time.monotonic() - started) / start * (len(todo) - start) / 60
+                left = f" · about {minutes:.0f} min left" if minutes >= 1 else " · less than a minute left"
+            p.message = (f"The AI is looking at {start + 1}–{start + len(batch)} of {len(todo)} "
+                         f"({len(chosen)} files; doubles share a description){left}")
             notify()
             clips = []
-            for row in batch:
+            for row, _ in batch:
                 try:
                     clips.append(self._ai_frames(row, getattr(ai, "frames", 3), getattr(ai, "size", 512)))
                 except Exception as exc:
                     clips.append([])
                     p.notes.append(f"Could not read {Path(row['path']).name} for the AI: {exc}")
-            ready = [(row, frames) for row, frames in zip(batch, clips) if frames]
+            ready = [(members, frames) for (_, members), frames in zip(batch, clips) if frames]
             if not ready:
                 continue
             captions = ai.describe([frames for _, frames in ready])  # a DirectorError stops the whole run
             with self._lock:
-                for (row, _), caption in zip(ready, captions):
+                for (members, _), caption in zip(ready, captions):
                     if caption:
-                        self.db.execute("UPDATE items SET ai_caption = ?, ai_score = ? WHERE path = ?",
-                                        (caption.text, caption.highlight, row["path"]))
-                        done += 1
+                        self.db.executemany("UPDATE items SET ai_caption = ?, ai_score = ? WHERE path = ?",
+                                            [(caption.text, caption.highlight, m["path"]) for m in members])
+                        done += len(members)
                 self.db.commit()
         p.message = f"The AI described {done} files."
 

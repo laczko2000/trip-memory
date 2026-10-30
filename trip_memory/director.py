@@ -17,7 +17,11 @@ from dataclasses import dataclass
 
 OLLAMA_URL = "http://localhost:11434"
 OLLAMA_SUGGESTED = "gemma3:4b"
-CLAUDE_MODEL = "claude-opus-5-5"
+OLLAMA_FASTEST = "moondream"  # about 3x faster on a MacBook Air, simpler descriptions
+CLAUDE_MODEL = "claude-haiku-5-5"  # describing many pictures: fast and costs very little
+CLAUDE_STORY_MODEL = "claude-opus-5-5"  # thinking about the stories: few requests, so the best model
+CLAUDE_MODELS = {"claude-haiku-5-5": "Fast and cheap (Haiku 5.5, a few cents a trip)",
+                 "claude-opus-5-5": "Most detailed (Opus 5.5, about $2–5 a trip)"}
 PROVIDERS = {"ollama": "On this Mac (Ollama, free)", "claude": "Claude (paid, needs an API key)"}
 
 CAPTION_PROMPT = """These are pictures from a holiday video or photo. {what}
@@ -148,7 +152,9 @@ class Ollama:
             message["images"] = [base64.b64encode(i).decode() for i in images]
         answer = _ollama("/api/chat", {"model": self.model, "messages": [message], "stream": False, "format": schema,
                                        "keep_alive": "30m",  # stay loaded between clips (loading takes the longest)
-                                       "options": {"temperature": 0.2, "num_predict": 400 if images else 1500}})
+                                       # a caption is a few dozen words: stopping early saves a lot of time
+                                       "options": {"temperature": 0.2, "num_predict": 160 if images else 3000,
+                                                   "num_ctx": 2048 if images else 8192}})
         try:
             return json.loads(answer["message"]["content"])
         except (KeyError, ValueError) as exc:
@@ -169,7 +175,7 @@ class Claude:
     frames = 3
     size = 512
 
-    def __init__(self, api_key: str = "", model: str = CLAUDE_MODEL):
+    def __init__(self, api_key: str = "", model: str = CLAUDE_MODEL, story_model: str = CLAUDE_STORY_MODEL):
         try:
             import anthropic
         except ImportError as exc:
@@ -180,12 +186,14 @@ class Claude:
         self.anthropic = anthropic
         self.client = anthropic.Anthropic(api_key=key)
         self.model = model or CLAUDE_MODEL
+        self.story_model = story_model or CLAUDE_STORY_MODEL
 
-    def _ask(self, content: list[dict], schema: dict) -> dict:
+    def _ask(self, content: list[dict], schema: dict, model: str = "") -> dict:
         a = self.anthropic
+        model = model or self.model
         try:
             response = self.client.messages.create(
-                model=self.model,
+                model=model,
                 max_tokens=16000,
                 messages=[{"role": "user", "content": content}],
                 output_config={"effort": "low", "format": {"type": "json_schema", "schema": schema}},
@@ -195,7 +203,7 @@ class Claude:
         except a.PermissionDeniedError as exc:
             raise DirectorError("This API key may not use Claude yet. Check your account at console.anthropic.com.") from exc
         except a.NotFoundError as exc:
-            raise DirectorError(f"Claude does not know the model \"{self.model}\". Check the model name.") from exc
+            raise DirectorError(f"Claude does not know the model \"{model}\". Check the model name.") from exc
         except a.RateLimitError as exc:
             raise DirectorError("Claude is busy or your account's limit is reached. Wait a minute and try again.") from exc
         except a.BadRequestError as exc:
@@ -225,7 +233,7 @@ class Claude:
         return _captions(self._ask(content, CAPTION_SCHEMA), len(clips))
 
     def storylines(self, prompt: str) -> dict:
-        return self._ask([{"type": "text", "text": prompt}], STORYLINE_SCHEMA)
+        return self._ask([{"type": "text", "text": prompt}], STORYLINE_SCHEMA, self.story_model)
 
 
 def make(settings: dict):
