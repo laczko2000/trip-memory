@@ -12,7 +12,6 @@ import numpy as np
 EVERY = 1.0  # seconds between the frames looked at
 MOST = 30  # frames per video at most (long clips: spread out)
 AROUND = 3.0  # seconds of the clip kept around a moment
-TICKED_WEIGHT = 1.5  # how much your ticked examples count against your words
 
 
 def frame_times(duration: float) -> list[float]:
@@ -42,28 +41,35 @@ def find(words: np.ndarray | None, shots: dict[str, tuple[list[float], np.ndarra
     """Each shot's best second for the moment, best first: (path, second, score).
 
     words: what the moment looks like (a CLIP text vector). shots: path -> (frame times, one CLIP vector per frame).
-    ticked: the frames you ticked as right: the frames most like them count too."""
-    parts = []
-    if words is not None:
-        parts.append(np.asarray(words, np.float32))
-    if ticked:
-        mean = np.mean(np.asarray(ticked, np.float32), axis=0)
-        parts.append(TICKED_WEIGHT * mean / (np.linalg.norm(mean) or 1))
-    if not parts:
+    ticked: the frames you ticked as right. A frame that looks like any one of them counts (jumps filmed from
+    different sides don't blur into one average); the more you tick, the less the words count."""
+    paths = [p for p, (times, _) in shots.items() if len(times)]
+    if not paths or (words is None and not ticked):
         return []
-    query = np.sum(parts, axis=0)
-    query = query / (np.linalg.norm(query) or 1)
+    frames = np.concatenate([np.asarray(shots[p][1], np.float32) for p in paths])
+    owner = np.concatenate([[k] * len(shots[p][0]) for k, p in enumerate(paths)])
+    score = np.zeros(len(frames))
+    weight_ticks = min(0.85, 0.45 + 0.1 * len(ticked)) if ticked else 0.0
+    if words is not None:
+        score += (1 - weight_ticks) * _z(frames @ np.asarray(words, np.float32))
+    if ticked:
+        near = (frames @ np.asarray(ticked, np.float32).T).max(axis=1)  # like the closest of your ticks
+        score += weight_ticks * _z(near)
     out = []
-    for path, (times, vectors) in shots.items():
-        if not len(times):
-            continue
-        sims = np.asarray(vectors, np.float32) @ query
+    for k, path in enumerate(paths):
+        mine = score[owner == k]
         # A moment is a few seconds: smooth over neighbours so one odd frame doesn't win.
-        if len(sims) >= 3:
-            sims = np.convolve(np.pad(sims, 1, mode="edge"), [0.25, 0.5, 0.25], mode="valid")
-        best = int(np.argmax(sims))
-        out.append((path, float(times[best]), float(sims[best])))
+        if len(mine) >= 3:
+            mine = np.convolve(np.pad(mine, 1, mode="edge"), [0.25, 0.5, 0.25], mode="valid")
+        best = int(np.argmax(mine))
+        out.append((path, float(shots[path][0][best]), round(float(mine[best]), 3)))
     return sorted(out, key=lambda m: -m[2])
+
+
+def _z(values: np.ndarray) -> np.ndarray:
+    """How far above the usual each value is (so word and picture likeness can be added up)."""
+    spread = values.std()
+    return (values - values.mean()) / spread if spread > 1e-6 else values * 0
 
 
 def likely(found: list[tuple[str, float, float]]) -> set[str]:

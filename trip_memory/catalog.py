@@ -878,7 +878,7 @@ class Trip:
         """The shots of a theme for one of its moments: the ones you ticked first (at their second), then the rest,
         most like your words and your ticks first."""
         saved = self.moment(activity, name) or {"shots": []}
-        rows = [r for r in self.theme_rows() if r["included"] and r["theme"] == activity]
+        rows = [r for r in self.theme_rows() if r["theme"] == activity]  # the same shots as the theme shows
         found = self.find_moment(rows, words, saved["shots"], notify)
         ticked = {s["path"]: s["t"] for s in saved["shots"]}
         for f in found:

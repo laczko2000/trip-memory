@@ -59,6 +59,7 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **0.61.3:** *Find the rest* finds more. Each shot is compared with every shot you ticked (a jump from the left and one from the right each find their look-alikes, instead of being averaged into one), and your words count less the more you tick. The moment page now has three rows: *Marked*, *Suggested* (orange frame, with *Tick all suggested*: untick the wrong ones) and *Probably not*. It looks in exactly the shots the theme shows.
 - **0.61.2:** photo collages (3 or 4 quick photos together in lively music) never mix two themes of your story any more.
 - **0.61.1:** *My story* keeps your order everywhere: the themes inside a part play in the order you set them, and the finale (the most exciting shots, if switched on) now also goes theme by theme in that order instead of mixing them.
 - **0.61:** moments live in Themes. Open a theme (e.g. Kitesurfing) and press *Moment* to add one, such as "kite jump"; it is listed under its theme on the left. The app looks inside the videos and shows each shot at the second that fits best, likely ones marked ?. Tick the ones that show the moment, then *Find the rest*: the shots most like your ticks come first. In *My story*, choose *a moment… 🔍* on a theme, type the moment and press *Mark in Themes*: the app opens Themes on that moment. The first cut keeps a few seconds around each ticked moment. (This replaces the moment window of 0.60.)

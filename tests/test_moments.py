@@ -41,3 +41,15 @@ def test_key_frames_are_used_when_close_enough():
     assert moments.pick_frames([0.0, 1.0, 2.0, 3.0], 4) == [0, 1, 2, 3]
     assert moments.pick_frames([0.0, 8.3], 12) == []  # too far apart: the app reads frames itself
     assert len(moments.pick_frames([k * 0.5 for k in range(40)], 20)) == 20  # about one a second
+
+
+def test_ticks_from_different_sides_each_find_their_look_alikes():
+    rng = np.random.default_rng(1)
+    side_a, side_b = _unit([1, 0, 0, 0, 0, 0]), _unit([0, 1, 0, 0, 0, 0])
+    other = [_unit(rng.normal(size=6) * [0.1, 0.1, 1, 1, 1, 1]) for _ in range(8)]
+    shots = {f"a{k}": ([1.0], np.array([_unit(side_a + rng.normal(size=6) * 0.15)])) for k in range(3)}
+    shots |= {f"b{k}": ([1.0], np.array([_unit(side_b + rng.normal(size=6) * 0.15)])) for k in range(3)}
+    shots |= {f"o{k}": ([1.0], np.array([v])) for k, v in enumerate(other)}
+    found = moments.find(None, shots, [shots["a0"][1][0], shots["b0"][1][0]])
+    assert {p for p, _, _ in found[:6]} == {"a0", "a1", "a2", "b0", "b1", "b2"}
+    assert {"a1", "a2", "b1", "b2"} <= moments.likely(found)

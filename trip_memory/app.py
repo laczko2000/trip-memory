@@ -2782,11 +2782,30 @@ class Page:
         if not found:
             ui.label("No shots to look in. Analyse the trip first (Choose files, Analyse).").classes("text-gray-500")
             return
-        with ui.element("div").classes("w-full grid gap-2").style("grid-template-columns:repeat(auto-fill,minmax(170px,1fr))"):
-            for f in found[: self.theme_limit]:
-                self.moment_tile(activity, name, f)
-        if len(found) > self.theme_limit:
-            ui.button(f"Show more ({len(found) - self.theme_limit} left)", icon="expand_more",
+        marked = [f for f in found if f["ticked"]]
+        suggested = [f for f in found if f["likely"] and not f["ticked"]]
+        rest = [f for f in found if not f["likely"] and not f["ticked"]]
+        sections = [(f"✓ Marked ({len(marked)})", marked, ""),
+                    (f"Suggested ({len(suggested)}): " + ("they look like your ticks" if marked else
+                                                          "they fit your words best"), suggested, ""),
+                    (f"Probably not ({len(rest)})", rest, "")]
+        shown = 0
+        for title, group, _ in sections:
+            if not group:
+                continue
+            with ui.row().classes("w-full items-center gap-2 mt-2"):
+                ui.label(title).classes("font-semibold text-gray-700")
+                if group is suggested:
+                    ui.button("Tick all suggested", icon="done_all",
+                              on_click=lambda g=group: self.tick_all_moment(activity, name, g)).props("dense no-caps")
+            room = max(0, self.theme_limit - shown)
+            with ui.element("div").classes("w-full grid gap-2").style(
+                    "grid-template-columns:repeat(auto-fill,minmax(170px,1fr))"):
+                for f in group[:room]:
+                    self.moment_tile(activity, name, f)
+            shown += min(len(group), room)
+        if len(found) > shown:
+            ui.button(f"Show more ({len(found) - shown} left)", icon="expand_more",
                       on_click=self.more_themes).props("outline").classes("w-full")
 
     def moment_tile(self, activity: str, name: str, f: dict) -> None:
@@ -2807,7 +2826,8 @@ class Page:
                                     ("bg-green-600 border-green-600 text-white" if f["ticked"] else
                                      "bg-white border-gray-500 text-orange-600"))
                 tile.classes(replace="relative rounded p-1 border-2 bg-gray-50 cursor-pointer " +
-                                     ("border-green-600" if f["ticked"] else "border-transparent"))
+                                     ("border-green-600" if f["ticked"] else
+                                      "border-orange-400 border-dashed" if f["likely"] else "border-transparent"))
 
             async def toggle() -> None:
                 f["ticked"] = not f["ticked"]
@@ -2818,8 +2838,16 @@ class Page:
 
             show()
             tile.on("click", toggle)
-            ui.label(("🎬 at " + fmt_length(f["t"]) if f["kind"] == "video" else "📷 photo") +
-                     (" · likely" if f["likely"] and not f["ticked"] else "")).classes("text-xs text-gray-600 mt-1")
+            ui.label("🎬 at " + fmt_length(f["t"]) if f["kind"] == "video" else "📷 photo") \
+                .classes("text-xs text-gray-600 mt-1")
+
+    async def tick_all_moment(self, activity: str, name: str, group: list[dict]) -> None:
+        for f in group:
+            if not f["ticked"]:
+                f["ticked"] = True
+                await run.io_bound(self.trip.tick_moment, activity, name, f["path"], f["t"], True)
+        ui.notify(f"{len(group)} ticked. Untick any that are wrong, or press Find the rest for more.", type="positive")
+        self.themes_view.refresh()
 
     def remove_moment(self, activity: str, name: str) -> None:
         self.trip.remove_moment(activity, name)
