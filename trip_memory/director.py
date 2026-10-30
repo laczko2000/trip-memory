@@ -11,6 +11,11 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -22,7 +27,8 @@ CLAUDE_MODEL = "claude-haiku-5-5"  # describing many pictures: fast and costs ve
 CLAUDE_STORY_MODEL = "claude-opus-5-5"  # thinking about the stories: few requests, so the best model
 CLAUDE_MODELS = {"claude-haiku-5-5": "Fast and cheap (Haiku 5.5, a few cents a trip)",
                  "claude-opus-5-5": "Most detailed (Opus 5.5, about $2–5 a trip)"}
-PROVIDERS = {"ollama": "On this Mac (Ollama, free)", "claude": "Claude (paid, needs an API key)"}
+PROVIDERS = {"ollama": "On this Mac (Ollama, free)", "claude_code": "Claude, with my Pro account (Claude Code)",
+             "claude": "Claude (paid, needs an API key)"}
 
 CAPTION_PROMPT = """These are pictures from a holiday video or photo. {what}
 For each clip, write:
@@ -489,9 +495,104 @@ class Claude:
 
 def make(settings: dict):
     """The director to use, from the app's settings ({"provider", "ollama_model", "claude_model", "api_key"})."""
+    if settings.get("provider") == "claude_code":
+        return ClaudeCode(settings.get("ollama_model", ""))
     if settings.get("provider") == "claude":
         return Claude(settings.get("api_key", ""), settings.get("claude_model") or CLAUDE_MODEL)
     return Ollama(settings.get("ollama_model", ""))
+
+
+# ---------- Claude, with your own Pro account (through Claude Code on this Mac) ----------
+
+CLAUDE_CODE_INSTALL = "curl -fsSL https://claude.ai/install.sh | bash"
+
+
+def claude_code_path() -> str | None:
+    """Where Claude Code is on this Mac, if it is installed."""
+    found = shutil.which("claude")
+    if found:
+        return found
+    for place in ("~/.local/bin/claude", "~/.claude/local/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"):
+        path = Path(place).expanduser()
+        if path.exists():
+            return str(path)
+    return None
+
+
+def _json_in(text: str) -> dict:
+    """The JSON object in an answer (it may come inside ``` fences or after a sentence)."""
+    text = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.M).strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        raise DirectorError("Claude gave an answer the app could not read. Try again.")
+    try:
+        return json.loads(text[start:end + 1])
+    except ValueError as exc:
+        raise DirectorError("Claude gave an answer the app could not read. Try again.") from exc
+
+
+class ClaudeCode:
+    """The thinking (stories, understanding your words) by Claude through Claude Code, signed in with your own
+    Claude account: no API key, it counts towards your plan's usage. Pictures are still described on this Mac
+    (Ollama), as hundreds of pictures would use up a plan quickly."""
+
+    batch, frames, size = Ollama.batch, Ollama.frames, Ollama.size
+
+    def __init__(self, ollama_model: str = ""):
+        self.path = claude_code_path()
+        if not self.path:
+            raise DirectorError("Claude Code is not installed on this Mac yet. In Terminal, run: "
+                                f"{CLAUDE_CODE_INSTALL}  then type claude, press Enter and sign in with your "
+                                "Claude account.")
+        self.ollama_model = ollama_model
+
+    def _ask(self, prompt: str, schema: dict, timeout: float = 300) -> dict:
+        full = (prompt + "\n\nAnswer with only one JSON object, nothing before or after it, that follows this JSON "
+                "schema:\n" + json.dumps(schema))
+        with tempfile.TemporaryDirectory() as empty:  # no project around it: just the question
+            try:
+                done = subprocess.run([self.path, "-p", "--output-format", "json"], input=full, text=True,
+                                      capture_output=True, timeout=timeout, cwd=empty)
+            except subprocess.TimeoutExpired as exc:
+                raise DirectorError("Claude took too long to answer. Try again.") from exc
+        try:
+            reply = json.loads(done.stdout)
+        except ValueError:
+            reply = {"is_error": True, "result": (done.stdout or done.stderr or "").strip()}
+        text = str(reply.get("result") or "")
+        if reply.get("is_error") or done.returncode:
+            lowered = (text + done.stderr).lower()
+            if "login" in lowered or "api key" in lowered or "auth" in lowered:
+                raise DirectorError("Claude Code isn't signed in. In Terminal, type claude, press Enter and sign in "
+                                    "with your Claude account, then try again.")
+            if "limit" in lowered:
+                raise DirectorError("Your Claude plan's usage limit is reached for now. Try later, or switch the AI "
+                                    "to this Mac (Ollama).")
+            raise DirectorError(f"Claude Code said: {(text or done.stderr)[:300]}")
+        return _json_in(text)
+
+    def describe(self, clips: list[list[bytes]]) -> list[Caption | None]:
+        return Ollama(self.ollama_model).describe(clips)
+
+    def storylines(self, prompt: str) -> dict:
+        return self._ask(prompt, STORYLINE_SCHEMA)
+
+    def plan(self, prompt: str) -> dict:
+        return self._ask(prompt, PLAN_SCHEMA)
+
+    def wish(self, prompt: str) -> dict:
+        return self._ask(prompt, WISH_SCHEMA)
+
+    def story(self, prompt: str) -> dict:
+        return self._ask(prompt, STORY_SCHEMA)
+
+
+def test_claude_code() -> str:
+    """A tiny question to check Claude Code answers (installed, signed in, plan not used up)."""
+    answer = ClaudeCode()._ask("Say hello in five words or fewer.",
+                               {"type": "object", "properties": {"hello": {"type": "string"}}, "required": ["hello"]},
+                               timeout=120)
+    return str(answer.get("hello") or "ok")
 
 
 # ---------- prompts and answers ----------

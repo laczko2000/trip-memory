@@ -1619,6 +1619,8 @@ class Page:
                           on_change=lambda e: self.save_ai(provider=e.value)).classes("w-72")
                 if provider == "ollama":
                     self.ollama_settings(ai)
+                elif provider == "claude_code":
+                    self.claude_code_settings(ai)
                 else:
                     self.claude_settings(ai)
             # The AI's progress, right here (the main progress bar is at the top of the page, often out of sight).
@@ -1645,6 +1647,8 @@ class Page:
     def director_ready(self, ai: dict) -> bool:
         if ai.get("provider") == "claude":
             return bool(ai.get("api_key"))
+        if ai.get("provider") == "claude_code":
+            return bool(director.claude_code_path())
         return bool(ai.get("ollama_model"))
 
     def ollama_settings(self, ai: dict) -> None:
@@ -1675,6 +1679,38 @@ class Page:
                             f"`ollama pull {director.OLLAMA_FASTEST}`, click **Check again** and pick it above.") \
                     .classes("text-xs")
         ui.button("Check again", icon="refresh", on_click=self.check_ollama).props("flat dense no-caps")
+
+    def claude_code_settings(self, ai: dict) -> None:
+        found = director.claude_code_path()
+        ui.markdown(
+            "Uses your own Claude account (Pro) through the Claude Code app on this Mac: the strongest model writes "
+            "your stories, with no extra cost. Only the words go to Claude (theme names, times and your idea), "
+            "not your pictures."
+        ).classes("text-sm")
+        if found:
+            ui.label(f"Claude Code found ({found}).").classes("text-xs text-green-700")
+        else:
+            ui.markdown(
+                "**One-time setup.** In Terminal run:\n\n"
+                f"`{director.CLAUDE_CODE_INSTALL}`\n\n"
+                "then type `claude`, press Enter and sign in with your Claude account (then close it with Ctrl+C). "
+                "Click **Check again** when done."
+            ).classes("text-sm")
+        with ui.row().classes("items-center gap-2"):
+            ui.button("Check again", icon="refresh", on_click=self.director_card.refresh).props("flat dense no-caps")
+            if found:
+                ui.button("Test it", icon="play_arrow", on_click=self.test_claude_code).props("flat dense no-caps")
+        ui.label("Describing pictures stays free on this Mac (Ollama):").classes("text-xs text-gray-600 mt-2")
+        self.ollama_settings(ai)
+
+    async def test_claude_code(self) -> None:
+        note = ui.notification("Asking Claude…", spinner=True, timeout=None)
+        try:
+            ok = await run.io_bound(director.test_claude_code)
+            note.message, note.type, note.spinner = f"Claude answered: {ok}", "positive", False
+        except director.DirectorError as exc:
+            note.message, note.type, note.spinner, note.multi_line = str(exc), "warning", False, True
+        note.timeout = 8
 
     async def check_ollama(self) -> None:
         self.ollama_found = await run.io_bound(director.ollama_models)
@@ -2090,6 +2126,8 @@ class Page:
             self.story_stop = ui.button("Stop", icon="stop_circle", on_click=self.stop_ai) \
                 .props("outline color=negative dense no-caps")
             self.story_stop.set_visibility(self.ai_busy)
+            ui.select(director.PROVIDERS, value=load_settings().get("ai", {}).get("provider", "ollama"), label="AI",
+                      on_change=lambda e: self.story_ai(e.value)).props("dense").classes("w-72 ml-auto")
         if not story.get("parts"):
             ui.label("No story yet: until you make one, the video runs as it happened.").classes("text-sm text-gray-500")
             return
@@ -2220,6 +2258,13 @@ class Page:
                         "places": ", ".join(places[:3])})
         return out
 
+    def story_ai(self, provider: str) -> None:
+        self.save_ai(refresh=False, provider=provider)
+        if provider == "claude_code" and not director.claude_code_path():
+            ui.notify("Claude Code isn't on this Mac yet. In Terminal run: " + director.CLAUDE_CODE_INSTALL +
+                      "  then type claude, press Enter and sign in. More in Stories > AI director > Which AI.",
+                      type="warning", multi_line=True, timeout=20000)
+
     async def make_story(self, again: bool) -> None:
         if not self.trip:
             return
@@ -2245,8 +2290,10 @@ class Page:
 
             def thinking() -> None:
                 gone = int(time.time() - started)
-                note.message = (f"🤖 The AI is working on your story: {gone // 60}:{gone % 60:02d} so far. On a MacBook "
-                                "Air it usually takes 1 to 3 minutes (longer the first time, while the model loads). "
+                usual = ("Claude usually takes under a minute." if isinstance(ai, director.ClaudeCode) else
+                         "On a MacBook Air it usually takes 1 to 3 minutes (longer the first time, while the model "
+                         "loads).")
+                note.message = (f"🤖 The AI is working on your story: {gone // 60}:{gone % 60:02d} so far. {usual} "
                                 "Stop is next to the story buttons.")
 
             thinking()

@@ -1,5 +1,6 @@
 """The AI director: clip descriptions, storyline ideas, and putting the stories in the chosen order."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -339,3 +340,37 @@ def test_the_video_length_is_the_music_s_never_the_wish_s(trip):
     assert trip.own_length() == 65.0
     trip.set_own_length(None)
     assert trip.own_length() is None
+
+def test_json_in_reads_fenced_answers():
+    assert director._json_in('Here it is:\n```json\n{"a": 1}\n```') == {"a": 1}
+    with pytest.raises(director.DirectorError):
+        director._json_in("no json here")
+
+
+def _fake_claude(tmp_path, reply: dict, code: int = 0) -> str:
+    (tmp_path / "reply.json").write_text(json.dumps(reply))
+    script = tmp_path / "claude"
+    script.write_text("#!/bin/sh\ncat > \"$(dirname \"$0\")/asked.txt\"\n"
+                      f"cat \"$(dirname \"$0\")/reply.json\"\nexit {code}\n")
+    script.chmod(0o755)
+    return str(script)
+
+
+def test_claude_code_asks_the_cli(tmp_path, monkeypatch):
+    answer = {"title": "Kite days", "parts": []}
+    path = _fake_claude(tmp_path, {"result": "```json\n" + json.dumps(answer) + "\n```", "is_error": False})
+    monkeypatch.setattr(director, "claude_code_path", lambda: path)
+    ai = director.make({"provider": "claude_code"})
+    assert isinstance(ai, director.ClaudeCode)
+    assert ai.story("Make a story") == answer
+    assert "Make a story" in (tmp_path / "asked.txt").read_text()
+
+
+def test_claude_code_explains_failures(tmp_path, monkeypatch):
+    path = _fake_claude(tmp_path, {"result": "Invalid API key · Please run /login", "is_error": True}, code=1)
+    monkeypatch.setattr(director, "claude_code_path", lambda: path)
+    with pytest.raises(director.DirectorError, match="signed in"):
+        director.ClaudeCode().story("x")
+    monkeypatch.setattr(director, "claude_code_path", lambda: None)
+    with pytest.raises(director.DirectorError, match="not installed"):
+        director.ClaudeCode()
