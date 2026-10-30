@@ -182,7 +182,7 @@ class Trip:
             "effects TEXT", "effects_why TEXT", "ai_caption TEXT", "ai_score INTEGER", "removed INTEGER DEFAULT 0", "features BLOB",
             "plan_role TEXT", "plan_pos REAL", "title_text TEXT", "title_sub TEXT", "title_style TEXT", "title_where TEXT",
             "focus_x REAL", "keep_start REAL", "keep_end REAL", "part_of TEXT",
-            "theme TEXT", "theme_auto TEXT", "theme_sure REAL",
+            "theme TEXT", "theme_auto TEXT", "theme_sure REAL", "locks TEXT",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
@@ -653,7 +653,63 @@ class Trip:
                             start, end = kept_part(r)
                             r = r | {"duration": end - start, "keep_offset": start, "full_duration": r["duration"]}
                         pool.append(r | {"story_rank": rank, "story_name": story["name"]})
+        return self._with_locks(pool)
+
+    @staticmethod
+    def _with_locks(pool: list[dict]) -> list[dict]:
+        """Each clip's locked moments, in the time Auto-edit sees it (from the start of the part you kept)."""
+        for r in pool:
+            locks = json.loads(r["locks"]) if isinstance(r.get("locks"), str) and r["locks"] else []
+            offset, length = r.get("keep_offset") or 0.0, r["duration"] or 0.0
+            r["locks"] = [(max(0.0, a - offset), min(length, b - offset)) for a, b in locks
+                          if min(length, b - offset) - max(0.0, a - offset) >= 0.3] if r["kind"] == "video" else []
         return pool
+
+    def locks(self, path: str) -> list[list[float]]:
+        """The moments you locked in a clip: [[start, end]] in seconds from the start of the file."""
+        rows = self.query("SELECT locks FROM items WHERE path = ?", (path,))
+        return json.loads(rows[0]["locks"]) if rows and rows[0]["locks"] else []
+
+    def set_locks(self, path: str, locks: list, checkpoint: bool = True) -> None:
+        """Save a clip's locked moments (overlapping ones become one). Every view shows them; the next cut uses
+        each exactly, and only the rest of the clip is free for other shots."""
+        merged: list[list[float]] = []
+        for a, b in sorted((round(float(a), 2), round(float(b), 2)) for a, b in locks if float(b) - float(a) >= 0.3):
+            if merged and a <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], b)
+            else:
+                merged.append([a, b])
+        if checkpoint:
+            self.checkpoint("locking a moment")
+        self.execute("UPDATE items SET locks = ? WHERE path = ?", (json.dumps(merged) if merged else None, path))
+
+    def used_parts(self, clip: str, but: str | None = None) -> list[tuple[float, float, int]]:
+        """The seconds of a clip the other shots in the Storyboard already use: (start, end, shot number)."""
+        out = []
+        for n, r in enumerate(self.storyboard(), 1):
+            if (r["part_of"] or r["path"]) == clip and r["path"] != but and r["kind"] == "video" \
+                    and r["trim_start"] is not None and r["trim_end"] is not None:
+                out.append((float(r["trim_start"]), float(r["trim_end"]), n))
+        return out
+
+    def locked_count(self) -> int:
+        """How many moments are locked in your chosen clips."""
+        return sum(len(json.loads(r["locks"])) for r in self.query(
+            "SELECT locks FROM items WHERE locks IS NOT NULL AND chosen = 1 AND removed = 0 AND part_of IS NULL"))
+
+    def add_lock(self, path: str, start: float, end: float) -> None:
+        self.set_locks(path, self.locks(path) + [[start, end]])
+
+    def change_lock(self, path: str, k: int, start: float | None = None, end: float | None = None,
+                    checkpoint: bool = True) -> None:
+        """Move lock k to (start, end), or unlock it (no start)."""
+        locks = self.locks(path)
+        if 0 <= k < len(locks):
+            if start is None:
+                locks.pop(k)
+            else:
+                locks[k] = [start, end]
+        self.set_locks(path, locks, checkpoint)
 
     def _storyline_pool(self, storyline: dict) -> list[dict]:
         """The shots for your storyline, each with its chapter; self._chapters gets the chapters for Auto-edit."""
@@ -681,7 +737,7 @@ class Trip:
         for r, chapter in zip(rows, where):
             if chapter is None:
                 continue
-            if r.get("moment_at") is not None and r["kind"] == "video" and r["duration"]:
+            if r.get("moment_at") is not None and r["kind"] == "video" and r["duration"] and not r.get("locks"):
                 # a moment you picked (a big jump...): only the seconds around it, inside the part you kept
                 start, end = kept_part(r) or (0.0, r["duration"])
                 a, b = moments.window(r["moment_at"], r["duration"], start, end)
@@ -691,7 +747,7 @@ class Trip:
                 start, end = kept_part(r)
                 r = r | {"duration": end - start, "keep_offset": start, "full_duration": r["duration"]}
             pool.append(r | {"chapter": chapter, "pace_want": chapters[chapter].get("pace")})
-        return pool
+        return self._with_locks(pool)
 
     # ---------- themes ----------
 

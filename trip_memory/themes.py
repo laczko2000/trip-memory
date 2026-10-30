@@ -243,7 +243,8 @@ def _story_chapters(story: dict, rows: list[dict], split: set[str]) -> tuple[lis
                 want = set(sorted(whole, key=lambda i: excitement(rows[i]), reverse=True)[:half])
             else:
                 want = set(whole)
-            take = [i for i in free if i in want or rows[i]["path"] in keep]
+            # (a clip with a moment you locked always comes along)
+            take = [i for i in free if i in want or rows[i]["path"] in keep or rows[i].get("locks")]
             if not take:
                 continue
             for i in take:

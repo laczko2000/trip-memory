@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -522,6 +522,70 @@ def split_long(rows: list[dict], curves: dict, short: int) -> tuple[list[dict], 
     return result, parts
 
 
+LOCK_GAP = 0.5  # seconds kept free on each side of a moment you locked
+LOCK_STRETCH = 1.5  # a locked moment may play this much slower to fill the time up to the next cut
+FREE_FROM = 2.0  # seconds: a stretch of a locked clip this long can still be a shot of its own
+
+
+def lock_parts(rows: list[dict], curves: dict) -> tuple[list[dict], dict[str, tuple[str, float]]]:
+    """Clips with moments you locked (row["locks"]: [(start, end)] in the row's own time): each moment becomes a
+    shot of its own that must be in the video and plays exactly that moment; what is left of the clip around them
+    is free for other shots (never overlapping a moment). curves gets each part's own curve."""
+    parts: dict[str, tuple[str, float]] = {}
+    out: list[dict] = []
+    for r in rows:
+        locks = sorted((float(a), float(b)) for a, b in r.get("locks") or [] if b - a >= 0.3)
+        if r["kind"] != "video" or not locks:
+            out.append(r)
+            continue
+        curve = curves.get(r["path"])
+        length = r["duration"] or 0.0
+        free, at = [], 0.0
+        for a, b in locks:
+            if a - LOCK_GAP - at >= FREE_FROM:
+                free.append((at, a - LOCK_GAP))
+            at = max(at, b + LOCK_GAP)
+        if length - at >= FREE_FROM:
+            free.append((at, length))
+        pieces = [(a, b, True) for a, b in locks] + [(a, b, False) for a, b in free]
+        for k, (a, b, locked) in enumerate(pieces):
+            path = r["path"] if k == 0 else f"{r['path']}#{'L' if locked else 'F'}{k + 1}"
+            piece = {key: v for key, v in r.items() if key != "locks"} | {
+                "path": path, "duration": b - a, "part_of": r["path"] if k else None, "part_start": a,
+                "locked": locked, "forced": locked or r.get("forced", False), "usable": None}
+            if curve is not None and len(curve):
+                curves[path] = curve[int(round(a * STEPS_PER_SECOND)):int(round(b * STEPS_PER_SECOND))]
+                _measure(piece, curves[path])
+            parts[path] = (r["path"], a)
+            out.append(piece)
+    return out, parts
+
+
+def _room_for_locks(slots: list[Slot], picks: list[int], candidates: list[dict]) -> tuple[list[Slot], list[int]]:
+    """A moment you locked plays whole: when its slot is shorter, it takes in the next slot (or the one before) as
+    well, up to the next cut that leaves room for all of it (a little slow motion fills any time over)."""
+    slots, picks = list(slots), list(picks)
+    k = 0
+    while k < len(slots):
+        c = candidates[picks[k]]
+        need = c["duration"] or 0.0
+        while c.get("locked") and slots[k].seconds < need - 0.05 and len(slots) > 1:
+            after = k + 1 < len(slots) and not candidates[picks[k + 1]].get("locked")
+            before = k > 0 and not candidates[picks[k - 1]].get("locked")
+            if after and slots[k + 1].end - slots[k].start <= need * LOCK_STRETCH:
+                slots[k] = replace(slots[k], end=slots[k + 1].end, tapped=False)
+                del slots[k + 1], picks[k + 1]
+            elif before and slots[k].end - slots[k - 1].start <= need * LOCK_STRETCH:
+                slots[k - 1] = replace(slots[k - 1], end=slots[k].end, energy=slots[k].energy, tapped=False)
+                picks[k - 1] = picks[k]
+                del slots[k], picks[k]
+                k -= 1
+            else:
+                break
+        k += 1
+    return slots, picks
+
+
 def fit_pins(song, pins: list[float], count: int, longest: float) -> list[float]:
     """Too few shots for all your pins: keep `count` of them. The least important go first, so the pattern
     stays (a pin every 2 s becomes one every 4 s); pins on big hits and where the music changes, and your first
@@ -745,6 +809,10 @@ def fill_slots(slots: list[Slot], candidates: list[dict], limits: Limits) -> lis
                 # (slowed down to half speed at most if it is a little short).
                 if c["kind"] == "video" and (c["duration"] or 0) < slot.seconds * MIN_FILL_SPEED - 0.05:
                     continue
+            elif c.get("locked"):
+                # A moment you locked plays whole: a slot as long as it, or a little shorter (only its edges go).
+                if slot.seconds > c["duration"] + 0.05:
+                    continue
             elif c["kind"] == "video":
                 # Fits in the clip's longest good stretch (or, if that is very short, the clip as a whole).
                 room = c.get("usable") if (c.get("usable") or 0) >= limits.min_shot else c["duration"]
@@ -755,6 +823,8 @@ def fill_slots(slots: list[Slot], candidates: list[dict], limits: Limits) -> lis
             fit = 1.0 - abs(slot.energy - paces[i])
             if wants[i] is not None:  # a story part that should feel calm or lively: shots of that pace fit better
                 fit = 0.5 * fit + 0.5 * (1.0 - abs(wants[i] - paces[i]))
+            if c.get("locked"):  # the closer the slot is to the moment's length, the less of it is lost
+                fit -= 3.0 * max(0.0, 1.0 - slot.seconds / max(0.1, c["duration"]))
             score[j, i] = best_prev + 3.0 + 0.5 * values[i] + 2.0 * fit - off[i]
             back[j, i] = best_idx
     filled = [j for j in range(n_slots) if score[j].max() > neg / 2]  # always the first few slots
@@ -784,6 +854,7 @@ def plan_to_music(
     curves = dict(curves)
     for r in rows:
         _measure(r, curves.get(r["path"]))
+    rows, locked_parts = lock_parts(rows, curves)  # moments you locked: shots of their own
 
     def order(rows: list[dict]) -> list[dict]:
         return by_chapters(rows, chapters) if chapters else arrange(choose(rows), limits.storyline)
@@ -818,9 +889,12 @@ def plan_to_music(
     cap = max(limits.max_video, limits.max_photo)
     # Fewer shots than the music needs: a long clip gives two or three, from different parts of it.
     need = len(inside) + 1 if inside else int(np.ceil(end / ((limits.min_shot + cap) / 2)))
-    parts: dict[str, tuple[str, float]] = {}
+    parts: dict[str, tuple[str, float]] = dict(locked_parts)
     if len(candidates) < need:
-        rows, parts = split_long(rows, curves, need - len(candidates))
+        whole = [r for r in rows if r["path"] not in locked_parts]  # (a locked clip is in parts already)
+        more, split = split_long(whole, curves, need - len(candidates))
+        rows = more + [r for r in rows if r["path"] in locked_parts]
+        parts |= split
         candidates = order(rows)
     if inside and len(candidates) - 1 < len(inside):  # fewer shots than your pins: a first guess
         kept = fit_pins(song, inside, max(1, len(candidates) - 1), cap)
@@ -855,6 +929,7 @@ def plan_to_music(
                              key=lambda t: len(t[1]))
     song.taps = (kept or inside) + after
     slots = slots[: len(picks)]
+    slots, picks = _room_for_locks(slots, picks, candidates)
     if not slots:
         return Plan(left_out=[r["path"] for r in rows], beat=song.beat)
 
@@ -894,7 +969,7 @@ def plan_to_music(
         seconds = (finish - begin) / 30
         begin = finish - round(overlap[k] * 30)
         start = 0.0
-        speed, speed_why = speed_for(c, slot, seconds) if limits.speed_effects else (1.0, None)
+        speed, speed_why = speed_for(c, slot, seconds) if limits.speed_effects and not c.get("locked") else (1.0, None)
         effects, effects_why = (effects_for(c, slot, seconds, speed, hits, since_fx, finish / 30 - seconds)
                                 if limits.camera_effects else ({}, None))
         new_story = c.get("story") != previous_story  # its first shot carries the story's title already
@@ -906,17 +981,22 @@ def plan_to_music(
         since_fx = 0 if effects.get("punch") or effects.get("ramp") or effects.get("shake") else since_fx + 1
         if effects.get("ramp") and not limits.speed_effects:
             effects, effects_why = {}, None
-        if slot.tapped and c["kind"] == "video" and (c["duration"] or 0) < seconds * speed * (1.4 if effects.get("ramp") else 1.0) - 0.01:
+        if c.get("locked") and effects:  # a locked moment plays as it is
+            effects, effects_why = {}, None
+        if (slot.tapped or c.get("locked")) and c["kind"] == "video" and \
+                (c["duration"] or 0) < seconds * speed * (1.4 if effects.get("ramp") else 1.0) - 0.01:
             # Too short for the time between your pins: slow it down so it fills it, rather than add a cut.
             if effects.get("ramp"):
                 effects, effects_why = {}, None
             speed = max(MIN_FILL_SPEED, (c["duration"] or 0) / seconds - 0.001)
-            speed_why = "Slowed down to fill the time between your pins"
+            speed_why = ("Your locked moment, a little slower to fill its time" if c.get("locked") and not slot.tapped
+                         else "Slowed down to fill the time between your pins")
         if c["kind"] == "video":
             curve = curves.get(c["path"])
             used = (seconds - (effects.get("freeze") or 0)) * speed * (1.4 if effects.get("ramp") else 1.0)  # of the video
             longest_start = max(0.0, (c["duration"] or used) - used)
-            start = best_start(curve, c["duration"], used) if curve is not None else longest_start / 2
+            start = (longest_start / 2 if c.get("locked") or curve is None  # a locked moment: its middle
+                     else best_start(curve, c["duration"], used))
             start = min(max(0.0, start), longest_start)
         transition, why = chosen[k] if k < len(chosen) else (None, None)
         shots.append(Shot(path=c["path"], kind=c["kind"], start=round(start, 2), seconds=seconds, transition=transition,

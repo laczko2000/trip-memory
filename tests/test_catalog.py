@@ -510,6 +510,8 @@ def test_a_long_clip_gives_two_shots_from_different_parts_never_the_same_moment(
     assert [Path(r["path"]).name for r in board] == ["long.mp4", "long.mp4#2"]
     (a0, a1), (b0, b1) = [(r["trim_start"], r["trim_end"]) for r in board]
     assert a1 + autoedit.PART_GAP - 0.01 <= b0  # different moments of the clip, with a gap between them
+    clip = str(trip_dir / "long.mp4")
+    assert trip.used_parts(clip, but=clip + "#2") == [(a0, a1, 1)]  # what the other shot uses (shown red)
     assert {str(i.path) for i in trip.media_items()} == {str(trip_dir / "long.mp4")}  # both play from the file
     assert [r["path"] for r in trip.items()] == [str(trip_dir / "long.mp4")]  # Choose files and Library: one clip
     trip.auto_edit_steady(autoedit.Limits(max_video=3, max_photo=2, min_shot=1), 2.0, 0.0, "Fade")
@@ -611,3 +613,30 @@ def test_the_trip_remembers_its_song(tmp_path, monkeypatch):
     assert trip.song() is None
     trip.set_song("/music/summer.m4a")
     assert catalog.Trip(tmp_path / "trip").song() == "/music/summer.m4a"
+
+
+def test_a_locked_moment_is_always_in_the_cut_exactly(tmp_path, monkeypatch):
+    from trip_memory import autoedit
+
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    subprocess.run([ffmpeg_paths()[0], "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=160x90:r=30:d=20",
+                    "-pix_fmt", "yuv420p", str(trip_dir / "kite.mp4")], check=True)
+    for n in range(4):
+        Image.new("RGB", (160, 90), ["red", "green", "blue", "yellow"][n]).save(trip_dir / f"p{n}.jpg")
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    path = str(trip_dir / "kite.mp4")
+    trip.add_lock(path, 12.0, 14.0)
+    trip.add_lock(path, 13.5, 15.0)  # overlapping: one moment
+    assert trip.locks(path) == [[12.0, 15.0]]
+    trip.auto_edit_steady(autoedit.Limits(max_video=3, max_photo=2, min_shot=1), 12.0, 0.0, "Fade")
+    board = trip.storyboard()
+    mine = [(r["trim_start"], r["trim_end"]) for r in board if (r["part_of"] or r["path"]) == path]
+    assert any(abs(a - 12.0) < 0.15 and abs(b - 15.0) < 0.15 for a, b in mine), mine  # the whole moment
+    for a, b in mine:  # other parts of the clip never overlap it
+        assert b <= 12.0 + 1e-6 or a >= 15.0 - 1e-6 or (abs(a - 12.0) < 0.15 and abs(b - 15.0) < 0.15)
+    trip.change_lock(path, 0)
+    assert trip.locks(path) == []

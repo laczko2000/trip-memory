@@ -163,7 +163,9 @@ class Page:
         self.own_length_open = False  # "Use a different length" switched on, length not typed yet
         self.dirty = False
         self.last_refresh = 0.0
-        self.filters = {"day": ALL, "place": ALL, "scene": ALL, "tag": ALL, "look": ALL, "person": ALL, "show": ALL}
+        self.filters = {"day": ALL, "theme": ALL, "place": ALL, "scene": ALL, "tag": ALL, "look": ALL, "person": ALL,
+                        "show": ALL}
+        self.lock_views: dict[str, list[tuple]] = {}  # clip -> the places on screen that show its locked moments
         self.page = 1
         self.rendering = {"busy": False, "progress": 0.0, "message": "", "result": None}
         self.ollama_found: tuple[list[str], list[str]] | None = None  # (models that see pictures, all models)
@@ -203,6 +205,8 @@ class Page:
         for it in self.items:
             if f["day"] != ALL and it["day"] != f["day"]:
                 continue
+            if f["theme"] != ALL and self.theme_of(it) != f["theme"]:
+                continue
             if f["place"] != ALL and (it["place"] or "Unknown place") != f["place"]:
                 continue
             if f["scene"] != ALL and (it["scene_final"] or "Not sorted yet") != f["scene"]:
@@ -220,6 +224,11 @@ class Page:
             out.append(it)
         return out
 
+    @staticmethod
+    def theme_of(it: dict) -> str:
+        """A shot's theme: yours if you confirmed one, else the app's suggestion."""
+        return it.get("theme") or it.get("theme_auto") or themes.OTHER
+
     def options(self) -> dict[str, dict]:
         days = sorted({it["day"] for it in self.items})
         day_opts = {ALL: "All days"}
@@ -231,8 +240,10 @@ class Page:
         present = {t for it in self.items for t in [*it["tags_final"], it["people_tag"]] if t}
         tags = {t: f"{TAG_GROUP[t]}: {t}" for t in ALL_TAGS if t in present}
         looks = sorted({it["look_name"] for it in self.items if it["look_name"]}, key=lambda n: int(n.rsplit(" ", 1)[1]))
+        theme_names = sorted({self.theme_of(it) for it in self.items})
         return {
             "day": day_opts,
+            "theme": {ALL: "All themes", **{t: t for t in theme_names}},
             "place": {ALL: "All places", **{p: p for p in places}},
             "scene": {ALL: "All scenes", **{s: s for s in scenes}},
             "tag": {ALL: "All tags", **tags},
@@ -247,6 +258,7 @@ class Page:
         ui.colors(primary="#2563eb")
         ui.on("tm_dictation", self.dictation)
         ui.on("tm_story_drop", self.story_drop)
+        ui.on("tm_board_drop", self.board_drop)
         ui.add_css(".thumb { height: 150px; object-fit: cover; }")
         with ui.column().classes("w-full max-w-6xl mx-auto p-4 gap-3"):
             with ui.row().classes("items-baseline gap-2"):
@@ -870,7 +882,140 @@ class Page:
                     .tooltip("The whole clip again")
             ui.button("Cancel", on_click=lambda: self.close_cut(cut)).props("flat dense no-caps")
 
-    def part_dialog(self, it: dict, a: float, b: float, title: str, actions: list[tuple]) -> None:
+    # ---------- locked moments (one per clip, the same in Library, Themes and Storyboard) ----------
+
+    @staticmethod
+    def clip_of(it: dict) -> str:
+        return it.get("part_of") or it["path"]
+
+    def lock_area(self, it: dict, mode: str) -> None:
+        """Where a clip's locked moments show: "full" (Library), "compact" (a Themes tile) or "story" (a shot in
+        the Storyboard). Change them in any of these places and the others follow."""
+        box = ui.element("div").classes("w-full" if mode != "compact" else "")
+        self.lock_views.setdefault(self.clip_of(it), []).append((box, it, mode))
+        with box:
+            self._draw_locks(it, mode)
+
+    def _locks_changed(self, clip: str) -> None:
+        alive = []
+        for box, it, mode in self.lock_views.get(clip, []):
+            if box.is_deleted:
+                continue
+            box.clear()
+            with box:
+                self._draw_locks(it, mode)
+            alive.append((box, it, mode))
+        self.lock_views[clip] = alive
+
+    def _draw_locks(self, it: dict, mode: str) -> None:
+        clip = self.clip_of(it)
+        locks = self.trip.locks(clip)
+        words = [f"{fmt_length(a)}–{fmt_length(b)}" for a, b in locks]
+        if mode == "compact":
+            button = ui.button(str(len(locks)) if locks else "", icon="lock" if locks else "lock_open") \
+                .props("round dense size=sm " + ("color=amber-8" if locks else "color=white text-color=grey-7")) \
+                .classes("shadow").tooltip("Locked moments: " + ", ".join(words) if locks else "Lock a moment")
+            with button, ui.menu():
+                for k, w in enumerate(words):
+                    ui.menu_item(f"🔒 {w}", on_click=lambda k=k: self.edit_lock(it, k))
+                ui.menu_item("🔒 Lock a moment…", on_click=lambda: self.new_lock(it))
+            return
+        if mode == "story":
+            lo, hi = self.kept_part(it)
+            match = next((k for k, (a, b) in enumerate(locks) if abs(a - lo) < 0.15 and abs(b - hi) < 0.15), None)
+            with ui.row().classes("items-center gap-1"):
+                ui.button("Choose part", icon="open_in_full", on_click=lambda: self.choose_shot_part(it)) \
+                    .props("flat dense no-caps size=sm").tooltip("Watch the whole clip big and pick the part to use")
+                if match is not None:
+                    ui.label("🔒 This part is locked").classes("text-xs font-medium text-amber-800")
+                    ui.button("Unlock", icon="lock_open", on_click=lambda: self.unlock(clip, match)) \
+                        .props("flat dense no-caps size=sm")
+                else:
+                    ui.button("Lock this part", icon="lock", on_click=lambda: self.lock(clip, lo, hi)) \
+                        .props("flat dense no-caps size=sm color=amber-9") \
+                        .tooltip("The next cut keeps exactly this part (it may move it); the rest of the clip stays free")
+                others = [w for k, w in enumerate(words) if k != match]
+                if others:
+                    ui.label("· also locked: " + ", ".join(others)).classes("text-xs text-amber-800")
+            return
+        with ui.row().classes("items-center gap-1"):
+            for k, w in enumerate(words):
+                ui.button(f"🔒 {w}", on_click=lambda k=k: self.edit_lock(it, k)) \
+                    .props("flat dense no-caps size=sm color=amber-9").tooltip("Watch it, move it or unlock it")
+            ui.button("Lock a moment", icon="lock", on_click=lambda: self.new_lock(it)) \
+                .props("flat dense no-caps size=sm").tooltip("Pick the best part of this clip: every cut keeps it")
+
+    def lock(self, clip: str, start: float, end: float) -> None:
+        self.trip.add_lock(clip, start, end)
+        ui.notify(f"🔒 Locked {fmt_length(start)}–{fmt_length(end)}. The next cut keeps exactly this part.",
+                  type="positive")
+        self._locks_changed(clip)
+
+    def unlock(self, clip: str, k: int) -> None:
+        self.trip.change_lock(clip, k)
+        ui.notify("Unlocked: the next cut may use any part of the clip again.")
+        self._locks_changed(clip)
+
+    def _clip_row(self, it: dict) -> dict:
+        """The clip itself (for a shot that is a part of a long clip)."""
+        clip = self.clip_of(it)
+        return next((r for r in self.all_items if r["path"] == clip), it)
+
+    def new_lock(self, it: dict) -> None:
+        row = self._clip_row(it)
+        a, b = moments.window(self.hover_start(row), row["duration"] or 0, *(kept_part(row) or
+                                                                           (0.0, row["duration"] or 0)))
+
+        def save(lo: float, hi: float) -> bool:
+            self.lock(row["path"], lo, hi)
+            return True
+
+        self.part_dialog(row, a, b, "Lock a moment of this clip",
+                         [("Lock this moment", "lock", save, "no-caps color=amber-9")])
+
+    def edit_lock(self, it: dict, k: int) -> None:
+        row = self._clip_row(it)
+        locks = self.trip.locks(row["path"])
+        if not 0 <= k < len(locks):
+            return
+
+        def save(lo: float, hi: float) -> bool:
+            self.trip.change_lock(row["path"], k, lo, hi)
+            ui.notify(f"🔒 Locked moment moved to {fmt_length(lo)}–{fmt_length(hi)}.", type="positive")
+            self._locks_changed(row["path"])
+            return True
+
+        def free(_lo: float, _hi: float) -> bool:
+            self.unlock(row["path"], k)
+            return True
+
+        self.part_dialog(row, *locks[k], "Locked moment",
+                         [("Unlock", "lock_open", free, "flat no-caps color=negative"),
+                          ("Save", "lock", save, "no-caps color=amber-9")])
+
+    def choose_shot_part(self, it: dict) -> None:
+        """A shot in the Storyboard: watch its whole clip big, use another part, and lock it if you like."""
+        lo, hi = self.kept_part(it)
+
+        def use(a: float, b: float, locked: bool = False) -> bool:
+            self.trip.set_trim(it["path"], a, b)
+            if locked:
+                self.trip.add_lock(self.clip_of(it), a, b)
+            ui.notify(f"This shot now uses {fmt_length(a)}–{fmt_length(b)}" + (", locked 🔒." if locked else "."),
+                      type="positive")
+            self.reload()
+            self.storyboard_view.refresh()
+            if locked:
+                self._locks_changed(self.clip_of(it))
+            return True
+
+        self.part_dialog(it, lo, hi, "Choose the part of this shot",
+                         [("Use this part", "check", use, "outline no-caps"),
+                          ("Use and lock", "lock", lambda a, b: use(a, b, True), "no-caps color=amber-9")],
+                         taken=self.trip.used_parts(self.clip_of(it), but=it["path"]))
+
+    def part_dialog(self, it: dict, a: float, b: float, title: str, actions: list[tuple],
+                    taken: list[tuple[float, float, int]] | None = None) -> None:
         """A big window to choose a part of a video: it plays that part (silently, again and again), the strip below
         shows the whole clip (move the mouse along it to look), and the green handles set the part.
         actions: (label, icon, callback(start, end), props) buttons; a callback returning True closes the window."""
@@ -887,7 +1032,17 @@ class Page:
                     f'<div id="{box}-l" style="{shade};left:0;width:0;pointer-events:none"></div>'
                     f'<div id="{box}-r" style="{shade};right:0;width:0;pointer-events:none"></div>'
                     f'<div id="{box}-head" style="position:absolute;top:0;bottom:0;width:2px;background:#facc15;'
-                    f'display:none;pointer-events:none"></div></div>', sanitize=False).classes("w-full")
+                    f'display:none;pointer-events:none"></div>'
+                    + "".join(f'<div title="Used by shot {n}" style="position:absolute;top:0;bottom:0;'
+                              f'left:{100 * (x - full0) / ((full1 - full0) or 1):.2f}%;'
+                              f'width:{100 * (y - x) / ((full1 - full0) or 1):.2f}%;background:rgba(220,38,38,.55);'
+                              f'border-left:2px solid #dc2626;border-right:2px solid #dc2626;pointer-events:none">'
+                              f'<span style="color:white;font:600 11px sans-serif;padding:2px">shot {n}</span></div>'
+                              for x, y, n in taken or [])
+                    + '</div>', sanitize=False).classes("w-full")
+            if taken:
+                ui.label("Red: parts other shots in your video already use (never shown twice).") \
+                    .classes("text-xs text-red-700 px-2")
             ui.range(min=full0, max=full1, step=0.1, value=dict(part),
                      on_change=lambda e: moved(e.value["min"], e.value["max"])).props("color=green dense") \
                 .classes("w-full px-2")
@@ -914,18 +1069,27 @@ class Page:
                                   f"b.dataset.full1 = {full1}; }} tmPlayPart('{box}', {part['min']}, {part['max']}, "
                                   f"{part['min']})")
                 show()
-                picture = await run.io_bound(self.trip.filmstrip, it["path"])
+                picture = await run.io_bound(self.trip.filmstrip, self.clip_of(it))
                 if picture:
                     ui.run_javascript(f"const s = document.getElementById('{box}-strip'); "
                                       f"if (s) {{ s.src = '{data_url(str(picture))}'; s.style.display = 'block'; }}")
 
             async def act(callback) -> None:
+                clash = next((n for x, y, n in taken or [] if part["min"] < y - 0.05 and x + 0.05 < part["max"]), None)
+                if clash is not None:
+                    ui.notify(f"Shot {clash} already uses part of these seconds (red on the strip). Choose seconds "
+                              "outside the red, so nothing shows twice.", type="warning", multi_line=True)
+                    return
+                ui.run_javascript(f"const b = document.getElementById('{box}'); if (b) tmStop(b);")
                 done = callback(part["min"], part["max"])
                 if asyncio.iscoroutine(done):
                     done = await done
+                if dialog.is_deleted:  # (what it changed redrew the place the window was opened from)
+                    return
                 if done:
-                    ui.run_javascript(f"const b = document.getElementById('{box}'); if (b) tmStop(b);")
                     dialog.close()
+                else:
+                    ui.run_javascript(f"tmPlayPart('{box}', {part['min']}, {part['max']}, {part['min']})")
 
             with ui.row().classes("w-full items-center justify-end gap-2"):
                 ui.button("Play", icon="play_arrow", on_click=lambda: ui.run_javascript(
@@ -1050,7 +1214,7 @@ class Page:
             return
         opts = self.options()
         with ui.row().classes("w-full items-end gap-3"):
-            for key, label in (("day", "Day"), ("place", "Place"), ("scene", "Scene"), ("tag", "Tag"),
+            for key, label in (("day", "Day"), ("theme", "Theme"), ("place", "Place"), ("scene", "Scene"), ("tag", "Tag"),
                                ("look", "Look-alike group"), ("person", "Person"), ("show", "Show")):
                 if self.filters[key] not in opts[key]:
                     self.filters[key] = ALL
@@ -1129,6 +1293,10 @@ class Page:
                         .tooltip("The AI director's description, and how much it stands out (1 to 5 stars)")
                 cut_note = ui.label("✂ Selected, but not in the current Auto-edit cut").classes("text-xs text-orange-700")
                 cut_note.visible = bool(it["included"] and it["cut_out"])
+                ui.label(f"🏷 {self.theme_of(it)}" + ("" if it.get("theme") else " (suggested)")) \
+                    .classes("text-xs text-indigo-800")
+                if it["kind"] == "video" and it["thumb"]:
+                    self.lock_area(it, "full")
                 place = ", ".join(x for x in (it["place"], it["country"]) if x) or "Unknown place"
                 if it["place_guessed"]:
                     ui.label(f"📍 {place} (guessed from photos taken around then)").classes("text-xs text-gray-500")
@@ -2070,10 +2238,12 @@ class Page:
             ui.button("Back to time order", icon="restart_alt", on_click=self.reset_order).props("flat dense") \
                 .tooltip("Forget the order you set here: the shots go back to the order they were taken")
         ui.label(
-            "Use the arrows to change the order. For videos, drag the two ends of the bar to choose which part to keep. "
+            "Drag a clip by its ⠿ handle up or down to change the order. For videos, drag the two ends of the bar to "
+            "choose which part to keep. "
             "The transition setting is for the cut after that clip."
         ).classes("text-sm text-gray-600")
         self.shown_titles = self.trip.shot_titles(board)
+        self.board_order = [it["path"] for it in board]  # (a dropped clip is found by its number)
         for n, it in enumerate(board[: self.board_limit], 1):  # one long list you scroll through
             self.story_row(n, it, last=n == len(board))
         if len(board) > self.board_limit:
@@ -2141,6 +2311,11 @@ class Page:
                     ui.button(f"Undo {undo}", icon="undo", on_click=self.undo).props("flat dense no-caps size=sm")
             if music and pins:
                 ui.label(f"Cuts on your {len(pins)} pins from Music & audio.").classes("text-xs text-green-700")
+            locked = self.trip.locked_count()
+            if locked:
+                ui.label(f"🔒 {locked} locked moment{'s' if locked > 1 else ''} stay in, each played whole; the cut "
+                         "fills the rest around them. Unlock one in the Library, Themes or the clips below.") \
+                    .classes("text-xs text-amber-800")
             with ui.expansion("More settings: shot lengths, effects", icon="tune").classes("w-full").props("dense"):
                 self.auto_edit_settings(self.auto_limits, pins)
 
@@ -2855,6 +3030,9 @@ class Page:
                 ui.button(icon="swap_horiz", on_click=lambda r=r: self.theme_menu(r)) \
                     .props("round dense size=sm color=white text-color=primary").classes("shadow") \
                     .tooltip("Move to another theme")
+            if r["kind"] == "video":
+                with ui.element("div").classes("absolute top-11 right-2").on("click.stop", lambda: None):
+                    self.lock_area(r, "compact")
             with ui.column().classes("gap-0 text-xs leading-tight mt-1"):
                 ui.label(("🎬 " if r["kind"] == "video" else "") + (who or "—")) \
                     .classes("font-semibold text-gray-800 truncate")
@@ -3559,12 +3737,27 @@ class Page:
         self.refresh_all()
 
     def story_row(self, n: int, it: dict, last: bool) -> None:
-        with ui.card().classes("w-full p-2"):
+        # Drag by the handle (so the part sliders inside still work); drop anywhere on another clip.
+        with ui.card().classes("w-full p-2") as card:
+            card._props.update({
+                "id": f"tm-shot-{n}",
+                "ondragover": "event.preventDefault();this.style.outline='3px dashed #2563eb'",
+                "ondragleave": "this.style.outline=''",
+                "ondrop": "event.preventDefault();this.style.outline='';"
+                          f"emitEvent('tm_board_drop',{{src:event.dataTransfer.getData('text/plain'),dst:{n}}})"})
             with ui.row().classes("w-full items-center no-wrap gap-3"):
-                with ui.column().classes("gap-0 items-center"):
-                    ui.button(icon="arrow_upward", on_click=lambda p=it["path"]: self.move(p, -1)).props("flat dense round size=sm")
+                handle = ui.element("div").classes("flex flex-col items-center px-1 py-3 rounded cursor-grab "
+                                                   "hover:bg-blue-50 select-none")
+                handle._props.update({
+                    "draggable": "true",
+                    "ondragstart": f"event.dataTransfer.setData('text/plain','{n}');"
+                                   f"event.dataTransfer.setDragImage(document.getElementById('tm-shot-{n}'),20,20);"
+                                   f"document.getElementById('tm-shot-{n}').style.opacity=0.5",
+                    "ondragend": f"document.getElementById('tm-shot-{n}').style.opacity=1"})
+                with handle:
+                    ui.icon("drag_indicator").classes("text-2xl text-gray-500")
                     ui.label(str(n)).classes("text-xs text-gray-500")
-                    ui.button(icon="arrow_downward", on_click=lambda p=it["path"]: self.move(p, 1)).props("flat dense round size=sm")
+                handle.tooltip("Drag up or down to move this clip")
                 box = None
                 if it["thumb"]:
                     start, end = self.kept_part(it) if it["kind"] == "video" else (0, None)
@@ -3579,6 +3772,7 @@ class Page:
                     self.title_control(it)
                     if it["kind"] == "video":
                         self.trim_control(it, box)
+                        self.lock_area(it, "story")
                         with ui.row().classes("items-center gap-4"):
                             self.sound_control(it)
                             self.speed_control(it)
@@ -3711,14 +3905,27 @@ class Page:
 
         show(start, end)
         lo, hi = kept_part(it) or (0.0, it["duration"])  # a clip you cut: only the part you kept
-        ui.range(
+        bar = ui.range(
             min=round(lo, 1), max=round(hi, 1), step=0.1, value={"min": round(start, 1), "max": round(end, 1)},
             on_change=lambda e: trimmed(e.value["min"], e.value["max"]),
         ).props("dense").classes("w-full")
 
         def trimmed(lo: float, hi: float) -> None:
+            clip = self.clip_of(it)
+            clash = next((n for x, y, n in self.trip.used_parts(clip, but=it["path"])
+                          if lo < y - 0.05 and x + 0.05 < hi), None)
+            if clash is not None:  # never the same seconds twice: back to where it was
+                ui.notify(f"Shot {clash} already uses some of these seconds of the clip. Choose another part, so "
+                          "nothing shows twice.", type="warning", multi_line=True)
+                bar.set_value({"min": kept["min"], "max": kept["max"]})
+                return
             show(lo, hi)
             self.trip.set_trim(it["path"], lo, hi)
+            locked = next((k for k, (a, b) in enumerate(self.trip.locks(clip))
+                           if abs(a - kept["min"]) < 0.15 and abs(b - kept["max"]) < 0.15), None)
+            if locked is not None:  # a locked part you move stays locked
+                self.trip.change_lock(clip, locked, lo, hi, checkpoint=False)
+                ui.timer(0.05, lambda: self._locks_changed(clip), once=True)
             # Play the part now kept: from its start, or its last 2 seconds when the end was moved.
             from_ = lo if lo != kept["min"] or hi == kept["max"] else max(lo, hi - 2)
             kept.update(min=lo, max=hi)
@@ -3773,6 +3980,18 @@ class Page:
         with column:
             ui.select(speeds, value=speed, on_change=lambda e: changed(e.value)).props("dense options-dense") \
                 .classes("w-40").move(target_index=0)
+
+    def board_drop(self, e) -> None:
+        """A clip dragged onto another one in the Storyboard: it takes that place."""
+        args = e.args if isinstance(e.args, dict) else {}
+        try:
+            src, dst = int(args.get("src")), int(args.get("dst"))
+        except (TypeError, ValueError):
+            return
+        order = getattr(self, "board_order", [])
+        if src == dst or not (1 <= src <= len(order) and 1 <= dst <= len(order)) or not self.trip:
+            return
+        self.move(order[src - 1], dst - src)
 
     def move(self, path: str, steps: int) -> None:
         self.trip.move(path, steps)

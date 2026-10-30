@@ -338,3 +338,17 @@ def test_a_long_song_with_many_pins_is_filled_to_the_end_with_the_shots_you_have
         r.setdefault("taken_at", "2025-07-01T10:00:00")
     plan = autoedit.plan_to_music(rows, {}, song, autoedit.Limits(cut_on="taps", storyline="date"), None, 0.8, "Fade")
     assert plan.length >= 175 and len(plan.shots) >= 50 and plan.kept_pins and len(plan.kept_pins) < 149
+
+
+def test_a_locked_moment_plays_whole_and_the_rest_of_the_clip_stays_free():
+    rows, parts = autoedit.lock_parts(
+        [{"path": "/k.mov", "kind": "video", "duration": 30.0, "taken_at": "2025-07-03T10:00:00",
+          "locks": [(12.0, 15.0)]},
+         {"path": "/p.jpg", "kind": "photo", "duration": None, "taken_at": "2025-07-03T10:01:00"}], {})
+    by = {r["path"]: r for r in rows}
+    assert by["/k.mov"]["locked"] and by["/k.mov"]["forced"] and by["/k.mov"]["duration"] == 3.0
+    assert parts["/k.mov"] == ("/k.mov", 12.0)
+    free = sorted((parts[p][1], parts[p][1] + by[p]["duration"]) for p in by if p.startswith("/k.mov#F"))
+    assert free == [(0.0, 11.5), (15.5, 30.0)]  # never overlapping the moment
+    assert all(by[p]["part_of"] == "/k.mov" for p in by if "#" in p)
+    assert "/p.jpg" in by and "/p.jpg" not in parts
