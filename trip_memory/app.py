@@ -2180,14 +2180,21 @@ class Page:
                     for m, entry in enumerate(part["entries"]):
                         if entry["key"] not in names:
                             continue
-                        chip = ui.element("div").classes("flex items-center no-wrap gap-1 px-2 rounded-full bg-blue-50 "
-                                                         "border cursor-grab")
+                        added = entry.get("added")
+                        chip = ui.element("div").classes("flex items-center no-wrap gap-1 px-2 rounded-full border "
+                                                         "cursor-grab " + ("bg-amber-50 border-dashed border-amber-500"
+                                                                           if added else "bg-blue-50"))
+                        if added:
+                            chip.tooltip("Added by the app: the AI left this theme out, so the app put it where it "
+                                         "was filmed nearest in time. Drag it elsewhere or remove it.")
                         chip._props.update({"draggable": "true", "ondragstart": drag.format(src=f"e:{n}:{m}"),
                                             "ondragend": "this.style.opacity=1", "ondragover": over,
                                             "ondragleave": leave, "ondrop": drop.format(dst=f"e:{n}:{m}")})
                         with chip:
                             ui.icon("drag_indicator").classes("text-gray-400 text-sm")
                             ui.label(names[entry["key"]]).classes("text-sm")
+                            if added:
+                                ui.label("added by the app").classes("text-xs text-amber-700 italic")
                             ui.select(themes.PICKS, value=entry["pick"],
                                       on_change=lambda e, n=n, m=m: self.edit_entry(n, m, pick=e.value)) \
                                 .props("dense borderless options-dense").classes("text-xs w-36")
@@ -2243,6 +2250,14 @@ class Page:
             return (f"Not enough shots for {fmt_length(seconds)}: {shots:.0f} shots fill about "
                     f"{fmt_length(shots * longest)}. Make it shorter or add a theme.")
         return ""
+
+    def _block_times(self, blocks: list[dict]) -> dict[str, float]:
+        """Each theme block's middle time (when most of it was filmed), to place a theme the AI left out."""
+        split = set(self.trip.storyline()["split"])
+        times: dict[str, list[float]] = {}
+        for r in self.trip.theme_rows():
+            times.setdefault(themes.block_of(r, split), []).append(datetime.fromisoformat(r["taken_at"]).timestamp())
+        return {b["key"]: sorted(times[b["key"]])[len(times[b["key"]]) // 2] for b in blocks if times.get(b["key"])}
 
     def _story_blocks_info(self, blocks: list[dict]) -> list[dict]:
         """What the AI hears about each theme: its name, how many shots, which days and where."""
@@ -2338,6 +2353,12 @@ class Page:
         else:
             ui.notify(f"Your story is ready: {story['title'] or 'have a look'}. Change anything below, then Make the "
                       "first cut.", type="positive", multi_line=True)
+        missing = len(themes.left_out(story, blocks))
+        story = themes.add_missing(story, blocks, self._block_times(blocks))
+        if missing:
+            ui.notify(f"{missing} theme{'s' if missing > 1 else ''} weren't in the story, so the app added "
+                      f"{'them' if missing > 1 else 'it'} where filmed nearest in time (orange, \"added by the app\"). "
+                      "Drag or remove as you like.", multi_line=True, timeout=12000)
         counts = {b["key"]: b["count"] for b in blocks}
         for p in story["parts"]:  # without the AI's times: by how many shots each part has
             if not p.get("seconds"):

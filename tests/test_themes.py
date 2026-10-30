@@ -156,3 +156,21 @@ def test_my_story_keeps_the_order_of_the_themes_and_ends_with_the_last_one():
     order = [r["theme"] for r in ordered]
     blocks = [k for k, _ in __import__("itertools").groupby(order)]
     assert blocks == ["Sightseeing", "Boat", "Food & drink"]  # no finale mixing them up after the last one
+
+
+def test_every_theme_goes_into_the_story():
+    blocks = [{"key": k, "on": True} for k in ("Boat|", "Food|", "Beach|", "Kite|", "Travel|")]
+    when = {"Boat|": 100.0, "Food|": 210.0, "Beach|": 200.0, "Kite|": 300.0, "Travel|": 400.0}
+    story = {"parts": [{"name": "Start", "entries": [{"key": "Boat|", "pick": "all"}]},
+                       {"name": "Middle", "entries": [{"key": "Beach|", "pick": "all"}]},
+                       {"name": "End", "entries": [{"key": "Travel|", "pick": "all"}]}]}
+    out = themes.add_missing(story, blocks, when)
+    assert themes.left_out(out, blocks) == []
+    middle = [e["key"] for e in out["parts"][1]["entries"]]
+    assert middle == ["Beach|", "Food|", "Kite|"]  # nearest in time; never into the last part
+    assert [e["key"] for e in out["parts"][2]["entries"]] == ["Travel|"]
+    assert all(e.get("added") for e in out["parts"][1]["entries"][1:])
+    assert story["parts"][1]["entries"] == [{"key": "Beach|", "pick": "all"}]  # the AI's answer is untouched
+    one = themes.add_missing({"parts": [{"entries": [{"key": "Boat|", "pick": "all"},
+                                                     {"key": "Travel|", "pick": "all"}]}]}, blocks, when)
+    assert one["parts"][0]["entries"][-1]["key"] == "Travel|"  # the last theme stays last

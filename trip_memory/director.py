@@ -234,7 +234,9 @@ Rules:
 - Follow the person's order strictly: what they name first comes first, what they say to end with comes last.
 - Match each thing they mention to the theme number that fits it best (by activity and person). Never use a theme
   for something it is not; if nothing fits, leave it out.
-- Themes they don't mention are left out, unless they say "everything else" or "the rest": then those go there.
+- Use EVERY theme at least once: the person wants all of them in the video. Themes they don't mention go where
+  they fit best by day and place (e.g. a meal into the part of the day it was eaten), or where they say "everything
+  else" or "the rest". Never put one before what they named first or after what they said to end with.
 - Give each part a length in seconds. All parts together must add up to {seconds} seconds. Give more time to what
   the person cares about most and to themes with many shots; a part needs at least 4 seconds per 2 shots.
 Answer:

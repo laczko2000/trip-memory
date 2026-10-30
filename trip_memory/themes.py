@@ -339,6 +339,37 @@ def left_out(story: dict, blocks: list[dict]) -> list[dict]:
     return [b for b in blocks if b.get("on", True) and b["key"] not in used]
 
 
+def add_missing(story: dict, blocks: list[dict], when: dict[str, float]) -> dict:
+    """Your story with every theme in it: a theme the AI (or your words) left out goes into the part whose themes
+    were filmed nearest in time to it (never into the last part, which ends the video, unless it is the only one),
+    marked "added" so you can see the app put it there. when: block key -> its middle time (seconds)."""
+    parts = [dict(p, entries=list(p.get("entries") or [])) for p in story.get("parts") or []]
+    missing = left_out({"parts": parts}, blocks)
+    if not parts or not missing:
+        return dict(story, parts=parts)
+
+    def middle(part: dict) -> float | None:
+        times = sorted(when[e["key"]] for e in part["entries"] if e["key"] in when)
+        return times[len(times) // 2] if times else None
+
+    choices = list(range(len(parts) - 1)) or [0]
+    for block in sorted(missing, key=lambda b: when.get(b["key"], 0.0)):
+        at = when.get(block["key"])
+        mids = {k: middle(parts[k]) for k in choices}
+        known = [k for k in choices if mids[k] is not None]
+        k = min(known, key=lambda k: abs(mids[k] - at)) if at is not None and known else choices[-1]
+        entry = {"key": block["key"], "pick": "all", "added": True}
+        # inside the part, by time among the other added ones, after what the AI chose (that order is yours)
+        spot = len(parts[k]["entries"])
+        while spot > 0 and parts[k]["entries"][spot - 1].get("added") and \
+                when.get(parts[k]["entries"][spot - 1]["key"], 0.0) > (at or 0.0):
+            spot -= 1
+        if k == len(parts) - 1 and parts[k]["entries"]:  # the very last theme stays last
+            spot = min(spot, len(parts[k]["entries"]) - 1)
+        parts[k]["entries"].insert(spot, entry)
+    return dict(story, parts=parts)
+
+
 # ---------- time per part ----------
 
 FINALE_SHARE = 0.12  # the finale's share of the video (as in Auto-edit)
