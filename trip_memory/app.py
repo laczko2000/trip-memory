@@ -19,6 +19,7 @@ from nicegui import app, run, ui
 from .catalog import Trip, app_dir
 from .media import MediaItem
 from . import director
+from . import looks
 from . import titles
 from . import stories
 from . import music as free_music
@@ -133,6 +134,7 @@ class Page:
         self.media_route: str | None = None
         self.auto_length: object = None
         self.auto_limits = AutoLimits(**load_settings().get("limits", {}))
+        self.look_previews: dict[tuple[str, str], str] = {}  # (picture, look) -> a small preview
         self.song_maps: dict = {}
         self.dirty = False
         self.last_refresh = 0.0
@@ -336,6 +338,7 @@ class Page:
         self.people_view.refresh()
         self.video_summary.refresh()
         self.titles_card.refresh()
+        self.looks_card.refresh()
         self.storyboard_view.refresh()
         self.stories_view.refresh()
         self.director_card.refresh()
@@ -1035,6 +1038,7 @@ class Page:
             transition=self.transition.value,
             transition_seconds=self.t_len.value,
             music_volume=self.music_vol.value,
+            look=self.trip.look() if self.trip else "natural",
         )
 
     # ---------- Music: tap your own cuts ----------
@@ -2055,6 +2059,7 @@ class Page:
 
     def build_video(self) -> None:
         self.video_summary()
+        self.looks_card()
         self.titles_card()
         with ui.card().classes("w-full"):
             ui.label("Style").classes("text-lg font-semibold")
@@ -2090,6 +2095,46 @@ class Page:
             self.render_status = ui.label("")
             self.result_box = ui.column().classes("w-full")
             self.render_progress.set_visibility(False)
+
+    @ui.refreshable
+    def looks_card(self) -> None:
+        """One colour mood for the whole video, chosen from small previews of one of your own shots."""
+        if not self.trip or not self.items or not self.showing("Make video"):
+            return
+        board = self.trip.storyboard()
+        sample = next((it["thumb"] for it in board if it.get("thumb")), None)
+        chosen = self.trip.look()
+        with ui.card().classes("w-full"):
+            ui.label("Look").classes("text-lg font-semibold")
+            ui.label("One colour mood for the whole video. Click one; changing it later is quick (the clips are "
+                     "not prepared again).").classes("text-sm text-gray-600")
+            with ui.row().classes("gap-3"):
+                for name, (label, _) in looks.LOOKS.items():
+                    on = name == chosen
+                    with ui.column().classes("items-center gap-1 cursor-pointer p-1 rounded " +
+                                             ("ring-4 ring-blue-500" if on else "")) \
+                            .on("click", lambda n=name: self.set_look(n)):
+                        image = ui.image("").style("width:150px;height:84px;object-fit:cover;background:#e5e7eb")
+                        ui.label(("✓ " if on else "") + label).classes("text-sm" + (" font-semibold" if on else ""))
+                    if sample:
+                        self.show_look_preview(image, sample, name)
+
+    def show_look_preview(self, image, sample: str, name: str) -> None:
+        key = (sample, name)
+        if key in self.look_previews:
+            image.set_source(self.look_previews[key])
+            return
+
+        async def make() -> None:
+            self.look_previews[key] = await run.io_bound(looks.preview, sample, name)
+            image.set_source(self.look_previews[key])
+
+        ui.timer(0.05, make, once=True)
+
+    def set_look(self, name: str) -> None:
+        self.trip.set_look(name)
+        ui.notify(f"Look: {looks.LOOKS[name][0]}")
+        self.looks_card.refresh()
 
     @ui.refreshable
     def titles_card(self) -> None:

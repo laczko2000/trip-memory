@@ -260,3 +260,19 @@ def test_shake_on_a_hit_and_a_freeze_frame_with_a_name(tmp_path):
     assert np.abs(late - later).mean() < 2  # the picture holds still
     corner = (slice(260, 340), slice(30, 200))  # the name, bottom left
     assert late[corner].min(axis=2).max() > 220 > _frame(frozen, 1.0)[corner].min(axis=2).max()
+
+
+def test_a_look_colours_the_whole_video(tmp_path):
+    from trip_memory import looks
+
+    trip = tmp_path / "trip"
+    trip.mkdir()
+    make_clip(trip / "a.mp4", "640x360", 2, "2025-07-03T10:00:00Z")
+    Image.new("RGB", (400, 300), (200, 60, 30)).save(trip / "b.jpg")
+    items = scan_folder(trip)[0]
+    out = render(items, RenderSettings(width=640, height=360, photo_seconds=2, look="mono"), tmp_path / "bw.mp4")
+    for t in (1.0, 2.8):
+        rgb = _frame(out, t).astype(int)
+        assert abs(rgb[..., 0] - rgb[..., 2]).mean() < 6  # no colour left
+    warm = looks.preview(trip / "b.jpg", "summer")
+    assert warm.startswith("data:image/jpeg;base64,") and warm != looks.preview(trip / "b.jpg", "natural")

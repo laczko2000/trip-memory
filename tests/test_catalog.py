@@ -415,3 +415,15 @@ def test_video_doubles_are_found_on_several_frames(tmp_path, monkeypatch):
     assert by_name["take2.mp4"]["best"] and not by_name["take1.mp4"]["best"]  # the longer take wins (same sharpness)
     trip.untick_doubles()
     assert not {Path(i["path"]).name: i for i in trip.items()}["take1.mp4"]["chosen"]
+
+
+def test_the_look_is_kept_per_trip(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    (tmp_path / "trip").mkdir()
+    trip = catalog.Trip(tmp_path / "trip")
+    assert trip.look() == "natural"
+    trip.set_look("film")
+    assert catalog.Trip(tmp_path / "trip").look() == "film"
+    trip.set_look("nonsense")
+    assert trip.look() == "natural"

@@ -167,6 +167,8 @@ Turn their words into settings for the app:
 - slow_motion: true for slow motion in calm moments.
 - camera_effects: true for zooms, punch-ins and speed ramps.
 - title: the opening title if they asked for one or the wish suggests a good one; else empty.
+- look: the colour mood if the wish suggests one: "summer" (warm), "vivid", "film" (grain, vintage),
+  "cool" (blue hour), "mono" (black and white), "natural"; empty to keep the current one.
 Answer in JSON."""
 
 WISH_SCHEMA = {
@@ -182,9 +184,10 @@ WISH_SCHEMA = {
         "slow_motion": {"type": "boolean"},
         "camera_effects": {"type": "boolean"},
         "title": {"type": "string"},
+        "look": {"type": "string", "enum": ["", "natural", "summer", "vivid", "film", "cool", "mono"]},
     },
     "required": ["summary", "length_seconds", "stories", "people", "focus", "pace", "teaser", "slow_motion",
-                 "camera_effects", "title"],
+                 "camera_effects", "title", "look"],
     "additionalProperties": False,
 }
 
@@ -467,4 +470,5 @@ def clean_wish(answer: dict, count: int, people: list[str]) -> dict:
         "teaser": bool(answer.get("teaser")), "slow_motion": bool(answer.get("slow_motion", True)),
         "camera_effects": bool(answer.get("camera_effects", True)),
         "title": " ".join(str(answer.get("title", "")).split())[:60],
+        "look": answer.get("look") if answer.get("look") in ("natural", "summer", "vivid", "film", "cool", "mono") else "",
     }

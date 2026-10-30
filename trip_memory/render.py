@@ -24,6 +24,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 from . import titles
+from .looks import look_filter
 from .media import MediaItem
 from .transitions import MIXED, STYLES, ZOOM_INTO, ZOOM_OUT_OF, seconds_of
 from .tools import FFmpegError, has_encoder, has_filter, probe, run_ffmpeg
@@ -83,6 +84,7 @@ class RenderSettings:
     music_volume: float = 0.5
     end_black: float = 0.0  # seconds of black at the very end (the last shot fades into it, the music fades out)
     end_title: dict | None = None  # words shown on that black ending (see titles.py)
+    look: str = "natural"  # the colour mood of the whole video (see looks.py)
 
 
 def _fit_with_blur(src: str, w: int, h: int, out: str) -> str:
@@ -668,7 +670,8 @@ def _join_once(
 
     # Gentle fade in from black at the start and out at the end.
     edge = min(1.0, total / 4)
-    parts.append(f"[{v_prev}]fade=t=in:d={edge:.2f},fade=t=out:st={total - edge:.3f}:d={edge:.2f}[vout]")
+    parts.append(f"[{v_prev}]format=yuv420p{look_filter(s.look)},format=yuv420p,"
+                 f"fade=t=in:d={edge:.2f},fade=t=out:st={total - edge:.3f}:d={edge:.2f}[vout]")
     sound = f"[{a_prev}]afade=t=in:d={edge:.2f},afade=t=out:st={total - edge:.3f}:d={edge:.2f}"
 
     if s.music_path:

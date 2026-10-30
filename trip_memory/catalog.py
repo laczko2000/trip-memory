@@ -30,6 +30,7 @@ from . import autoedit, director, motion, stories
 from .scenes import SceneTagger, mean_vector
 from .tags import TAG_GROUP, Tagger, group_name, look_alike_groups, people_tag, story_subject
 from .tools import ffmpeg_paths, probe
+from .looks import LOOKS
 from .render import RAMP_SOURCE, held, source_factor
 
 
@@ -376,6 +377,14 @@ class Trip:
         rows = self.query("SELECT value FROM meta WHERE key = 'titles'")
         saved = {**(json.loads(rows[0]["value"]) if rows else {}), **values}
         self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('titles', ?)", (json.dumps(saved),))
+
+    def look(self) -> str:
+        """The colour mood of the whole video (a key of looks.LOOKS)."""
+        rows = self.query("SELECT value FROM meta WHERE key = 'look'")
+        return rows[0]["value"] if rows and rows[0]["value"] in LOOKS else "natural"
+
+    def set_look(self, name: str) -> None:
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('look', ?)", (name if name in LOOKS else "natural",))
 
     def set_shot_title(self, path: str, text: str, sub: str = "", style: str = "clean", where: str = "") -> None:
         """Your own words over a shot (empty: none, the automatic title shows if there is one)."""
@@ -1312,6 +1321,8 @@ class Trip:
             self._use_stories([stories[n - 1]["key"] for n in answer["stories"]])
         if answer["title"]:
             self.set_title_settings(trip_title=answer["title"])
+        if answer["look"]:
+            self.set_look(answer["look"])
         saved = {"wish": " ".join(wish.split()), **answer,
                  "story_names": [stories[n - 1]["name"] for n in answer["stories"]]}
         self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('wish', ?)", (json.dumps(saved),))
