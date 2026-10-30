@@ -35,6 +35,7 @@ from .tags import ALL_TAGS, EDITABLE_TAGS, TAG_GROUP
 OUTPUT_DIR = Path.home() / "Movies" / "Trip Memory"
 RESOLUTIONS = {"Full HD (1080p)": (1920, 1080), "HD (720p, faster)": (1280, 720),
                "Phone, upright 9:16 (Instagram, TikTok)": (1080, 1920)}
+PHONE = "Phone, upright 9:16 (Instagram, TikTok)"
 PAGE_SIZE = 48
 TILES_PER_PAGE = 60  # Choose files draws this many at a time as you scroll
 STORY_ROWS = 60
@@ -341,6 +342,7 @@ class Page:
 
     def refresh_all(self) -> None:
         self.reload()
+        self.sync_video_size()
         self.choose_view.refresh()
         self.filters_view.refresh()
         self.gallery.refresh()
@@ -1204,24 +1206,8 @@ class Page:
                 ui.button("Plan the stories", icon="movie_filter", on_click=lambda: self.plan_stories(None)) \
                     .tooltip("For every story: a theme, and its shots in order as opening, montage, highlight, "
                              "slow moment and ending. Auto-edit then cuts each story that way.")
-                ui.button("Suggest storylines", icon="lightbulb", on_click=self.suggest_storylines)
-            if chosen and not described:
-                ui.label("Tip: describe the clips first, so the storylines know what is in each story.") \
-                    .classes("text-xs text-gray-500")
-            saved = self.trip.saved_storylines()
-            if saved:
-                used = self.trip.storyline_used()
-                names = {s["key"]: s["name"] for s in self.trip.stories()}
-                with ui.row().classes("w-full gap-3 items-stretch"):
-                    for i, line in enumerate(saved["storylines"]):
-                        on = i == used
-                        with ui.card().classes("p-3 flex-1 min-w-60" + (" ring-2 ring-indigo-500" if on else "")):
-                            ui.label(line["title"]).classes("font-semibold")
-                            ui.label(line["idea"]).classes("text-sm text-gray-600")
-                            ui.label(" → ".join(saved["names"].get(k) or names.get(k, "?") for k in line["stories"])) \
-                                .classes("text-xs text-gray-500")
-                            ui.button("Using this" if on else "Use this", icon="check" if on else None,
-                                      on_click=lambda i=i: self.use_storyline(i)).props("dense" + (" outline" if on else ""))
+            ui.label("Which stories go in the video, and in what order, is chosen in the Storyboard: tell the app the "
+                     "video you want there.").classes("text-xs text-gray-500")
 
     def director_ready(self, ai: dict) -> bool:
         if ai.get("provider") == "claude":
@@ -1342,31 +1328,6 @@ class Page:
         ui.notify("Plans ready: open a story's plan below to see or change it. Make a first cut in the Storyboard "
                   "to use them.", type="positive", multi_line=True)
 
-    async def suggest_storylines(self) -> None:
-        if self.busy():
-            return
-        ai = self.make_director()
-        if not ai:
-            return
-        note = ui.notification("The AI is thinking about storylines (up to a minute or two on this Mac)…",
-                               spinner=True, timeout=None)
-        self.ai_busy = True
-        self.ai_bar.props("indeterminate")
-        self.ai_bar.set_visibility(True)
-        self.ai_label.text = "The AI is thinking about storylines…"
-        try:
-            if await self.stoppable(self.trip.suggest_storylines, ai) is not None:
-                ui.notify("Storylines ready below. Pick one with Use this.", type="positive")
-        except director.DirectorError as exc:
-            ui.notify(str(exc), type="warning", multi_line=True, timeout=10000)
-        except Exception as exc:
-            traceback.print_exc()
-            ui.notify(f"Stopped: {exc}", type="negative")
-        finally:
-            note.dismiss()
-            self.ai_busy = False
-        self.director_card.refresh()
-
     async def stoppable(self, fn, *args):
         """Run one AI request; Stop gives up waiting for it straight away (its answer is then thrown away).
         None when stopped."""
@@ -1387,15 +1348,6 @@ class Page:
         if getattr(self, "ai_stopped", None) is not None:
             self.ai_stopped.set()
         ui.notify("Stopping the AI. Everything it finished is kept; the rest is left as it was.", type="info")
-
-    def use_storyline(self, index: int) -> None:
-        self.trip.apply_storyline(index)
-        if self.auto_limits.storyline != "stories":
-            # A teaser or date order would pull shots out of the storyline's stories.
-            self.set_limit("storyline", "stories")
-        ui.notify("Stories put in this order; the Storyboard now follows it, story by story. "
-                  "Make a first cut again to fit it to the music.", type="positive")
-        self.refresh_all()
 
     @ui.refreshable
     def stories_view(self) -> None:
@@ -1601,39 +1553,83 @@ class Page:
     }
 
     def wish_card(self) -> None:
-        """Type the video you want: the AI picks the stories, people, pace and length, then Auto-edit makes it."""
+        """The one place where the AI shapes the whole video: describe it (or leave it empty to be surprised), the AI
+        offers 3 versions and the first is cut straight away. What you set yourself is never overwritten."""
         wish = self.trip.wish()
         with ui.card().classes("w-full bg-amber-50"):
-            ui.label("🎬 Tell the app the video you want").classes("text-lg font-semibold")
-            box = ui.textarea(placeholder="For example: " + self.WISH_EXAMPLES[0],
+            ui.label("🎬 The video you want").classes("text-lg font-semibold")
+            self.following_line(wish)
+            box = ui.textarea(placeholder="Describe the video you want, in as many words as you like. Leave it empty "
+                                          "and the AI surprises you.",
                               value=(wish or {}).get("wish", "")).props("outlined autogrow").classes("w-full")
             with ui.row().classes("gap-2 items-center"):
                 for example in self.WISH_EXAMPLES:
                     ui.chip(example, on_click=lambda e=example: box.set_value(e)).props("outline clickable dense")
             with ui.row().classes("items-center gap-3"):
                 ui.button("Make this video", icon="movie_filter", on_click=lambda: self.make_wish(box.value))
-                ui.label("The AI chooses the stories, who and what to show more of, the pace and the length; then "
-                         "Auto-edit makes the first cut (below, with your song if you chose one). Describe the clips "
-                         "first, so it knows what is in them.").classes("text-sm text-gray-600 flex-1")
+                ui.label("The AI offers 3 versions and cuts the first one to your song straight away. Story names you "
+                         "typed, stories you switched on or off and your titles stay as you set them. Describe the "
+                         "clips first (Stories tab), so it knows what is in them.").classes("text-sm text-gray-600 flex-1")
+            versions = (wish or {}).get("versions") or []
+            if len(versions) > 1:
+                with ui.row().classes("w-full gap-3 items-stretch"):
+                    for i, v in enumerate(versions):
+                        on = i == wish.get("used", 0)
+                        with ui.card().classes("p-3 flex-1 min-w-60" + (" ring-2 ring-amber-500" if on else "")):
+                            ui.label(f"Version {i + 1}: {v.get('name') or 'no name'}").classes("font-semibold")
+                            if v.get("idea"):
+                                ui.label(v["idea"]).classes("text-sm text-gray-600")
+                            if v.get("story_names"):
+                                ui.label(" → ".join(v["story_names"])).classes("text-xs text-gray-500")
+                            ui.label(self.version_words(v)).classes("text-xs text-gray-500")
+                            ui.button("Using this" if on else "Use this", icon="check" if on else None,
+                                      on_click=lambda i=i: self.use_version(i)) \
+                                .props("dense" + (" outline" if on else "")).set_enabled(not on)
+
+    def version_words(self, v: dict) -> str:
+        bits = [f"{v.get('pace', 'medium')} pace"]
+        if v.get("look"):
+            bits.append(looks.LOOKS.get(v["look"], (v["look"],))[0])
+        if v.get("teaser"):
+            bits.append("opens with a teaser")
+        if v.get("slow_motion"):
+            bits.append("slow motion")
+        return " · ".join(bits)
+
+    def following_line(self, wish: dict | None) -> None:
+        """One line saying what the video follows now, what you set yourself, and Undo."""
+        with ui.column().classes("w-full gap-1 p-2 rounded bg-white"):
             if wish:
-                with ui.column().classes("gap-1 w-full mt-1"):
-                    ui.label(f"Last time: {wish['summary']}" if wish.get("summary") else "Your last wish:").classes("text-sm")
-                    bits = []
-                    if wish.get("story_names"):
-                        bits.append("Stories: " + " → ".join(wish["story_names"]))
-                    if wish.get("people") or wish.get("focus"):
-                        bits.append("More of: " + ", ".join(wish.get("people", []) + wish.get("focus", [])))
-                    bits.append(f"Pace: {wish.get('pace', 'medium')}" +
-                                (f" · {fmt_length(wish['length_seconds'])}" if wish.get("length_seconds") else ""))
-                    ui.label(" · ".join(bits)).classes("text-xs text-gray-600")
-                    if wish.get("people") or wish.get("focus"):
-                        ui.button("Stop showing more of these", icon="close", on_click=self.forget_wish) \
-                            .props("flat dense size=sm")
+                music = self.music_path()
+                length = fmt_length(wish["length_seconds"]) if wish.get("length_seconds") else (
+                    "as long as the song" if music else fmt_length(180))
+                size = "upright for phones" if self.trip.video_size() == "phone" else "landscape"
+                name = f"Version {wish.get('used', 0) + 1}: {wish['name']}" if wish.get("name") else "Your wish"
+                ui.label(f"Following: {name} · {length} · {self.version_words(wish)} · {size}") \
+                    .classes("text-sm font-medium text-amber-900")
+                if wish.get("summary"):
+                    ui.label(wish["summary"]).classes("text-xs text-gray-600")
+                if wish.get("people") or wish.get("focus"):
+                    ui.label("More of: " + ", ".join(wish.get("people", []) + wish.get("focus", []))) \
+                        .classes("text-xs text-gray-600")
+            else:
+                ui.label("Following: your own settings in Auto-edit below (no wish yet).") \
+                    .classes("text-sm font-medium text-gray-700")
+            mine = self.trip.hand_changes()
+            with ui.row().classes("items-center gap-2"):
+                if mine:
+                    ui.label("Kept as you set them: " + ", ".join(mine) + ".").classes("text-xs text-gray-600")
+                    if any("switched" in m for m in mine):
+                        ui.button("Let the AI choose the stories again", on_click=self.forget_my_story_switches) \
+                            .props("flat dense no-caps size=sm")
+                undo = self.trip.undo_label()
+                if undo:
+                    ui.button(f"Undo {undo}", icon="undo", on_click=self.undo).props("flat dense no-caps size=sm")
+                if wish:
+                    ui.button("Stop following the wish", icon="close", on_click=self.forget_wish) \
+                        .props("flat dense no-caps size=sm")
 
     async def make_wish(self, text: str) -> None:
-        if not (text or "").strip():
-            ui.notify("Type the video you want first, or click one of the examples.", type="warning")
-            return
         if self.busy():
             return
         ai = self.make_director()
@@ -1641,10 +1637,10 @@ class Page:
             return
         music = self.music_path()
         song = self.song_maps.get(music) if music else None
-        note = ui.notification("The AI is reading your wish…", spinner=True, timeout=None)
+        note = ui.notification("The AI is thinking about your video…", spinner=True, timeout=None)
         self.ai_busy = True
         try:
-            wish = await self.stoppable(self.trip.make_wish, ai, text, song.duration if song else None)
+            wish = await self.stoppable(self.trip.make_wish, ai, text or "", song.duration if song else None)
             if wish is None:
                 return
         except director.DirectorError as exc:
@@ -1657,20 +1653,67 @@ class Page:
         finally:
             note.dismiss()
             self.ai_busy = False
-        for key, value in self.PACES[wish["pace"]].items():
-            setattr(self.auto_limits, key, value)
-        self.auto_limits.storyline = "teaser" if wish["teaser"] else "stories"
-        self.auto_limits.speed_effects = wish["slow_motion"]
-        self.auto_limits.camera_effects = wish["camera_effects"]
-        save_settings(limits=asdict(self.auto_limits))
-        self.auto_length = wish["length_seconds"] or ("song" if music else 180)
+        self.sync_video_size()
         ui.notify(wish["summary"] or "Got it. Making the first cut…", type="info", multi_line=True)
+        await self.run_auto_edit()
+
+    async def use_version(self, index: int) -> None:
+        if self.busy():
+            return
+        self.trip.use_version(index)
         await self.run_auto_edit()
 
     def forget_wish(self) -> None:
         self.trip.forget_wish()
-        ui.notify("Auto-edit no longer favours those people and things.")
+        ui.notify("The video no longer follows the wish: Auto-edit's own settings are back (Undo brings the wish back).")
         self.storyboard_view.refresh()
+
+    def forget_my_story_switches(self) -> None:
+        self.trip.forget_my_story_switches()
+        ui.notify("The AI chooses the stories again from its next version or first cut.")
+        self.storyboard_view.refresh()
+
+    def undo(self) -> None:
+        if self.busy():
+            return
+        label = self.trip.undo()
+        if label:
+            ui.notify(f"Undone: {label}. Everything is back as it was before.", type="positive")
+        self.sync_video_size()
+        self.refresh_all()
+
+    def sync_video_size(self) -> None:
+        """The Video size in Make video follows the trip's (a wish for Instagram makes it upright)."""
+        if not getattr(self, "resolution", None) or not self.trip:
+            return
+        if self.trip.video_size() == "phone" and self.resolution.value != PHONE:
+            self.resolution.set_value(PHONE)
+        elif self.trip.video_size() == "landscape" and self.resolution.value == PHONE:
+            self.resolution.set_value("Full HD (1080p)")
+
+    def video_size_changed(self, value: str) -> None:
+        if self.trip:
+            self.trip.set_video_size("phone" if value == PHONE else "landscape")
+
+    def limits_now(self) -> AutoLimits:
+        """Auto-edit's settings: from the wish you follow, else your own."""
+        limits = AutoLimits(**asdict(self.auto_limits))
+        wish = self.trip.wish() if self.trip else None
+        if wish:
+            for key, value in self.PACES[wish.get("pace", "medium")].items():
+                setattr(limits, key, value)
+            limits.storyline = "teaser" if wish.get("teaser") else "stories"
+            limits.speed_effects = bool(wish.get("slow_motion", True))
+            limits.camera_effects = bool(wish.get("camera_effects", True))
+        return limits
+
+    def length_now(self) -> object:
+        """How long the first cut should be: the wish's length, else the one you chose (as long as the song)."""
+        music = self.music_path()
+        wish = self.trip.wish() if self.trip else None
+        if wish:
+            return wish.get("length_seconds") or ("song" if music else 180)
+        return self.auto_length or ("song" if music else 180)
 
     def auto_edit_card(self) -> None:
         music = self.music_path()
@@ -1681,6 +1724,15 @@ class Page:
             self.song_line(music, pins)
             if music:
                 self.music_map_view(music)
+            wish = self.trip.wish()
+            if wish:  # the wish sets length, pace and effects: one button, nothing to contradict it
+                length = self.length_now()
+                with ui.row().classes("w-full items-center gap-4 mt-2"):
+                    ui.button("Make a new cut", icon="auto_fix_high", on_click=self.run_auto_edit)
+                    ui.label(f"Following your wish: {fmt_length(length) if isinstance(length, (int, float)) else 'as long as the song'}"
+                             f", {wish.get('pace', 'medium')} pace. To set length and pace yourself, stop following "
+                             "the wish (above).").classes("text-sm text-gray-600 flex-1")
+                return
             # Length, then go
             with ui.row().classes("w-full items-center gap-4 mt-2"):
                 lengths = {60: "1 minute", 120: "2 minutes", 180: "3 minutes", 300: "5 minutes", 600: "10 minutes",
@@ -1694,7 +1746,8 @@ class Page:
                     self.auto_length = "song" if music else 180
                 ui.select(lengths, value=self.auto_length, label="Length",
                           on_change=lambda e: setattr(self, "auto_length", e.value)).classes("w-48")
-                ui.button("Make a first cut", icon="auto_fix_high", on_click=self.confirm_auto_edit)
+                ui.button("Make a first cut", icon="auto_fix_high", on_click=self.run_auto_edit) \
+                    .tooltip("Replaces the storyboard's order, trims and transitions; Undo (above) brings them back")
             with ui.expansion("More settings: shot lengths, storyline, beats, effects", icon="tune") \
                     .classes("w-full").props("dense"):
                 self.auto_edit_settings(limits, pins)
@@ -1829,26 +1882,14 @@ class Page:
         music = (self.music_input.value or "").strip().strip("'\"") if hasattr(self, "music_input") else ""
         return music if music and Path(music).expanduser().is_file() else None
 
-    def confirm_auto_edit(self) -> None:
-        with ui.dialog() as dialog, ui.card():
-            ui.label("Make a first cut?").classes("text-lg font-semibold")
-            ui.label("This replaces what's in the storyboard now: which files are in, their order, trims and transitions. "
-                     "Your files, people and tags are not touched.")
-            with ui.row().classes("justify-end w-full"):
-                ui.button("Cancel", on_click=dialog.close).props("flat")
-                async def make_it() -> None:
-                    dialog.close()
-                    await self.run_auto_edit()
-
-                ui.button("Make it", on_click=make_it)
-        dialog.open()
-
     async def run_auto_edit(self) -> None:
         music = self.music_path()
         s = self.settings_now()
         style = s.transition if TRANSITIONS.get(s.transition, "fade") not in (None, "mixed") else "Fade"
-        target = self.auto_length
-        limits = AutoLimits(**asdict(self.auto_limits))
+        if self.trip.progress.running:
+            return
+        target = self.length_now()
+        limits = self.limits_now()
         note = ui.notification("Making a first cut…", spinner=True, timeout=None)
 
         def work() -> object:
@@ -2123,7 +2164,9 @@ class Page:
             ui.label("Style").classes("text-lg font-semibold")
             with ui.grid(columns=2).classes("w-full gap-4"):
                 self.transition = ui.select(list(TRANSITIONS), value="Fade", label="Transition")
-                self.resolution = ui.select(list(RESOLUTIONS), value="Full HD (1080p)", label="Video size")
+                self.resolution = ui.select(list(RESOLUTIONS), label="Video size",
+                                            value=PHONE if self.trip and self.trip.video_size() == "phone" else "Full HD (1080p)",
+                                            on_change=lambda e: self.video_size_changed(e.value))
                 with ui.column():
                     ui.label("Transition length (seconds)").classes("text-sm text-gray-500")
                     self.t_len = ui.slider(min=0.3, max=2.0, step=0.1, value=0.8).props("label-always").classes("mt-8")
@@ -2212,7 +2255,7 @@ class Page:
             with ui.row().classes("w-full items-end gap-3"):
                 ui.switch("Opening title", value=t["opening"], on_change=lambda e: save(opening=e.value)).classes("w-44")
                 first = ui.input("Title", value=t["trip_title"]).classes("w-64")
-                first.on("blur", lambda: save(trip_title=first.value))
+                first.on("blur", lambda: first.value != t["trip_title"] and save(trip_title=first.value))
                 second = ui.input("Second line", value=t["trip_sub"]).classes("w-64")
                 second.on("blur", lambda: save(trip_sub=second.value))
                 ui.select(styles, value=t["style"], label="Style", on_change=lambda e: save(style=e.value)).classes("w-48")

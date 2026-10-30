@@ -210,9 +210,15 @@ def test_storyline_names_saved_by_older_versions_become_the_ais(trip):
 class FakeWisher(FakeDirector):
     def wish(self, prompt):
         self.prompts.append(prompt)
-        return {"summary": "A lively minute at the beach.", "length_seconds": 60, "stories": [3, 1, 3, 8],
-                "people": ["anna", "Zoe"], "focus": ["Beaches", ""], "pace": "lively", "teaser": False,
-                "slow_motion": False, "camera_effects": True, "title": "Sun and sand"}
+        return {"summary": "A lively minute at the beach.", "length_seconds": 60, "format": "phone",
+                "people": ["anna", "Zoe"], "focus": ["Beaches", ""], "title": "Sun and sand",
+                "versions": [
+                    {"name": "Beach only", "idea": "The sea.", "stories": [3, 1, 3, 8], "pace": "lively",
+                     "teaser": False, "slow_motion": False, "camera_effects": True, "look": "summer"},
+                    {"name": "Day by day", "idea": "In order.", "stories": [1, 2, 3], "pace": "calm",
+                     "teaser": True, "slow_motion": True, "camera_effects": False, "look": ""},
+                ],
+                "names": [{"story": 1, "name": "Morning swim"}]}
 
 
 def test_type_the_video_you_want(trip):
@@ -221,24 +227,71 @@ def test_type_the_video_you_want(trip):
     ai = FakeWisher()
     wish = trip.make_wish(ai, "  a lively minute,\n beach only ", 95.0)
     assert '"a lively minute, beach only"' in ai.prompts[0] and "Anna" in ai.prompts[0] and "1.6 minutes" in ai.prompts[0]
-    assert wish["stories"] == [3, 1] and wish["people"] == ["Anna"] and wish["focus"] == ["beaches"]
+    assert [Path(k).name for k in wish["stories"]] == ["c.jpg", "a.jpg"] and wish["name"] == "Beach only"
+    assert wish["people"] == ["Anna"] and wish["focus"] == ["beaches"] and len(wish["versions"]) == 2
     assert wish["length_seconds"] == 60 and wish["pace"] == "lively" and not wish["slow_motion"]
-    assert trip.title_settings()["trip_title"] == "Sun and sand"
+    assert trip.title_settings()["trip_title"] == "Sun and sand" and trip.look() == "summer"
+    assert trip.video_size() == "phone"  # "Instagram" means an upright video
     stories = trip.stories()
     assert [Path(s["items"][0]["path"]).name for s in stories if s["enabled"]] == ["c.jpg", "a.jpg"]
+    assert stories[1]["name"] == "Morning swim"
     assert trip.wish()["summary"] == "A lively minute at the beach."
 
     # The beach shots (the AI called them sandy beaches) are favoured; the pool shot would lose points.
     assert {Path(r["path"]).name: r["wish"] for r in trip.auto_edit_pool()} == {"c.jpg": 1.0, "a.jpg": 1.0}
     pool_row = next(r for r in trip.items() if r["path"].endswith("b.jpg"))
     assert trip.wish_match(pool_row, trip.wish()) == -0.5
+
+    # Another version; then undo goes back to the first.
+    trip.use_version(1)
+    assert trip.wish()["name"] == "Day by day" and trip.wish()["pace"] == "calm"
+    assert [Path(s["items"][0]["path"]).name for s in trip.stories() if s["enabled"]] == ["a.jpg", "b.jpg", "c.jpg"]
+    assert trip.undo_label() == "version 1 of your wish"
+    trip.undo()
+    assert trip.wish()["name"] == "Beach only"
     trip.forget_wish()
     assert trip.wish() is None and trip.wish_match(pool_row, trip.wish()) == 0.0
+    trip.undo()
+    assert trip.wish()["name"] == "Beach only"
+
+
+def test_your_own_choices_win_over_the_ai(trip):
+    trip.describe_clips(FakeDirector())
+    first, second, third = trip.stories()
+    trip.set_story_enabled(second["key"], True)  # the AI leaves this one out: you keep it in
+    trip.set_story_enabled(third["key"], False)  # the AI wants it: you keep it out
+    trip.rename_story(first["key"], "Our beach")
+    trip.set_title_settings(trip_title="Summer 25")
+    trip.make_wish(FakeWisher(), "beach only", 60.0)
+    stories = {s["key"]: s for s in trip.stories()}
+    assert stories[second["key"]]["enabled"] and not stories[third["key"]]["enabled"]
+    assert stories[first["key"]]["name"] == "Our beach" and trip.title_settings()["trip_title"] == "Summer 25"
+    assert set(trip.hand_changes()) == {"1 story name", "1 story switched off", "1 story switched on", "the opening title"}
+    trip.forget_my_story_switches()
+    trip.use_version(0)
+    assert not {s["key"]: s for s in trip.stories()}[second["key"]]["enabled"]
+
+
+def test_nothing_typed_lets_the_ai_surprise_you():
+    prompt = director.wish_prompt("  ", [{"name": "Beach", "when": "Thu", "count": 3, "captions": []}], [], None)
+    assert director.SURPRISE in prompt
+
+
+def test_a_first_cut_can_be_undone(trip):
+    from trip_memory import autoedit
+
+    trip.execute("UPDATE items SET position = 7")
+    trip.auto_edit_steady(autoedit.Limits(), 10.0, 0.5, "Fade")
+    assert trip.undo_label() == "the first cut"
+    assert trip.undo() == "the first cut"
+    assert {r["position"] for r in trip.items()} == {7} and trip.undo_label() is None
 
 
 def test_a_wish_with_nothing_usable_keeps_things_as_they_are():
-    w = director.clean_wish({"length_seconds": -5, "pace": "wild", "stories": ["1", 0]}, 2, [])
-    assert w["length_seconds"] == 0 and w["pace"] == "medium" and w["stories"] == [] and w["slow_motion"]
+    w = director.clean_wish({"length_seconds": -5, "pace": "wild", "stories": ["1", 0], "format": "square"}, 2, [])
+    v = w["versions"][0]
+    assert w["length_seconds"] == 0 and v["pace"] == "medium" and v["stories"] == [] and v["slow_motion"]
+    assert w["format"] == "" and len(w["versions"]) == 1
 
 
 class FakeStopper(FakeDirector):

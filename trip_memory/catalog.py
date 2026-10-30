@@ -178,7 +178,7 @@ class Trip:
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
             except sqlite3.OperationalError:
                 pass
-        for column in ("theme TEXT", "idea TEXT", "plan_notes TEXT", "ai_name TEXT"):
+        for column in ("theme TEXT", "idea TEXT", "plan_notes TEXT", "ai_name TEXT", "mine_enabled INTEGER"):
             try:
                 self.db.execute(f"ALTER TABLE story_info ADD COLUMN {column}")
                 if column == "ai_name TEXT":
@@ -425,7 +425,7 @@ class Trip:
             a, b = (datetime.fromisoformat(d) for d in (days[0], days[-1]))
             span = (f"{a:%-d %B %Y}" if a == b else f"{a:%-d} – {b:%-d %B %Y}" if (a.year, a.month) == (b.year, b.month)
                     else f"{a:%-d %b} – {b:%-d %b %Y}")
-        return {"opening": True, "trip_title": self.folder.name.replace("_", " "), "trip_sub": span,
+        return {"opening": True, "trip_title": saved.get("ai_title") or self.folder.name.replace("_", " "), "trip_sub": span,
                 "stories": True, "story_style": "caption", "ending": True, "end_text": "Until next time",
                 "end_sub": self.folder.name.replace("_", " "), "style": "bold", "end_black": 3.0, **saved}
 
@@ -702,6 +702,7 @@ class Trip:
         return scores
 
     def _apply_plan(self, result: autoedit.Plan) -> None:
+        self.checkpoint("the first cut")
         with self._lock:
             for shot_no, shot in enumerate(result.shots):
                 used = (shot.seconds - held(shot.effects)) * shot.speed * source_factor(shot.effects)  # of the video
@@ -1084,8 +1085,9 @@ class Trip:
         self.execute("UPDATE story_info SET name = ? WHERE key = ?", ((name or "").strip() or None, key))
 
     def set_story_enabled(self, key: str, enabled: bool) -> None:
+        """Switch a story on or off yourself: the AI's versions then leave it as you set it."""
         self._story_info(key)
-        self.execute("UPDATE story_info SET enabled = ? WHERE key = ?", (int(enabled), key))
+        self.execute("UPDATE story_info SET enabled = ?, mine_enabled = ? WHERE key = ?", (int(enabled), int(enabled), key))
 
     def move_story(self, key: str, steps: int) -> None:
         """Move a story earlier (negative) or later; Auto-edit follows this order."""
@@ -1378,7 +1380,9 @@ class Trip:
         with self._lock:
             for n, key in enumerate(chosen + rest):
                 self.db.execute("INSERT OR IGNORE INTO story_info (key) VALUES (?)", (key,))
-                self.db.execute("UPDATE story_info SET position = ?, enabled = ? WHERE key = ?", (n, int(key in chosen), key))
+                # A story you switched on or off yourself stays that way.
+                self.db.execute("UPDATE story_info SET position = ?, enabled = COALESCE(mine_enabled, ?) WHERE key = ?",
+                                (n, int(key in chosen), key))
                 if names is not None:
                     self.db.execute("UPDATE story_info SET ai_name = ? WHERE key = ?", (names.get(key), key))
             self.db.execute("UPDATE items SET position = NULL, cut_out = 0")
@@ -1404,8 +1408,8 @@ class Trip:
         return described, self.person_names()
 
     def make_wish(self, ai, wish: str, song_seconds: float | None = None) -> dict:
-        """Ask the AI to turn the video you typed into settings, and use its choice of stories, focus and title.
-        The rest (length, pace, effects) is in the answer, for Auto-edit."""
+        """Ask the AI for 3 versions of the video you described (nothing typed: it surprises you) and use the first.
+        What you set yourself (story names, stories you switched on or off, your title) is kept."""
         stories, people = self._wish_stories()
         if not stories:
             raise director.DirectorError("No stories yet. Click Analyse first.")
@@ -1414,24 +1418,134 @@ class Trip:
                                      len(stories), people)
         if self._stopped(mine):
             raise director.Stopped("Stopped: nothing was changed.")
-        if answer["stories"]:
-            self._use_stories([stories[n - 1]["key"] for n in answer["stories"]])
-        if answer["title"]:
-            self.set_title_settings(trip_title=answer["title"])
-        if answer["look"]:
-            self.set_look(answer["look"])
-        saved = {"wish": " ".join(wish.split()), **answer,
-                 "story_names": [stories[n - 1]["name"] for n in answer["stories"]]}
+        self.checkpoint("the AI's answer to your wish")
+        saved = {"wish": " ".join(wish.split()), **answer, "used": 0,
+                 "names": {stories[n - 1]["key"]: name for n, name in answer["names"].items()},
+                 "versions": [{**v, "stories": [stories[n - 1]["key"] for n in v["stories"]],
+                               "story_names": [answer["names"].get(n) or stories[n - 1]["name"] for n in v["stories"]]}
+                              for v in answer["versions"]]}
+        if saved["names"]:
+            with self._lock:
+                for key, name in saved["names"].items():
+                    self.db.execute("INSERT OR IGNORE INTO story_info (key) VALUES (?)", (key,))
+                    self.db.execute("UPDATE story_info SET ai_name = ? WHERE key = ?", (name, key))
+                self.db.commit()
+        self.set_title_settings(ai_title=answer["title"] or None)
+        if answer["format"]:
+            self.set_video_size("phone" if answer["format"] == "phone" else "landscape")
+        self._save_wish(saved)
+        self.use_version(0, undo=False)
+        return self.wish()
+
+    def use_version(self, index: int, undo: bool = True) -> None:
+        """Tell the video the way this version of your wish does: its stories, in its order, and its look."""
+        rows = self.query("SELECT value FROM meta WHERE key = 'wish'")
+        saved = json.loads(rows[0]["value"]) if rows else None
+        if not saved or not 0 <= index < len(saved.get("versions", [])):
+            return
+        if undo:
+            self.checkpoint(f"version {saved.get('used', 0) + 1} of your wish")
+        version = saved["versions"][index]
+        if version["stories"]:
+            self._use_stories(version["stories"])
+        if version["look"]:
+            self.set_look(version["look"])
+        saved["used"] = index
+        self._save_wish(saved)
+
+    def _save_wish(self, saved: dict) -> None:
         self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('wish', ?)", (json.dumps(saved),))
-        return saved
 
     def wish(self) -> dict | None:
-        """The last video you asked for (it steers Auto-edit until you forget it)."""
+        """The video you asked for, with the version you use now (it steers Auto-edit until you forget it)."""
         rows = self.query("SELECT value FROM meta WHERE key = 'wish'")
-        return json.loads(rows[0]["value"]) if rows else None
+        if not rows:
+            return None
+        saved = json.loads(rows[0]["value"])
+        versions = saved.get("versions") or [{}]  # a wish saved by 0.34 to 0.40 has its settings at the top
+        return {**saved, **versions[min(saved.get("used", 0), len(versions) - 1)]}
 
     def forget_wish(self) -> None:
+        self.checkpoint("forgetting your wish")
         self.execute("DELETE FROM meta WHERE key = 'wish'")
+
+    def video_size(self) -> str:
+        """'landscape' or 'phone' (upright 9:16)."""
+        rows = self.query("SELECT value FROM meta WHERE key = 'video_size'")
+        return rows[0]["value"] if rows and rows[0]["value"] in ("landscape", "phone") else "landscape"
+
+    def set_video_size(self, size: str) -> None:
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('video_size', ?)", (size,))
+
+    def hand_changes(self) -> list[str]:
+        """What you set yourself, which the AI never changes."""
+        info = self.query("SELECT name, mine_enabled FROM story_info")
+        named = sum(1 for r in info if r["name"])
+        on = sum(1 for r in info if r["mine_enabled"] == 1)
+        off = sum(1 for r in info if r["mine_enabled"] == 0)
+        rows = self.query("SELECT value FROM meta WHERE key = 'titles'")
+        titled = bool(rows and json.loads(rows[0]["value"]).get("trip_title"))
+        own = self.query("SELECT COUNT(*) AS n FROM items WHERE title_text IS NOT NULL AND title_text != ''")[0]["n"]
+        changes = [f"{named} story name{'s' * (named != 1)}" if named else "",
+                   f"{off} stor{'ies' if off != 1 else 'y'} switched off" if off else "",
+                   f"{on} stor{'ies' if on != 1 else 'y'} switched on" if on else "",
+                   "the opening title" if titled else "",
+                   f"{own} title{'s' * (own != 1)} on shots" if own else ""]
+        return [c for c in changes if c]
+
+    def forget_my_story_switches(self) -> None:
+        """Let the AI's versions decide which stories are in again."""
+        self.execute("UPDATE story_info SET mine_enabled = NULL")
+
+    # ---------- undo ----------
+
+    UNDO_STEPS = 5
+
+    def _undo_list(self) -> list[dict]:
+        try:
+            return json.loads((self.dir / "undo" / "steps.json").read_text())
+        except (OSError, ValueError):
+            return []
+
+    def _save_undo_list(self, steps: list[dict]) -> None:
+        (self.dir / "undo").mkdir(exist_ok=True)
+        (self.dir / "undo" / "steps.json").write_text(json.dumps(steps))
+
+    def checkpoint(self, label: str) -> None:
+        """Remember the trip as it is now, so Undo can bring it back (the last few steps are kept)."""
+        folder = self.dir / "undo"
+        folder.mkdir(exist_ok=True)
+        name = f"{time.time_ns()}.db"
+        with self._lock:
+            self.db.commit()
+            copy = sqlite3.connect(folder / name)
+            self.db.backup(copy)
+            copy.close()
+        steps = self._undo_list() + [{"label": label, "file": name}]
+        for old in steps[: -self.UNDO_STEPS]:
+            (folder / old["file"]).unlink(missing_ok=True)
+        self._save_undo_list(steps[-self.UNDO_STEPS:])
+
+    def undo_label(self) -> str | None:
+        """What Undo would take back, e.g. "the first cut"."""
+        steps = self._undo_list()
+        return steps[-1]["label"] if steps else None
+
+    def undo(self) -> str | None:
+        """Bring the trip back to how it was before the last AI answer or first cut. Returns what was undone."""
+        steps = self._undo_list()
+        if not steps:
+            return None
+        last = steps.pop()
+        path = self.dir / "undo" / last["file"]
+        if path.exists():
+            with self._lock:
+                saved = sqlite3.connect(path)
+                saved.backup(self.db)
+                saved.close()
+            path.unlink()
+        self._save_undo_list(steps)
+        return last["label"]
 
     @staticmethod
     def wish_match(row: dict, wish: dict | None) -> float:

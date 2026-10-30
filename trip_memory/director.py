@@ -145,7 +145,7 @@ PLAN_SCHEMA = {
 }
 
 
-WISH_PROMPT = """You are the editor of a holiday memory video set to music. The person typed the video they want:
+WISH_PROMPT = """You are the editor of a holiday memory video set to music. The person described the video they want:
 
 "{wish}"
 
@@ -155,39 +155,59 @@ The trip is split into stories (shots taken at the same time and place), in date
 
 People they have named: {people}.
 {song}
-Turn their words into settings for the app:
+Turn their words into settings for the app, and offer 3 different versions of that video to choose from:
 - summary: one friendly sentence saying what video you will make.
 - length_seconds: how long the video should be (0 if they did not say: it then lasts as long as the song).
-- stories: the story numbers to use, in the order to tell them; leave out stories that don't fit the wish.
-  An empty list keeps the stories as they are now.
+- format: "phone" for an upright video (Instagram, TikTok, Reels, Stories, a phone), "landscape" if they asked for a
+  wide video (TV, YouTube, computer), else "".
 - people: names (only from the list above) to show more of; empty if they named nobody.
 - focus: a few short words for what to show more of (e.g. "beach", "kids", "boat"); empty if nothing special.
-- pace: "calm", "medium" or "lively".
-- teaser: true to open with a quick teaser of the most exciting shots.
-- slow_motion: true for slow motion in calm moments.
-- camera_effects: true for zooms, punch-ins and speed ramps.
 - title: the opening title if they asked for one or the wish suggests a good one; else empty.
-- look: the colour mood if the wish suggests one: "summer" (warm), "vivid", "film" (grain, vintage),
-  "cool" (blue hour), "mono" (black and white), "natural"; empty to keep the current one.
+- versions: 3 different ways to tell this video, best first. Each has:
+  - name: a short name for the idea (e.g. "Best moments first", "Day by day", "The people").
+  - idea: one sentence on why it works.
+  - stories: the story numbers to use, in the order to tell them; leave out stories that don't fit the wish or that
+    are dull or repeat another.
+  - pace: "calm", "medium" or "lively" (follow the wish if it says).
+  - teaser: true to open with a quick teaser of the most exciting shots.
+  - slow_motion: true for slow motion in calm moments.
+  - camera_effects: true for zooms, punch-ins and speed ramps.
+  - look: the colour mood: "summer" (warm), "vivid", "film" (grain, vintage), "cool" (blue hour),
+    "mono" (black and white), "natural"; empty to keep the current one.
+- names: a better short name (2 to 5 words) for every story, from what its clips show and where it is.
 Answer in JSON."""
+
+SURPRISE = "Surprise me: the best video of this trip, as long as the song."
+
+VERSION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "idea": {"type": "string"},
+        "stories": {"type": "array", "items": {"type": "integer"}},
+        "pace": {"type": "string", "enum": ["calm", "medium", "lively"]},
+        "teaser": {"type": "boolean"},
+        "slow_motion": {"type": "boolean"},
+        "camera_effects": {"type": "boolean"},
+        "look": {"type": "string", "enum": ["", "natural", "summer", "vivid", "film", "cool", "mono"]},
+    },
+    "required": ["name", "idea", "stories", "pace", "teaser", "slow_motion", "camera_effects", "look"],
+    "additionalProperties": False,
+}
 
 WISH_SCHEMA = {
     "type": "object",
     "properties": {
         "summary": {"type": "string"},
         "length_seconds": {"type": "integer"},
-        "stories": {"type": "array", "items": {"type": "integer"}},
+        "format": {"type": "string", "enum": ["", "phone", "landscape"]},
         "people": {"type": "array", "items": {"type": "string"}},
         "focus": {"type": "array", "items": {"type": "string"}},
-        "pace": {"type": "string", "enum": ["calm", "medium", "lively"]},
-        "teaser": {"type": "boolean"},
-        "slow_motion": {"type": "boolean"},
-        "camera_effects": {"type": "boolean"},
         "title": {"type": "string"},
-        "look": {"type": "string", "enum": ["", "natural", "summer", "vivid", "film", "cool", "mono"]},
+        "versions": {"type": "array", "items": VERSION_SCHEMA},
+        "names": STORYLINE_SCHEMA["properties"]["names"],
     },
-    "required": ["summary", "length_seconds", "stories", "people", "focus", "pace", "teaser", "slow_motion",
-                 "camera_effects", "title", "look"],
+    "required": ["summary", "length_seconds", "format", "people", "focus", "title", "versions", "names"],
     "additionalProperties": False,
 }
 
@@ -452,27 +472,42 @@ def wish_prompt(wish: str, stories: list[dict], people: list[str], song_seconds:
         lines.extend(f"  - {c}" for c in [c for c in s["captions"] if c][:6])
     song = (f"The chosen song lasts {song_seconds / 60:.1f} minutes.\n" if song_seconds
             else "No song is chosen yet.\n")
-    return WISH_PROMPT.format(wish=" ".join(wish.split())[:1000], stories="\n".join(lines),
+    return WISH_PROMPT.format(wish=" ".join(wish.split())[:1000] or SURPRISE, stories="\n".join(lines),
                               people=", ".join(people) or "nobody yet", song=song)
 
 
 def clean_wish(answer: dict, count: int, people: list[str]) -> dict:
-    """Keep valid story numbers and known names; keep the numbers sensible."""
-    order: list[int] = []
-    for n in answer.get("stories", []):
-        if isinstance(n, int) and 1 <= n <= count and n not in order:
-            order.append(n)
+    """Keep valid story numbers and known names; keep the numbers sensible. An answer without versions (a small
+    model may skip them) counts as one version."""
     known = {p.lower(): p for p in people}
     who = [known[str(p).strip().lower()] for p in answer.get("people", []) if str(p).strip().lower() in known]
     focus = [w for w in (" ".join(str(f).split()).lower()[:30] for f in answer.get("focus", [])) if w][:6]
     seconds = answer.get("length_seconds")
     seconds = int(min(max(seconds, 15), 1200)) if isinstance(seconds, (int, float)) and seconds > 0 else 0
+    versions = [_clean_version(v, count) for v in answer.get("versions") or [answer] if isinstance(v, dict)][:3]
+    names = {}
+    for entry in answer.get("names", []):
+        n, name = entry.get("story"), " ".join(str(entry.get("name", "")).split())[:40]
+        if isinstance(n, int) and 1 <= n <= count and name:
+            names[n] = name
     return {
         "summary": " ".join(str(answer.get("summary", "")).split())[:300],
-        "length_seconds": seconds, "stories": order, "people": list(dict.fromkeys(who)), "focus": focus,
-        "pace": answer.get("pace") if answer.get("pace") in ("calm", "medium", "lively") else "medium",
-        "teaser": bool(answer.get("teaser")), "slow_motion": bool(answer.get("slow_motion", True)),
-        "camera_effects": bool(answer.get("camera_effects", True)),
+        "length_seconds": seconds, "people": list(dict.fromkeys(who)), "focus": focus,
+        "format": answer.get("format") if answer.get("format") in ("phone", "landscape") else "",
         "title": " ".join(str(answer.get("title", "")).split())[:60],
-        "look": answer.get("look") if answer.get("look") in ("natural", "summer", "vivid", "film", "cool", "mono") else "",
+        "versions": versions or [_clean_version({}, count)], "names": names,
+    }
+
+
+def _clean_version(v: dict, count: int) -> dict:
+    order: list[int] = []
+    for n in v.get("stories", []):
+        if isinstance(n, int) and 1 <= n <= count and n not in order:
+            order.append(n)
+    return {
+        "name": " ".join(str(v.get("name", "")).split())[:60], "idea": " ".join(str(v.get("idea", "")).split())[:300],
+        "stories": order, "pace": v.get("pace") if v.get("pace") in ("calm", "medium", "lively") else "medium",
+        "teaser": bool(v.get("teaser")), "slow_motion": bool(v.get("slow_motion", True)),
+        "camera_effects": bool(v.get("camera_effects", True)),
+        "look": v.get("look") if v.get("look") in ("natural", "summer", "vivid", "film", "cool", "mono") else "",
     }
