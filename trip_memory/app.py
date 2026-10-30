@@ -162,6 +162,7 @@ class Page:
         self.voice_base = ""  # what was in the box before you started speaking
         self.talk_button = None
         self.wish_box = None  # where "speak your idea" writes
+        self.story_stop = None
         self.theme_shown = ""  # the activity open in the Themes tab
         self.theme_selected: set[str] = set()
         self.theme_limit = 60
@@ -2069,6 +2070,9 @@ class Page:
             if story.get("parts"):
                 ui.button("Try another idea", icon="refresh", on_click=lambda: self.make_story(True)) \
                     .props("flat no-caps")
+            self.story_stop = ui.button("Stop", icon="stop_circle", on_click=self.stop_ai) \
+                .props("outline color=negative dense no-caps")
+            self.story_stop.set_visibility(self.ai_busy)
         if not story.get("parts"):
             ui.label("No story yet: until you make one, the video runs as it happened.").classes("text-sm text-gray-500")
             return
@@ -2126,7 +2130,10 @@ class Page:
         return out
 
     async def make_story(self, again: bool) -> None:
-        if self.busy():
+        if not self.trip:
+            return
+        if self.ai_busy:  # (analysing files in the background doesn't stop you)
+            ui.notify("The AI is still busy with the last request. Wait for it, or press Stop.", type="warning")
             return
         idea = (self.wish_box.value or "").strip() if self.wish_box is not None else ""
         blocks = [b for b in self.trip.storyline_blocks() if b["on"]]
@@ -2141,8 +2148,10 @@ class Page:
             ai = None
         if ai is not None:
             self.ai_busy = True
-            self.ai_bar.set_visibility(True)
-            self.ai_label.text = "The AI is arranging your themes into a story…"
+            note = ui.notification("The AI is arranging your themes into a story… On a MacBook Air this can take a "
+                                   "minute or two.", spinner=True, timeout=None, multi_line=True)
+            if self.story_stop is not None:
+                self.story_stop.set_visibility(True)
             try:
                 prompt = director.story_prompt(idea, self._story_blocks_info(blocks), before[-4:] or None)
                 answer = await self.stoppable(ai.story, prompt)
@@ -2154,7 +2163,9 @@ class Page:
                 print(f"The AI couldn't make a story ({exc}); following your words instead.")
             finally:
                 self.ai_busy = False
-                self.ai_bar.set_visibility(False)
+                note.dismiss()
+                if self.story_stop is not None:
+                    self.story_stop.set_visibility(False)
         if not story or not story.get("parts"):
             if not idea:
                 ui.notify("Write or say your idea first (without the AI, the app follows the themes you name).",
