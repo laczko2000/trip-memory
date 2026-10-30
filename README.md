@@ -59,6 +59,7 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **0.24.8:** the AI director shows its progress in its own card (which clip it is looking at, or that it is thinking about storylines), says when it's done, and tells you to wait if you click while it's still busy, instead of silently doing nothing.
 - **0.24.7:** Music timeline: every pin shows its own time next to it (to the hundredth of a second when zoomed in); zoom buttons Whole song / 30 s / 10 s / 4 s replace the *Show* list; the line under it now says how many shots your pins make and up to when.
 - **0.24.6:** the shot boxes under the Music timeline are no longer coloured orange or red for going past your clip limits, since your pins now always win; hover a box to see which pins it lies between.
 - **0.24.5:** a finer Music timeline. It shows the song's waveform (the spikes are the hits). Scroll up or down on it, or pinch, to zoom in around the mouse, down to about a second across; scroll sideways to move along. Time marks get down to a tenth of a second. Click a pin and nudge it with ← → (10 ms, or 1 ms with Alt). *Show* also has 4 s and 1.5 s.

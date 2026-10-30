@@ -114,6 +114,7 @@ class Page:
         self.rendering = {"busy": False, "progress": 0.0, "message": "", "result": None}
         self.ollama_found: tuple[list[str], list[str]] | None = None  # (models that see pictures, all models)
         self.ollama_checked = False
+        self.ai_busy = False  # the AI director is working (its progress shows in its own card)
 
     # ---------- data ----------
 
@@ -281,6 +282,10 @@ class Page:
                 self.progress_label.text = p.message
                 if self.dirty and time.time() - self.last_refresh > 8:
                     self.refresh_all()
+                if getattr(self, "ai_bar", None) is not None and self.ai_busy:
+                    self.ai_bar.set_visibility(True)
+                    self.ai_bar.value = p.fraction
+                    self.ai_label.text = p.message
             else:
                 self.progress_bar.set_visibility(False)
                 self.progress_label.text = (
@@ -848,6 +853,10 @@ class Page:
                     self.ollama_settings(ai)
                 else:
                     self.claude_settings(ai)
+            # The AI's progress, right here (the main progress bar is at the top of the page, often out of sight).
+            self.ai_bar = ui.linear_progress(value=0, show_value=False).classes("w-full")
+            self.ai_label = ui.label("").classes("text-sm text-indigo-800")
+            self.ai_bar.set_visibility(self.ai_busy)
             with ui.row().classes("items-center gap-2"):
                 left = len(chosen) - described
                 ui.button(f"Describe clips ({left} to go)" if left else "Describe clips", icon="visibility",
@@ -938,22 +947,46 @@ class Page:
             ui.notify(str(exc), type="warning", multi_line=True, timeout=10000)
             return None
 
-    async def describe_clips(self, again: bool) -> None:
-        if not self.trip or self.trip.progress.running:
-            return
-        ai = self.make_director()
-        if ai:
-            await self.run_step(lambda notify: self.trip.describe_clips(ai, notify, again))
+    def busy(self) -> bool:
+        if self.trip and (self.trip.progress.running or self.ai_busy):
+            ui.notify("Still working on the last step; its progress shows above. Please wait for it to finish.",
+                      type="warning")
+            return True
+        return not self.trip
 
-    async def suggest_storylines(self) -> None:
-        if not self.trip or self.trip.progress.running:
+    async def describe_clips(self, again: bool) -> None:
+        if self.busy():
             return
         ai = self.make_director()
         if not ai:
             return
-        note = ui.notification("The AI is thinking about storylines…", spinner=True, timeout=None)
+        before = sum(1 for it in self.items if it.get("ai_caption"))
+        self.ai_busy = True
+        self.ai_bar.set_visibility(True)
+        self.ai_label.text = "Starting the AI (the first time it loads the model, which can take a minute)…"
+        try:
+            await self.run_step(lambda notify: self.trip.describe_clips(ai, notify, again))
+        finally:
+            self.ai_busy = False
+        now = sum(1 for it in self.items if it.get("ai_caption"))
+        if now > before or again:
+            ui.notify(f"The AI described {now if again else now - before} files.", type="positive")
+
+    async def suggest_storylines(self) -> None:
+        if self.busy():
+            return
+        ai = self.make_director()
+        if not ai:
+            return
+        note = ui.notification("The AI is thinking about storylines (up to a minute or two on this Mac)…",
+                               spinner=True, timeout=None)
+        self.ai_busy = True
+        self.ai_bar.props("indeterminate")
+        self.ai_bar.set_visibility(True)
+        self.ai_label.text = "The AI is thinking about storylines…"
         try:
             await run.io_bound(self.trip.suggest_storylines, ai)
+            ui.notify("Storylines ready below. Pick one with Use this.", type="positive")
         except director.DirectorError as exc:
             ui.notify(str(exc), type="warning", multi_line=True, timeout=10000)
         except Exception as exc:
@@ -961,6 +994,7 @@ class Page:
             ui.notify(f"Stopped: {exc}", type="negative")
         finally:
             note.dismiss()
+            self.ai_busy = False
         self.director_card.refresh()
 
     def use_storyline(self, index: int) -> None:
