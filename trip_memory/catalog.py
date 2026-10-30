@@ -669,6 +669,11 @@ class Trip:
                                      "theme": r["theme"] or r["theme_auto"]})
         repeats = self._repeats = self._same_moments(rows)
         rows = [r for r in rows if r["path"] not in repeats]
+        saved = {(m["activity"], m["name"].lower()): m["shots"] for m in self.moments()}
+        for part in (storyline.get("story") or {}).get("parts") or []:
+            for e in part["entries"]:
+                if e.get("pick") == "moment":
+                    e["shots"] = saved.get((e["key"].partition("|")[0], (e.get("moment") or "").lower())) or []
         chapters, where = themes.chapters_for(storyline, rows)
         self._chapters = chapters
         pool = []
@@ -774,6 +779,7 @@ class Trip:
                 a["was"] = a.get("was") or old  # the app's first guesses from tags still find it
                 a["name"] = new
         self.save_activities(activities)
+        self._save_moments([m | {"activity": new} if m["activity"] == old else m for m in self.moments()])
         with self._lock:
             self.db.execute("UPDATE items SET theme = ? WHERE theme = ?", (new, old))
             self.db.execute("UPDATE items SET theme_auto = ? WHERE theme_auto = ?", (new, old))
@@ -835,13 +841,58 @@ class Trip:
             notify(1.0, "comparing")
         return out
 
-    def find_moment(self, key: str, words: np.ndarray | None, ticked: list[dict] | None = None,
+    def moments(self) -> list[dict]:
+        """Your moments, each inside a theme: {"name", "activity", "shots": [{"path", "t"}] you ticked}."""
+        rows = self.query("SELECT value FROM meta WHERE key = 'moments'")
+        return json.loads(rows[0]["value"]) if rows and rows[0]["value"] else []
+
+    def _save_moments(self, found: list[dict]) -> None:
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('moments', ?)", (json.dumps(found),))
+
+    def moment(self, activity: str, name: str) -> dict | None:
+        return next((m for m in self.moments() if m["activity"] == activity and m["name"].lower() == name.lower()),
+                    None)
+
+    def add_moment(self, activity: str, name: str) -> dict:
+        name = " ".join(name.split())[:40]
+        found = self.moment(activity, name)
+        if found:
+            return found
+        new = {"name": name, "activity": activity, "shots": []}
+        self._save_moments(self.moments() + [new])
+        return new
+
+    def remove_moment(self, activity: str, name: str) -> None:
+        self._save_moments([m for m in self.moments() if not (m["activity"] == activity and m["name"] == name)])
+
+    def tick_moment(self, activity: str, name: str, path: str, t: float, on: bool) -> None:
+        """You marked a shot (at that second) as this moment, or took it back."""
+        found = self.moments()
+        for m in found:
+            if m["activity"] == activity and m["name"] == name:
+                m["shots"] = [s for s in m["shots"] if s["path"] != path] + ([{"path": path, "t": t}] if on else [])
+        self._save_moments(found)
+
+    def moment_matches(self, activity: str, name: str, words: np.ndarray | None,
+                       notify: Callable[[float, str], None] | None = None) -> list[dict]:
+        """The shots of a theme for one of its moments: the ones you ticked first (at their second), then the rest,
+        most like your words and your ticks first."""
+        saved = self.moment(activity, name) or {"shots": []}
+        rows = [r for r in self.theme_rows() if r["included"] and r["theme"] == activity]
+        found = self.find_moment(rows, words, saved["shots"], notify)
+        ticked = {s["path"]: s["t"] for s in saved["shots"]}
+        for f in found:
+            f["ticked"] = f["path"] in ticked
+            if f["ticked"] and abs(f["t"] - ticked[f["path"]]) > 0.01:
+                f["t"] = ticked[f["path"]]
+                f["thumb"] = self.moment_picture(next(r for r in rows if r["path"] == f["path"]), f["t"]) \
+                    if f["kind"] == "video" else f["thumb"]
+        return sorted(found, key=lambda f: (not f["ticked"], -f["score"]))
+
+    def find_moment(self, rows: list[dict], words: np.ndarray | None, ticked: list[dict] | None = None,
                     notify: Callable[[float, str], None] | None = None) -> list[dict]:
-        """The shots of one storyline block, best match for the moment first: {"path", "t", "score", "likely",
-        "thumb"}. ticked: [{"path", "t"}] you marked as right (the app looks for more like them)."""
-        line = self.storyline()
-        split = set(line["split"])
-        rows = [r for r in self.theme_rows() if r["included"] and themes.block_of(r, split) == key]
+        """These shots, best match for the moment first: {"path", "t", "score", "likely", "thumb"}.
+        ticked: [{"path", "t"}] you marked as right (the app looks for more like them)."""
         shots = self.frame_vectors(rows, notify)
         examples = []
         for tick in ticked or []:

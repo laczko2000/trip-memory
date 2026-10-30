@@ -587,12 +587,14 @@ def test_a_moment_inside_a_clip_is_found_and_kept(tmp_path, monkeypatch):
     # A stand-in for the picture model: the frame at 8.5 s is the jump (this test clip has few key frames, so the
     # app reads a frame every 2 seconds: 0.5, 2.5, 4.5, 6.5, 8.5...).
     trip.frame_embedder = lambda pictures: np.array([jump if n == 4 else calm for n, _ in enumerate(pictures)])
-    found = trip.find_moment("Water sports|", jump)
-    assert found[0]["path"] == path and found[0]["t"] == 8.5 and found[0]["likely"]
-    assert trip.find_moment("Water sports|", jump)[0]["t"] == 8.5  # the frames are kept: no second look
+    found = trip.moment_matches("Water sports", "big jumps", jump)
+    assert found[0]["path"] == path and found[0]["t"] == 8.5 and found[0]["likely"] and not found[0]["ticked"]
+    trip.add_moment("Water sports", "big jumps")
+    trip.tick_moment("Water sports", "big jumps", path, 8.5, True)
+    again = trip.moment_matches("Water sports", "big jumps", None)  # the frames are kept: no second look
+    assert again[0]["ticked"] and again[0]["t"] == 8.5
     story = {"parts": [{"name": "Jumps", "pace": "lively", "seconds": 10,
-                        "entries": [{"key": "Water sports|", "pick": "moment", "moment": "big jumps",
-                                     "shots": [{"path": path, "t": 8.5}]}]}]}
+                        "entries": [{"key": "Water sports|", "pick": "moment", "moment": "Big jumps"}]}]}
     trip.set_storyline(order=themes.STORY, story=story, finale=False)
     pool = trip.auto_edit_pool()
     assert pool[0]["keep_offset"] == 7.0 and pool[0]["duration"] == 3.0

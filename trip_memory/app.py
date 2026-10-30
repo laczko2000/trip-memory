@@ -174,12 +174,15 @@ class Page:
         self.wish_box = None  # where "speak your idea" writes
         self.story_stop = None
         self.theme_shown = ""  # the activity open in the Themes tab
+        self.theme_moment = None  # the moment being marked there (a name), or None
+        self.moment_found: dict = {}  # (activity, moment) -> the shots in the order found
         self.theme_selected: set[str] = set()
         self.theme_limit = 60
         self.theme_ticks: dict = {}  # path -> (tick box, its mark, sure): ticking changes only that box
         self.theme_rows_shown: dict = {}
         self.theme_summary = None
         self.theme_badge = None
+        self.moment_count = None
         self.theme_counts = [0, 0]
         self.theme_tiles: dict = {}  # path -> its tile, to show a selection without building the page again
         self.theme_count = self.theme_move = None
@@ -252,7 +255,7 @@ class Page:
                 # The path to a video, left to right; then the extra tabs for looking things up.
                 self.choose_tab = ui.tab("Choose files", icon="checklist")
                 self.panels = None
-                themes_tab = ui.tab("Themes", icon="category")
+                themes_tab = self.themes_tab = ui.tab("Themes", icon="category")
                 music_tab = ui.tab("Music & audio", icon="graphic_eq")
                 story_tab = ui.tab("Storyboard", icon="view_timeline")
                 video_tab = ui.tab("Make video", icon="movie")
@@ -2154,14 +2157,17 @@ class Page:
                                       on_change=lambda e, n=n, m=m: self.edit_entry(n, m, pick=e.value)) \
                                 .props("dense borderless options-dense").classes("text-xs w-36")
                             if entry["pick"] == "moment":
-                                look = ui.input(value=entry.get("moment", ""), placeholder="e.g. big jumps") \
-                                    .props("dense borderless").classes("text-xs w-32")
+                                activity = entry["key"].partition("|")[0]
+                                look = ui.input(value=entry.get("moment", ""), placeholder="e.g. kite jump") \
+                                    .props("dense borderless").classes("text-xs w-28")
                                 look.on("blur", lambda e, n=n, m=m, f=look: self.edit_entry(n, m, moment=f.value))
-                                found = len(entry.get("shots") or [])
-                                ui.button(f"{found} ticked" if found else "Find", icon="search",
-                                          on_click=lambda n=n, m=m, f=look: self.find_moment(n, m, f.value, names)) \
+                                saved = self.trip.moment(activity, entry.get("moment") or "") \
+                                    if entry.get("moment") else None
+                                found = len(saved["shots"]) if saved else 0
+                                ui.button(f"{found} marked" if found else "Mark in Themes", icon="search",
+                                          on_click=lambda n=n, m=m, a=activity, f=look: self.mark_moment(n, m, a, f.value)) \
                                     .props(("outline" if found else "unelevated") + " dense no-caps size=sm") \
-                                    .tooltip("Look inside the videos for this moment and tick the right ones")
+                                    .tooltip("Opens Themes: tick a few shots of this moment, the app finds the rest")
                             ui.button(icon="close", on_click=lambda n=n, m=m: self.remove_entry(n, m)) \
                                 .props("flat dense round size=xs")
                     ui.button("Add theme", icon="add", on_click=lambda n=n: self.add_theme_dialog(n, blocks, names)) \
@@ -2182,102 +2188,6 @@ class Page:
                 for b in missing:
                     ui.button(f"+ {names[b['key']]} ({b['count']})", on_click=lambda k=b["key"]: self.add_entry(k)) \
                         .props("flat dense no-caps size=sm").tooltip("Add to the last part")
-
-    async def find_moment(self, n: int, m: int, words: str, names: dict, ticked: list[dict] | None = None) -> None:
-        """Look for a moment (a big jump...) inside the shots of one theme of the story, then let you tick them."""
-        words = " ".join((words or "").split())
-        story = self.trip.storyline().get("story") or {}
-        try:
-            entry = story["parts"][n]["entries"][m]
-        except (KeyError, IndexError):
-            return
-        if not words:
-            ui.notify("Write what to look for first, e.g. big jumps.", type="warning")
-            return
-        if entry.get("moment") != words:
-            self.edit_entry(n, m, moment=words)
-        if self.ai_busy:
-            ui.notify("Still busy with the last request.", type="warning")
-            return
-        if ticked is None:
-            ticked = entry.get("shots") or []
-        self.ai_busy = True
-        done = {"share": 0.0, "step": "starting"}
-        note = ui.notification("", spinner=True, timeout=None, multi_line=True)
-        started = time.time()
-
-        def tick() -> None:
-            gone = int(time.time() - started)
-            note.message = (f"🔍 Looking for \"{words}\" inside the videos: {done['step']}, "
-                            f"{int(100 * done['share'])}% ({gone // 60}:{gone % 60:02d}). The first time takes "
-                            "longest: the app looks at a frame about every second and remembers it.")
-
-        tick()
-        ticker = ui.timer(1.0, tick)
-        try:
-            vector = (await run.io_bound(text_vectors, [f"a holiday photo of {words}"], app_dir() / "models" / "clip"))[0]
-            found = await run.io_bound(self.trip.find_moment, entry["key"], vector, ticked,
-                                       lambda share, step: done.update(share=share, step=step))
-        except Exception as exc:
-            traceback.print_exc()
-            ui.notify(f"Couldn't look for the moment: {exc}", type="negative", multi_line=True)
-            return
-        finally:
-            self.ai_busy = False
-            ticker.cancel()
-            note.dismiss()
-        if not found:
-            ui.notify("No shots to look in: analyse the trip first (Choose files, Analyse).", type="warning")
-            return
-        self.moment_dialog(n, m, words, names.get(entry["key"], entry["key"]), found, names)
-
-    def moment_dialog(self, n: int, m: int, words: str, theme: str, found: list[dict], names: dict) -> None:
-        picked = {f["path"]: f["t"] for f in found if f["likely"]}
-        with ui.dialog() as dialog, ui.card().classes("w-[960px] max-w-[95vw] gap-2"):
-            ui.label(f"🔍 \"{words}\" in {theme}").classes("text-lg font-semibold")
-            ui.label("Best matches first, at the second that fits best. Tick the right ones: the video keeps a few "
-                     "seconds around that moment. \"Look again\" also searches for shots like the ones you ticked.") \
-                .classes("text-sm text-gray-600")
-            count = ui.label("")
-
-            def show_count() -> None:
-                count.set_text(f"{len(picked)} ticked of {len(found)}")
-
-            def toggle(f: dict, box) -> None:
-                if f["path"] in picked:
-                    picked.pop(f["path"])
-                else:
-                    picked[f["path"]] = f["t"]
-                on = f["path"] in picked
-                box.classes(add="border-green-600 bg-green-50" if on else "border-transparent",
-                            remove="border-transparent" if on else "border-green-600 bg-green-50")
-                show_count()
-
-            with ui.element("div").classes("w-full grid gap-2 overflow-y-auto").style(
-                    "grid-template-columns:repeat(auto-fill,minmax(170px,1fr));max-height:60vh"):
-                for f in found:
-                    on = f["path"] in picked
-                    box = ui.element("div").classes("rounded p-1 border-2 cursor-pointer " +
-                                                    ("border-green-600 bg-green-50" if on else "border-transparent"))
-                    with box:
-                        if f["thumb"]:
-                            ui.image(data_url(f["thumb"])).classes("w-full rounded").style("aspect-ratio:16/10") \
-                                .props("fit=cover no-spinner")
-                        ui.label(("🎬 at " + fmt_length(f["t"]) if f["kind"] == "video" else "📷 photo") +
-                                 f" · match {f['score']:.2f}").classes("text-xs text-gray-600")
-                    box.on("click", lambda f=f, box=box: toggle(f, box))
-            show_count()
-            with ui.row().classes("w-full items-center gap-2"):
-                ui.button("Use the ticked ones", icon="check",
-                          on_click=lambda: (dialog.close(), self.edit_entry(
-                              n, m, shots=[{"path": p, "t": t} for p, t in picked.items()]))).props("no-caps")
-                async def again() -> None:
-                    dialog.close()
-                    await self.find_moment(n, m, words, names, [{"path": p, "t": t} for p, t in picked.items()])
-
-                ui.button("Look again with my ticks", icon="refresh", on_click=again).props("outline no-caps")
-                ui.button("Cancel", on_click=dialog.close).props("flat no-caps")
-        dialog.open()
 
     def video_seconds(self) -> float:
         target = self.length_now()
@@ -2561,6 +2471,7 @@ class Page:
         if not self.trip.has_fingerprints():
             ui.label("Tip: run Analyse in Choose files first. The app then judges each picture itself; until then it "
                      "only guesses from tags.").classes("text-sm text-orange-700")
+        saved_moments = self.trip.moments()
         with ui.row().classes("w-full no-wrap items-start gap-4"):
             with ui.column().classes("w-56 gap-1 flex-none"):
                 for a in activities:
@@ -2572,6 +2483,14 @@ class Page:
                             .on("click", lambda n=a["name"]: self.show_theme(n)):
                         ui.label(f"{a['emoji']} {a['name']}").classes("flex-grow text-sm")
                         ui.label(f"{count}" + (f" · {todo}?" if todo else "")).classes("text-xs text-gray-500")
+                    for mo in [m for m in saved_moments if m["activity"] == a["name"]]:
+                        here = on and self.theme_moment == mo["name"]
+                        with ui.row().classes("w-full items-center no-wrap gap-1 pl-6 pr-2 py-0.5 rounded cursor-pointer" +
+                                              (" bg-purple-100 text-purple-800 font-semibold" if here
+                                               else " hover:bg-gray-100")) \
+                                .on("click", lambda a=a["name"], m=mo["name"]: self.open_moment(a, m)):
+                            ui.label(f"↳ 🔍 {mo['name']}").classes("flex-grow text-xs")
+                            ui.label(f"{len(mo['shots'])} ✓").classes("text-xs text-gray-500")
                 with ui.row().classes("items-center gap-1 mt-2 no-wrap"):
                     new = ui.input(placeholder="Add an activity").props("dense outlined").classes("w-36")
                     new.on("keydown.enter", lambda: self.add_activity(new.value))
@@ -2581,6 +2500,9 @@ class Page:
 
     def theme_grid(self, rows: list[dict], activities: list[dict]) -> None:
         name = self.theme_shown
+        if self.theme_moment and self.trip.moment(name, self.theme_moment):
+            self.moment_grid(name, self.theme_moment, activities)
+            return
         emoji = {a["name"]: a["emoji"] for a in activities}
         shown = [r for r in rows if r["theme"] == name]
         todo = [r for r in shown if not r["theme_ok"]]
@@ -2593,6 +2515,9 @@ class Page:
             if name != themes.OTHER:
                 ui.button("Rename", icon="edit", on_click=lambda: self.rename_dialog(name)) \
                     .props("flat dense no-caps size=sm")
+                ui.button("Moment", icon="add", on_click=lambda: self.new_moment_dialog(name)) \
+                    .props("flat dense no-caps size=sm") \
+                    .tooltip("Mark a moment inside these shots, e.g. kite jump: tick a few, the app finds the rest")
             self.theme_summary = ui.label(f"{len(shown)} shots · {len(shown) - len(todo)} confirmed · "
                                           f"{len(todo)} to check").classes("text-sm text-gray-600")
         with ui.row().classes("w-full items-center gap-2"):
@@ -2754,8 +2679,156 @@ class Page:
         ui.notify(f"{old} is now {new}.", type="positive")
         self.themes_view.refresh()
 
+    # ---------- moments (in Themes) ----------
+
+    def mark_moment(self, n: int, m: int, activity: str, name: str) -> None:
+        """From My story: open Themes on this moment, ready to tick its shots."""
+        name = " ".join((name or "").split())
+        if not name:
+            ui.notify("Write the moment first, e.g. kite jump.", type="warning")
+            return
+        self.edit_entry(n, m, moment=name)
+        self.trip.add_moment(activity, name)
+        self.panels.set_value(self.themes_tab)
+        self.open_moment(activity, name)
+
+    def new_moment_dialog(self, activity: str) -> None:
+        with ui.dialog() as dialog, ui.card().classes("w-96"):
+            ui.label(f"A moment inside {activity}").classes("text-lg font-semibold")
+            ui.label("What happens in it? e.g. kite jump, falling in the water, sunset").classes("text-sm text-gray-600")
+            field = ui.input("Moment").props("outlined autofocus").classes("w-full")
+
+            def go() -> None:
+                name = " ".join((field.value or "").split())
+                if name:
+                    dialog.close()
+                    self.trip.add_moment(activity, name)
+                    self.open_moment(activity, name)
+
+            field.on("keydown.enter", go)
+            with ui.row().classes("w-full justify-end"):
+                ui.button("Cancel", on_click=dialog.close).props("flat no-caps")
+                ui.button("Mark it", on_click=go).props("no-caps")
+        dialog.open()
+
+    def open_moment(self, activity: str, name: str) -> None:
+        self.theme_shown = activity
+        self.theme_moment = name
+        self.theme_selected = set()
+        self.themes_view.refresh()  # its grid starts the search the first time
+
+    async def look_for_moment(self, activity: str, name: str) -> None:
+        """Look inside the theme's videos (a frame about every second) for the moment, and sort its shots: your
+        ticks first, then the ones most like your words and your ticks."""
+        if self.ai_busy:
+            ui.notify("Still busy with the last request.", type="warning")
+            return
+        self.ai_busy = True
+        done = {"share": 0.0, "step": "starting"}
+        note = ui.notification("", spinner=True, timeout=None, multi_line=True)
+        started = time.time()
+
+        def tick() -> None:
+            gone = int(time.time() - started)
+            note.message = (f"🔍 Looking for \"{name}\" inside the {activity} shots: {done['step']}, "
+                            f"{int(100 * done['share'])}% ({gone // 60}:{gone % 60:02d}). The first time takes "
+                            "longest: the app looks at a frame about every second and remembers it.")
+
+        tick()
+        ticker = ui.timer(1.0, tick)
+        try:
+            try:
+                words = (await run.io_bound(text_vectors, [f"a holiday photo of {name}"],
+                                            app_dir() / "models" / "clip"))[0]
+            except Exception:
+                traceback.print_exc()
+                words = None  # without the words model: your ticks still work
+            found = await run.io_bound(self.trip.moment_matches, activity, name, words,
+                                       lambda share, step: done.update(share=share, step=step))
+        except Exception as exc:
+            traceback.print_exc()
+            ui.notify(f"Couldn't look for the moment: {exc}", type="negative", multi_line=True)
+            found = []
+        finally:
+            self.ai_busy = False
+            ticker.cancel()
+            note.dismiss()
+        self.moment_found[(activity, name)] = found
+        if self.theme_shown == activity and self.theme_moment == name:
+            self.themes_view.refresh()
+
+    def moment_grid(self, activity: str, name: str, activities: list[dict]) -> None:
+        emoji = {a["name"]: a["emoji"] for a in activities}
+        found = self.moment_found.get((activity, name))
+        saved = self.trip.moment(activity, name) or {"shots": []}
+        with ui.row().classes("w-full items-center gap-2"):
+            ui.label(f"{emoji.get(activity, '⭐')} {activity} › 🔍 {name}").classes("text-lg font-semibold")
+            self.moment_count = ui.label(f"{len(saved['shots'])} marked").classes("text-sm text-gray-600")
+        ui.label(f"Tick the shots that show “{name}”: the picture is the second that fits best, and that is the part "
+                 "the video keeps. After a few ticks, press Find the rest: the shots most like yours come first.") \
+            .classes("text-sm text-gray-600")
+        with ui.row().classes("w-full items-center gap-2"):
+            ui.button("Find the rest", icon="search", on_click=lambda: self.look_for_moment(activity, name)) \
+                .tooltip("Sort again: the shots most like the ones you ticked first")
+            ui.button(f"Back to {activity}", icon="arrow_back", on_click=lambda: self.show_theme(activity)) \
+                .props("flat no-caps")
+            ui.button("Remove this moment", icon="delete_outline",
+                      on_click=lambda: self.remove_moment(activity, name)).props("flat dense no-caps size=sm")
+        if found is None:
+            ui.label("Looking inside the videos…").classes("text-gray-500")
+            if not self.ai_busy:
+                ui.timer(0.1, lambda: self.look_for_moment(activity, name), once=True)
+            return
+        if not found:
+            ui.label("No shots to look in. Analyse the trip first (Choose files, Analyse).").classes("text-gray-500")
+            return
+        with ui.element("div").classes("w-full grid gap-2").style("grid-template-columns:repeat(auto-fill,minmax(170px,1fr))"):
+            for f in found[: self.theme_limit]:
+                self.moment_tile(activity, name, f)
+        if len(found) > self.theme_limit:
+            ui.button(f"Show more ({len(found) - self.theme_limit} left)", icon="expand_more",
+                      on_click=self.more_themes).props("outline").classes("w-full")
+
+    def moment_tile(self, activity: str, name: str, f: dict) -> None:
+        with ui.element("div").classes("relative rounded p-1 border-2 bg-gray-50 cursor-pointer " +
+                                       ("border-green-600" if f["ticked"] else "border-transparent")) as tile:
+            if f["thumb"]:
+                ui.image(data_url(f["thumb"])).classes("w-full rounded").style("aspect-ratio:16/10") \
+                    .props("fit=cover no-spinner")
+            box = ui.element("div").classes("absolute top-2 left-2 w-7 h-7 rounded border-2 flex items-center "
+                                            "justify-center text-base font-bold shadow cursor-pointer")
+            with box:
+                mark = ui.label("")
+
+            def show() -> None:
+                mark.set_text("✓" if f["ticked"] else ("?" if f["likely"] else ""))
+                box.classes(replace="absolute top-2 left-2 w-7 h-7 rounded border-2 flex items-center justify-center "
+                                    "text-base font-bold shadow cursor-pointer " +
+                                    ("bg-green-600 border-green-600 text-white" if f["ticked"] else
+                                     "bg-white border-gray-500 text-orange-600"))
+                tile.classes(replace="relative rounded p-1 border-2 bg-gray-50 cursor-pointer " +
+                                     ("border-green-600" if f["ticked"] else "border-transparent"))
+
+            async def toggle() -> None:
+                f["ticked"] = not f["ticked"]
+                show()
+                await run.io_bound(self.trip.tick_moment, activity, name, f["path"], f["t"], f["ticked"])
+                saved = self.trip.moment(activity, name) or {"shots": []}
+                self.moment_count.set_text(f"{len(saved['shots'])} marked")
+
+            show()
+            tile.on("click", toggle)
+            ui.label(("🎬 at " + fmt_length(f["t"]) if f["kind"] == "video" else "📷 photo") +
+                     (" · likely" if f["likely"] and not f["ticked"] else "")).classes("text-xs text-gray-600 mt-1")
+
+    def remove_moment(self, activity: str, name: str) -> None:
+        self.trip.remove_moment(activity, name)
+        self.moment_found.pop((activity, name), None)
+        self.show_theme(activity)
+
     def show_theme(self, name: str) -> None:
         self.theme_shown = name
+        self.theme_moment = None
         self.theme_selected = set()
         self.theme_limit = self.THEME_PAGE
         self.themes_view.refresh()
