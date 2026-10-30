@@ -2202,21 +2202,22 @@ class Page:
         if ticked is None:
             ticked = entry.get("shots") or []
         self.ai_busy = True
-        done = {"share": 0.0}
+        done = {"share": 0.0, "step": "starting"}
         note = ui.notification("", spinner=True, timeout=None, multi_line=True)
         started = time.time()
 
         def tick() -> None:
-            note.message = (f"🔍 Looking for \"{words}\" inside the videos: {int(100 * done['share'])}% "
-                            f"({int(time.time() - started)} s). The first time takes longest: the app looks at a "
-                            "frame every second and remembers it.")
+            gone = int(time.time() - started)
+            note.message = (f"🔍 Looking for \"{words}\" inside the videos: {done['step']}, "
+                            f"{int(100 * done['share'])}% ({gone // 60}:{gone % 60:02d}). The first time takes "
+                            "longest: the app looks at a frame about every second and remembers it.")
 
         tick()
         ticker = ui.timer(1.0, tick)
         try:
             vector = (await run.io_bound(text_vectors, [f"a holiday photo of {words}"], app_dir() / "models" / "clip"))[0]
             found = await run.io_bound(self.trip.find_moment, entry["key"], vector, ticked,
-                                       lambda share: done.update(share=share))
+                                       lambda share, step: done.update(share=share, step=step))
         except Exception as exc:
             traceback.print_exc()
             ui.notify(f"Couldn't look for the moment: {exc}", type="negative", multi_line=True)

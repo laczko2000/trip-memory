@@ -35,3 +35,9 @@ def test_frames_and_the_kept_window():
     assert moments.window(10.0, 20) == (8.5, 11.5)
     assert moments.window(19.5, 20) == (17.0, 20.0)
     assert moments.window(5.0, 20, start=6.0, end=12.0) == (6.0, 9.0)  # inside the part you kept
+
+
+def test_key_frames_are_used_when_close_enough():
+    assert moments.pick_frames([0.0, 1.0, 2.0, 3.0], 4) == [0, 1, 2, 3]
+    assert moments.pick_frames([0.0, 8.3], 12) == []  # too far apart: the app reads frames itself
+    assert len(moments.pick_frames([k * 0.5 for k in range(40)], 20)) == 20  # about one a second

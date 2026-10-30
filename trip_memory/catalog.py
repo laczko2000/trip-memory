@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import re
 import sqlite3
 import subprocess
 import sys
@@ -795,7 +796,7 @@ class Trip:
 
     # ---------- moments ----------
 
-    def frame_vectors(self, rows: list[dict], notify: Callable[[float], None] | None = None
+    def frame_vectors(self, rows: list[dict], notify: Callable[[float, str], None] | None = None
                       ) -> dict[str, tuple[list[float], np.ndarray]]:
         """For each shot: the times looked at and a CLIP vector per frame (a frame every second inside a video,
         made once and kept; a photo is its own picture)."""
@@ -813,19 +814,15 @@ class Trip:
             else:
                 todo.append(r)
         if todo and self.frame_embedder is None:
+            if notify:
+                notify(0.0, "loading the picture model")
             tagger = SceneTagger(app_dir() / "models" / "clip")
             self.frame_embedder = tagger.embed_each
         for k, r in enumerate(todo):
-            times = moments.frame_times(r["duration"] or 0)
+            if notify:
+                notify(k / len(todo), f"video {k + 1} of {len(todo)}")
             with tempfile.TemporaryDirectory() as tmp:
-                pictures = []
-                for n, t in enumerate(times):
-                    shot = Path(tmp) / f"f{n}.jpg"
-                    subprocess.run([ffmpeg_paths()[0], "-loglevel", "error", "-y", "-ss", f"{t:.2f}", "-i", r["path"],
-                                    "-frames:v", "1", "-vf", rotate_filter(r["rotation"] or 0) + "scale=336:-2",
-                                    "-q:v", "4", str(shot)], capture_output=True)
-                    if shot.exists():
-                        pictures.append((t, shot))
+                pictures = _video_frames(r, Path(tmp))
                 if not pictures:
                     continue
                 vectors = np.asarray(self.frame_embedder([p for _, p in pictures]), np.float32)
@@ -834,12 +831,12 @@ class Trip:
                                     [(r["path"], t, v.tobytes()) for (t, _), v in zip(pictures, vectors)])
                 self.db.commit()
             out[r["path"]] = ([t for t, _ in pictures], vectors)
-            if notify:
-                notify((k + 1) / len(todo))
+        if notify and todo:
+            notify(1.0, "comparing")
         return out
 
     def find_moment(self, key: str, words: np.ndarray | None, ticked: list[dict] | None = None,
-                    notify: Callable[[float], None] | None = None) -> list[dict]:
+                    notify: Callable[[float, str], None] | None = None) -> list[dict]:
         """The shots of one storyline block, best match for the moment first: {"path", "t", "score", "likely",
         "thumb"}. ticked: [{"path", "t"}] you marked as right (the app looks for more like them)."""
         line = self.storyline()
@@ -2300,6 +2297,30 @@ def _frames(path: Path, kind: str, duration: float, out_dir: Path, rotation: int
         if out.exists():
             frames.append(out)
     return frames
+
+
+def _video_frames(row: dict, out_dir: Path) -> list[tuple[float, Path]]:
+    """Small frames about every second inside a video, with their times. Its key frames first (one quick pass, no
+    decoding of the rest); if they are too far apart, frames read at each second."""
+    turn = rotate_filter(row.get("rotation") or 0)
+    result = subprocess.run(
+        [ffmpeg_paths()[0], "-hide_banner", "-skip_frame", "nokey", "-i", row["path"], "-an",
+         "-vf", turn + "scale=224:-2,showinfo", "-vsync", "vfr", "-q:v", "5", str(out_dir / "k%04d.jpg")],
+        capture_output=True, text=True)
+    times = [float(m) for m in re.findall(r"pts_time:([0-9.]+)", result.stderr)]
+    files = sorted(out_dir.glob("k*.jpg"))
+    if len(files) == len(times):
+        chosen = moments.pick_frames(times, row["duration"] or 0)
+        if chosen:
+            return [(round(times[k], 2), files[k]) for k in chosen]
+    pictures = []
+    for n, t in enumerate(moments.frame_times(row["duration"] or 0)[::2]):  # every 2 s: each one is a seek
+        shot = out_dir / f"f{n}.jpg"
+        subprocess.run([ffmpeg_paths()[0], "-loglevel", "error", "-y", "-ss", f"{t:.2f}", "-i", row["path"],
+                        "-frames:v", "1", "-vf", turn + "scale=224:-2", "-q:v", "5", str(shot)], capture_output=True)
+        if shot.exists():
+            pictures.append((t, shot))
+    return pictures
 
 
 def _one_per_person(found: list) -> list:

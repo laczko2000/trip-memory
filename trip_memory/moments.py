@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 
 EVERY = 1.0  # seconds between the frames looked at
-MOST = 40  # frames per video at most (long clips: spread out)
+MOST = 30  # frames per video at most (long clips: spread out)
 AROUND = 3.0  # seconds of the clip kept around a moment
 TICKED_WEIGHT = 1.5  # how much your ticked examples count against your words
 
@@ -22,6 +22,19 @@ def frame_times(duration: float) -> list[float]:
     count = min(MOST, max(1, int(duration / EVERY)))
     step = duration / count
     return [round(step * (k + 0.5), 2) for k in range(count)]
+
+
+def pick_frames(found: list[float], duration: float) -> list[int]:
+    """Of the frames a video has ready (its key frames, fast to read), the ones nearest to every second; empty if
+    they are too far apart to find a moment (then the app reads frames at those seconds itself)."""
+    if len(found) < 2 or (duration or 0) / len(found) > 2.5:
+        return []
+    out = []
+    for t in frame_times(duration):
+        k = min(range(len(found)), key=lambda k: abs(found[k] - t))
+        if k not in out:
+            out.append(k)
+    return sorted(out)
 
 
 def find(words: np.ndarray | None, shots: dict[str, tuple[list[float], np.ndarray]],

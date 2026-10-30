@@ -584,8 +584,9 @@ def test_a_moment_inside_a_clip_is_found_and_kept(tmp_path, monkeypatch):
     trip.set_theme([path], "Water sports")
     jump = np.eye(4, dtype=np.float32)[0]
     calm = np.eye(4, dtype=np.float32)[1]
-    # A stand-in for the picture model: the frame from the 8th second on is the jump.
-    trip.frame_embedder = lambda pictures: np.array([jump if n == 8 else calm for n, _ in enumerate(pictures)])
+    # A stand-in for the picture model: the frame at 8.5 s is the jump (this test clip has few key frames, so the
+    # app reads a frame every 2 seconds: 0.5, 2.5, 4.5, 6.5, 8.5...).
+    trip.frame_embedder = lambda pictures: np.array([jump if n == 4 else calm for n, _ in enumerate(pictures)])
     found = trip.find_moment("Water sports|", jump)
     assert found[0]["path"] == path and found[0]["t"] == 8.5 and found[0]["likely"]
     assert trip.find_moment("Water sports|", jump)[0]["t"] == 8.5  # the frames are kept: no second look
