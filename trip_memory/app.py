@@ -746,6 +746,8 @@ class Page:
 
     def close_cut(self, cut: dict) -> None:
         cut["open"] = False
+        if cut.get("box"):  # the Library picture plays silently again when you hover over it
+            ui.run_javascript(f"const v = document.querySelector('#{cut['box']} video'); if (v) {{ v.muted = true; v.pause(); }}")
         cut["area"].clear()
         if cut.get("wide"):
             cut["tile"].classes(remove="w-96", add="w-36")
@@ -781,7 +783,7 @@ class Page:
             at = lo if lo != part["min"] else max(lo, hi - 1.5)
             part.update(min=lo, max=hi)
             show()
-            ui.run_javascript(f"tmPlayPart('{box}', {lo}, {hi}, {at})")
+            ui.run_javascript(f"tmPlayPart('{box}', {lo}, {hi}, {at}, true)")
 
         async def apply(whole: bool = False) -> None:
             if not whole and part["min"] <= start + 0.05 and part["max"] >= end - 0.05:
@@ -810,7 +812,7 @@ class Page:
         ui.timer(0.05, strip, once=True)
         with ui.row().classes("w-full items-center gap-1 px-1 pb-1"):
             ui.button("Play", icon="play_arrow",
-                      on_click=lambda: ui.run_javascript(f"tmPlayPart('{box}', {part['min']}, {part['max']}, {part['min']})")) \
+                      on_click=lambda: ui.run_javascript(f"tmPlayPart('{box}', {part['min']}, {part['max']}, {part['min']}, true)")) \
                 .props("outline dense no-caps")
             ui.button("Cut", icon="content_cut", on_click=lambda: apply()).props("color=green dense no-caps") \
                 .tooltip("Keep only this part")
@@ -2992,12 +2994,13 @@ function tmShowCut(id, start, end, thumb, words) {
   }
   for (const e of document.querySelectorAll('.tm-len-' + id)) e.textContent = words;
 }
-function tmPlayPart(id, start, end, from) {
+function tmPlayPart(id, start, end, from, sound) {
   const box = document.getElementById(id);
   if (!box) return;
   if (tmPlaying && tmPlaying !== box) tmStop(tmPlaying);
   box.dataset.start = start; box.dataset.end = end;
   tmPlaying = box;
+  if (sound) tmVideo(box).muted = false;  // cutting a clip: hear it
   tmPlayFrom(box, from);
 }
 document.addEventListener('mouseenter', (e) => {
