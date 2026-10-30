@@ -74,14 +74,15 @@ def draw(title: dict, w: int, h: int) -> Image.Image:
     sub = (title.get("sub") or "").strip()
     if spec["upper"]:
         text = text.upper()
-    big = _font(style, round(h * spec["size"]))
-    small = _font("caption" if style != "caption" else "clean", round(h * (0.04 if style != "caption" else 0.035)))
+    ref = min(w, h)  # an upright phone video gets letters sized to its width, not its height
+    big = _font(style, round(ref * spec["size"]))
+    small = _font("caption" if style != "caption" else "clean", round(ref * (0.04 if style != "caption" else 0.035)))
     layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     pen = ImageDraw.Draw(layer)
     margin = w * 0.06
     lines = _wrap(pen, text, big, w - 2 * margin) if text else []
     sub_lines = _wrap(pen, sub, small, w - 2 * margin) if sub else []
-    gap = h * 0.012
+    gap = ref * 0.012
     big_h = big.getmetrics()[0] + big.getmetrics()[1] * 0.4
     small_h = small.getmetrics()[0] + small.getmetrics()[1] * 0.4
     block = len(lines) * big_h + len(sub_lines) * small_h + (gap * 2 if lines and sub_lines else 0)

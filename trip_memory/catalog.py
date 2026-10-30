@@ -170,6 +170,7 @@ class Trip:
             "transition_why TEXT", "camera_moves TEXT", "speed REAL DEFAULT 1.0", "speed_why TEXT", "fps REAL",
             "effects TEXT", "effects_why TEXT", "ai_caption TEXT", "ai_score INTEGER", "removed INTEGER DEFAULT 0", "features BLOB",
             "plan_role TEXT", "plan_pos REAL", "title_text TEXT", "title_sub TEXT", "title_style TEXT", "title_where TEXT",
+            "focus_x REAL",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
@@ -317,9 +318,11 @@ class Trip:
         """Shots a story's plan leaves out: they stay out of the storyboard and Auto-edit (your selection keeps them)."""
         return {it["path"] for s in stories if s["planned"] for it in s["items"] if not it["plan_role"]}
 
-    def media_items(self, chapters: bool = False) -> list[MediaItem]:
-        """What the video is made from, in storyboard order, optionally with a title card for each day."""
+    def media_items(self, chapters: bool = False, focus: bool = False) -> list[MediaItem]:
+        """What the video is made from, in storyboard order, optionally with a title card for each day.
+        focus: also say where the people are in each shot (for a phone video, which shows a narrow slice)."""
         board = self.storyboard()
+        where = self.focus_points(board) if focus else {}
         days = sorted({r["day"] for r in self.items() if r["chosen"]})
         shown = self.shot_titles(board)
         result: list[MediaItem] = []
@@ -346,9 +349,35 @@ class Trip:
                     speed=r["speed"] or 1.0,
                     effects=json.loads(r["effects"]) if r["effects"] else None,
                     overlay=shown.get(r["path"]),
+                    focus=where.get(r["path"]),
                 )
             )
         return result
+
+    def focus_points(self, rows: list[dict]) -> dict[str, float]:
+        """Where the faces are across each shot's picture (0 left .. 1 right; bigger faces count more), looked
+        up once from its preview. Shots without faces are left out (a phone video then shows their middle)."""
+        todo = [r for r in rows if r.get("focus_x") is None and r.get("thumb") and Path(r["thumb"]).exists()]
+        if todo:
+            finder = self._load(lambda: FaceFinder(app_dir() / "models"), "people")
+            found = []
+            for r in todo:
+                x = -1.0  # looked, no faces
+                if finder is not None:
+                    try:
+                        with Image.open(r["thumb"]) as img:
+                            rgb = np.asarray(img.convert("RGB"))
+                        boxes = [f.box for f in finder.find(rgb)]
+                    except Exception:
+                        boxes = []
+                    if boxes:
+                        sizes = [(b[2] - b[0]) * (b[3] - b[1]) for b in boxes]
+                        x = sum((b[0] + b[2]) / 2 * a for b, a in zip(boxes, sizes)) / sum(sizes) / rgb.shape[1]
+                found.append((x, r["path"]))
+                r["focus_x"] = x
+            if finder is not None:
+                self.db_write_many("UPDATE items SET focus_x = ? WHERE path = ?", found)
+        return {r["path"]: float(r["focus_x"]) for r in rows if r.get("focus_x") is not None and r["focus_x"] >= 0}
 
     # ---------- titles ----------
 

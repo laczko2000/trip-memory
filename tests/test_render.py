@@ -276,3 +276,22 @@ def test_a_look_colours_the_whole_video(tmp_path):
         assert abs(rgb[..., 0] - rgb[..., 2]).mean() < 6  # no colour left
     warm = looks.preview(trip / "b.jpg", "summer")
     assert warm.startswith("data:image/jpeg;base64,") and warm != looks.preview(trip / "b.jpg", "natural")
+
+
+def test_a_phone_video_fills_the_upright_frame_around_the_people(tmp_path):
+    import dataclasses
+
+    trip = tmp_path / "trip"
+    trip.mkdir()
+    picture = Image.new("RGB", (800, 450), (0, 0, 150))
+    picture.paste((220, 0, 0), (620, 0, 720, 450))  # "the people": a red band near the right
+    picture.save(trip / "a.jpg")
+    subprocess.run([ffmpeg_paths()[0], "-loglevel", "error", "-y", "-loop", "1", "-i", str(trip / "a.jpg"), "-t", "2",
+                    "-pix_fmt", "yuv420p", "-c:v", "libx264", str(trip / "b.mp4")], check=True)
+    settings = RenderSettings(width=180, height=320, photo_seconds=2)
+    for item in scan_folder(trip)[0]:
+        out = render([dataclasses.replace(item, focus=670 / 800)], settings, tmp_path / f"{item.kind}.mp4")
+        stream = next(s for s in probe(str(out))["streams"] if s["codec_type"] == "video")
+        assert (stream["width"], stream["height"]) == (180, 320)
+        middle = _frame(out, 1.0, 180, 320)[100:220, 70:110].astype(int)
+        assert middle[..., 0].mean() > 150 and middle[..., 2].mean() < 80, item.kind  # the red band is in view

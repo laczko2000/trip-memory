@@ -33,7 +33,8 @@ from .scenes import SCENES
 from .tags import ALL_TAGS, EDITABLE_TAGS, TAG_GROUP
 
 OUTPUT_DIR = Path.home() / "Movies" / "Trip Memory"
-RESOLUTIONS = {"Full HD (1080p)": (1920, 1080), "HD (720p, faster)": (1280, 720)}
+RESOLUTIONS = {"Full HD (1080p)": (1920, 1080), "HD (720p, faster)": (1280, 720),
+               "Phone, upright 9:16 (Instagram, TikTok)": (1080, 1920)}
 PAGE_SIZE = 48
 TILES_PER_PAGE = 60  # Choose files draws this many at a time as you scroll
 STORY_ROWS = 60
@@ -2306,7 +2307,9 @@ class Page:
         r = self.rendering
         if r["busy"] or not self.trip:
             return
-        items = self.trip.media_items()
+        width, height = RESOLUTIONS[self.resolution.value]
+        # A phone video shows a narrow upright slice of each shot: find where the people are, to keep them in it.
+        items = await run.io_bound(self.trip.media_items, False, height > width)
         if not items:
             ui.notify("Nothing is ticked for the video yet. Pick items in the Library.", type="warning")
             return
@@ -2314,7 +2317,6 @@ class Page:
         if music and not Path(music).expanduser().is_file():
             ui.notify("The music file was not found.", type="warning")
             return
-        width, height = RESOLUTIONS[self.resolution.value]
         settings = RenderSettings(
             width=width,
             height=height,
@@ -2324,6 +2326,7 @@ class Page:
             transition_seconds=self.t_len.value,
             music_path=str(Path(music).expanduser()) if music else None,
             music_volume=self.music_vol.value,
+            look=self.trip.look(),
         )
         settings.end_black, settings.end_title = self.trip.end_card()
         title = (self.name_input.value or "").strip() or self.trip.folder.name or "My trip"

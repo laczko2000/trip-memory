@@ -98,6 +98,19 @@ def _fit_with_blur(src: str, w: int, h: int, out: str) -> str:
     )
 
 
+def _fill_around(src: str, w: int, h: int, focus: float | None, out: str) -> str:
+    """Fill the whole w x h frame with the picture, cutting off its sides, keeping the people (focus, 0..1
+    across) in view. For a phone video: a wide shot shows its slice with the people in it."""
+    f = 0.5 if focus is None else min(1.0, max(0.0, focus))
+    return (f"[{src}]scale={w}:{h}:force_original_aspect_ratio=increase,setsar=1,"
+            f"crop={w}:{h}:x='max(0,min(iw-{w},iw*{f:.3f}-{w}/2))':y='(ih-{h})/2'[{out}]")
+
+
+def tall(s: RenderSettings) -> bool:
+    """A phone video (taller than wide)."""
+    return s.height > s.width
+
+
 def _hdr_to_sdr() -> str:
     """Tone-map iPhone HDR footage so colours do not look washed out."""
     if not has_filter("zscale"):
@@ -169,7 +182,8 @@ def _video_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
         graph += f"[0:v]setpts=(PTS-STARTPTS)/{speed:.4f}{smooth},{look}format=yuv420p[src];"
     else:
         graph += f"[0:v]{look}format=yuv420p[src];"
-    graph += _fit_with_blur("src", s.width, s.height, "fit")
+    graph += (_fill_around("src", s.width, s.height, item.focus, "fit") if tall(s)
+              else _fit_with_blur("src", s.width, s.height, "fit"))
     graph += f";[fit]fps={FPS}{_zoom_filter(item, moving)}{_hit_filter(effects, s.width, s.height)}{_freeze_filter(effects, moving)},format=yuv420p[v]"
     inputs = ["-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", str(item.path)]
     title_png = None
@@ -312,7 +326,7 @@ def _photo_segment(item: MediaItem, s: RenderSettings, out: Path, workdir: Path)
             img.save(still, quality=92)
 
     with Image.open(still) as img:
-        canvas = _photo_canvas(img.convert("RGB"), s.width, s.height)
+        canvas = _photo_canvas(img.convert("RGB"), s.width, s.height, item.focus if tall(s) else None, tall(s))
     move = "in" if item.kind == "title" else _pick_move(item.path, canvas_is_tall=_is_tall(still))
     frames = max(1, round(seconds * FPS))
     w, h = s.width, s.height
@@ -352,9 +366,15 @@ def _pick_move(path, canvas_is_tall: bool) -> str:
     return moves[int(hashlib.sha1(str(path).encode()).hexdigest(), 16) % len(moves)]
 
 
-def _photo_canvas(img: Image.Image, w: int, h: int) -> np.ndarray:
-    """The photo fitted into the video frame (bigger, for zooming); empty sides filled with a blurred copy."""
+def _photo_canvas(img: Image.Image, w: int, h: int, focus: float | None = None, fill: bool = False) -> np.ndarray:
+    """The photo fitted into the video frame (bigger, for zooming); empty sides filled with a blurred copy.
+    fill (a phone video): the photo fills the frame instead, its sides cut off around the people (focus)."""
     cw, ch = round(w * CANVAS), round(h * CANVAS)
+    if fill:
+        f = 0.5 if focus is None else focus
+        wide = img.width * ch / img.height  # its width once scaled to fill the height
+        across = min(1.0, max(0.0, (f * wide - cw / 2) / (wide - cw))) if wide > cw else 0.5  # the people in the middle
+        return np.asarray(ImageOps.fit(img, (cw, ch), Image.LANCZOS, centering=(across, 0.5)))
     bg = ImageOps.fit(img, (max(1, cw // 8), max(1, ch // 8))).filter(ImageFilter.GaussianBlur(4)).resize((cw, ch))
     fg = ImageOps.contain(img, (cw, ch), Image.LANCZOS)
     bg.paste(fg, ((cw - fg.width) // 2, (ch - fg.height) // 2))
@@ -409,7 +429,7 @@ def _segment_key(item: MediaItem, s: RenderSettings) -> str:
     """Name a prepared clip by everything that changes how it looks, so it can be reused safely."""
     stat = item.path.stat()
     parts = [SEGMENT_VERSION, item.kind, item.path, stat.st_mtime, stat.st_size, s.width, s.height, item.rotation,
-             sorted((item.overlay or {}).items())]
+             sorted((item.overlay or {}).items()), item.focus if tall(s) else None]
     if item.kind == "photo":
         parts += [item.seconds or s.photo_seconds]
     elif item.kind == "title":

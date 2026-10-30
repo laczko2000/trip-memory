@@ -55,6 +55,7 @@ class MediaItem:
     fx_out: str | None = None  # "zoom" from the transition out of it
     title: str | None = None  # for kind "title": the chapter card text, two lines split by "\n"
     overlay: dict | None = None  # text over the shot: {"text", "sub", "style", "where"} (see titles.py)
+    focus: float | None = None  # where the people are, across the picture (0 left .. 1 right), for a phone video
 
     @property
     def name(self) -> str:

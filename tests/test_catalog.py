@@ -427,3 +427,18 @@ def test_the_look_is_kept_per_trip(tmp_path, monkeypatch):
     assert catalog.Trip(tmp_path / "trip").look() == "film"
     trip.set_look("nonsense")
     assert trip.look() == "natural"
+
+
+def test_where_the_people_are_is_found_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    monkeypatch.setattr(catalog, "FaceFinder", FakeFaces)  # a face at x 10..110
+    (tmp_path / "app").mkdir()
+    (tmp_path / "trip").mkdir()
+    _gps_photo(tmp_path / "trip" / "a.jpg", "2025:07:03 09:00:00", 38.7, -9.1, "red")
+    trip = catalog.Trip(tmp_path / "trip")
+    trip.prepare()
+    (item,) = trip.media_items(focus=True)
+    width = Image.open(trip.items()[0]["thumb"]).width
+    assert abs(item.focus - 60 / width) < 1e-6
+    monkeypatch.setattr(catalog, "FaceFinder", None)  # not needed again
+    assert trip.media_items(focus=True)[0].focus == item.focus and trip.media_items()[0].focus is None
