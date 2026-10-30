@@ -1949,6 +1949,14 @@ class Trip:
         rows = self.query("SELECT value FROM meta WHERE key = 'video_size'")
         return rows[0]["value"] if rows and rows[0]["value"] in ("landscape", "phone") else "landscape"
 
+    def song(self) -> str | None:
+        """The song you chose last for this trip (or your trimmed version of it), so it is there after a restart."""
+        rows = self.query("SELECT value FROM meta WHERE key = 'song'")
+        return rows[0]["value"] if rows and rows[0]["value"] else None
+
+    def set_song(self, path: str | None) -> None:
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('song', ?)", (path or "",))
+
     def own_length(self) -> float | None:
         """The length you typed on the Storyboard ("Use a different length"), or None: as long as your track."""
         rows = self.query("SELECT value FROM meta WHERE key = 'own_length'")

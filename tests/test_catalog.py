@@ -601,3 +601,13 @@ def test_a_moment_inside_a_clip_is_found_and_kept(tmp_path, monkeypatch):
     trip.auto_edit_steady(autoedit.Limits(max_video=3, max_photo=2, min_shot=1), 3.0, 0.0, "Fade")
     row = next(r for r in trip.items() if r["path"] == path)
     assert 7.0 <= row["trim_start"] and row["trim_end"] <= 10.01
+
+
+def test_the_trip_remembers_its_song(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    (tmp_path / "trip").mkdir()
+    trip = catalog.Trip(tmp_path / "trip")
+    assert trip.song() is None
+    trip.set_song("/music/summer.m4a")
+    assert catalog.Trip(tmp_path / "trip").song() == "/music/summer.m4a"

@@ -328,6 +328,9 @@ class Page:
         save_settings(folder=str(self.trip.folder))
         self.filters = {k: ALL for k in self.filters}
         self.choose_filters = {k: ALL for k in self.choose_filters}
+        song = self.trip.song()
+        if song and Path(song).is_file() and hasattr(self, "music_input") and self.music_input.value != song:
+            self.music_input.value = song  # the song you chose last time
         self.refresh_all()
         await self.run_step(self.trip.prepare)
         analysed = any(it["faces_done"] or it["scene_done"] for it in self.items)
@@ -3367,6 +3370,8 @@ class Page:
                 .props("flat dense no-caps")
 
     def music_changed(self) -> None:
+        if self.trip and self.music_path():
+            self.trip.set_song(self.music_path())  # remembered for the next start
         if hasattr(self, "music_credit"):
             credit = free_music.credit_for(self.music_input.value, app_dir() / "music") if self.music_input.value else None
             self.music_credit.text = f"Free song: {credit}. A credits file is saved next to your video." if credit else ""
