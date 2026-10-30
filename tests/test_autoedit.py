@@ -323,3 +323,18 @@ def test_too_few_shots_thin_your_pins_but_keep_their_pattern():
     assert len(kept) == 15 and kept[0] == 2.0 and kept[-1] == 56.0 and 30.0 in kept
     assert kept[:4] == [2.0, 6.0, 10.0, 14.0] and max(np.diff(kept)) <= 4.0 + 1e-9  # every other pin, no shot too long
     assert autoedit.fit_pins(song, pins, 5, longest=4.0) == kept  # can't go further without too long shots
+
+
+def test_a_long_song_with_many_pins_is_filled_to_the_end_with_the_shots_you_have():
+    from trip_memory.songmap import Section, SongMap
+
+    rng = np.random.default_rng(1)
+    song = SongMap(duration=180.0, bpm=120, period=0.5, first_beat=0.0, clear_beat=True, downbeat=0,
+                   accents=list(rng.random(360)), sections=[Section(0, 90, 0.3, "Calm"), Section(90, 180, 0.8, "Lively")])
+    song.taps = [1.2 * k for k in range(1, 150)]  # 149 pins
+    rows = [_clip(n, action=rng.random(), duration=float(rng.uniform(1.0, 3.0))) for n in range(60)]  # short clips
+    rows += [_row(100 + n, kind="photo") for n in range(10)]
+    for r in rows:
+        r.setdefault("taken_at", "2025-07-01T10:00:00")
+    plan = autoedit.plan_to_music(rows, {}, song, autoedit.Limits(cut_on="taps", storyline="date"), None, 0.8, "Fade")
+    assert plan.length >= 175 and len(plan.shots) >= 50 and plan.kept_pins and len(plan.kept_pins) < 149

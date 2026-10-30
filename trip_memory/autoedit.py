@@ -681,26 +681,55 @@ def plan_to_music(
             bars = song.bar_starts()
             later = bars[bars >= max(limits.min_shot, target - 2 * song.period)]
             end = float(later[0]) if len(later) else target  # end on a bar line
+    def attempt() -> tuple[list[Slot], list[int]]:
+        best: tuple[list[Slot], list[int]] = ([], [])
+        for longest in (None, limits.max_photo, max(limits.min_shot, limits.max_photo / 2)):
+            slots = music_slots(song, limits, end, longest)
+            slots = merge_slots(slots, len(candidates), longest or max(limits.max_video, limits.max_photo))
+            picks = fill_slots(slots, candidates, limits)
+            if len(picks) == len(slots):
+                return slots, picks
+            if sum(s.seconds for s in slots[: len(picks)]) > sum(s.seconds for s in best[0][: len(best[1])]):
+                best = (slots, picks)
+        return best
+
     kept = None
-    taps = getattr(song, "taps", None)
-    if taps:  # fewer shots than your pins: cut on fewer of them, keeping their pattern
-        longest = max(limits.max_video, limits.max_photo)
-        inside = sorted(t for t in taps if 0 < t < end - 1e-3)
-        room = len(candidates) - 1  # one shot before your first pin, one after each
-        if inside and room < len(inside):
-            kept = fit_pins(song, inside, max(1, room), longest)
-            song.taps = kept + [t for t in taps if t >= end - 1e-3]
-    best: tuple[list[Slot], list[int]] = ([], [])
-    for longest in (None, limits.max_photo, max(limits.min_shot, limits.max_photo / 2)):
-        slots = music_slots(song, limits, end, longest)
-        slots = merge_slots(slots, len(candidates), longest or max(limits.max_video, limits.max_photo))
-        picks = fill_slots(slots, candidates, limits)
-        if len(picks) == len(slots):
-            best = (slots, picks)
+    taps = sorted(getattr(song, "taps", None) or [])
+    inside = [t for t in taps if 0 < t < end - 1e-3]
+    after = [t for t in taps if t >= end - 1e-3]
+    cap = max(limits.max_video, limits.max_photo)
+    if inside and len(candidates) - 1 < len(inside):  # fewer shots than your pins: a first guess
+        kept = fit_pins(song, inside, max(1, len(candidates) - 1), cap)
+        song.taps = kept + after
+    slots, picks = attempt()
+
+    def covered(slots: list[Slot], picks: list[int]) -> float:
+        return sum(s.seconds for s in slots[: len(picks)])
+
+    tries = [(slots, picks, kept)]
+    # Still short of shots (some clips too short for the time between pins, or the part after your last pin
+    # needs shots too): use fewer pins again, until the video lasts as long as it should. Rather a few longer
+    # shots than a video that stops early.
+    for _ in range(8):
+        if not inside or len(picks) >= len(slots):
             break
-        if sum(s.seconds for s in slots[: len(picks)]) > sum(s.seconds for s in best[0][: len(best[1])]):
-            best = (slots, picks)
-    slots, picks = best
+        now = kept or inside
+        want = max(1, len(now) - (len(slots) - len(picks)))
+        fewer = fit_pins(song, inside, want, cap)
+        while len(fewer) > want and cap < 60:  # as far as your longest-shot setting allows: allow a bit longer
+            cap *= 1.5
+            fewer = fit_pins(song, inside, want, cap)
+        if len(fewer) >= len(now):
+            break
+        kept = fewer
+        song.taps = kept + after
+        slots, picks = attempt()
+        tries.append((slots, picks, kept))
+    # The try that fills (nearly) the most of the music, with as many shots as possible.
+    most = max(covered(t[0], t[1]) for t in tries)
+    slots, picks, kept = max((t for t in tries if covered(t[0], t[1]) >= most - max(3.0, 0.03 * most)),
+                             key=lambda t: len(t[1]))
+    song.taps = (kept or inside) + after
     slots = slots[: len(picks)]
     if not slots:
         return Plan(left_out=[r["path"] for r in rows], beat=song.beat)
