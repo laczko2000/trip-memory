@@ -1,0 +1,195 @@
+"""Themes: every shot gets one main activity (what is it: kitesurfing, a boat tour, food...), plus who is in it, where
+and when. The app suggests the activity from the picture as a whole (a ship far behind a kitesurfer doesn't make it a
+boat shot); you confirm or move shots, and the app learns from the shots you confirmed: the rest are compared with
+them, picture with picture, which is far more reliable than words.
+
+Free and on this Mac: it uses the CLIP picture fingerprints the app already made for every shot.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+
+import numpy as np
+
+OTHER = "Other"
+
+# Activity -> (emoji, what the pictures show, for CLIP). The order is the order shown.
+DEFAULTS: dict[str, tuple[str, list[str]]] = {
+    "Water sports": ("🏄", ["kitesurfing on the sea with a kite", "windsurfing or surfing on a wave",
+                           "a person riding a jet ski or wakeboard"]),
+    "Boat": ("⛵", ["people on the deck of a boat", "a boat trip on the sea", "a sailing boat"]),
+    "Beach & sea": ("🏖️", ["a sandy beach by the sea", "people relaxing on a beach", "the sea and the coast"]),
+    "Swimming & pool": ("🏊", ["people swimming", "a swimming pool", "snorkelling underwater"]),
+    "Food & drink": ("🍝", ["a plate of food on a table", "drinks and cocktails", "people eating at a restaurant"]),
+    "Sightseeing": ("🏰", ["a famous building or monument", "a castle, church or old ruins", "tourists sightseeing"]),
+    "City streets": ("🏙️", ["a busy city street", "narrow streets of an old town", "a town square"]),
+    "Nature & views": ("🏞️", ["mountains and a wide landscape", "a forest or green countryside", "a panoramic view"]),
+    "Party & night": ("🌙", ["a party with people dancing", "a bar or a city at night", "a concert at night"]),
+    "Travel": ("✈️", ["an airport or an airplane", "a view from a car on the road", "a train, bus or ferry"]),
+    "Relaxing": ("😌", ["people relaxing at a hotel or holiday home", "a hotel room or balcony", "a sunbed by the pool"]),
+    "People & portraits": ("🧑‍🤝‍🧑", ["a close-up portrait of a person", "a group of friends posing for a photo",
+                                     "a selfie"]),
+}
+SURE = 0.55  # below this share of the vote, a suggestion is marked "?" (worth a look)
+
+
+def default_activities() -> list[dict]:
+    return [{"name": n, "emoji": e, "describe": d, "vector": None} for n, (e, d) in DEFAULTS.items()] + \
+        [{"name": OTHER, "emoji": "❔", "describe": [], "vector": None}]
+
+
+def new_activity(name: str) -> dict:
+    """An activity you added yourself: the app looks for pictures of it, then learns from the shots you move in."""
+    return {"name": name, "emoji": "⭐", "describe": [name.lower()], "vector": None}
+
+
+def day_part(taken_at: str) -> str:
+    hour = datetime.fromisoformat(taken_at).astimezone().hour
+    return "morning" if 5 <= hour < 12 else "afternoon" if hour < 17 else "evening" if hour < 21 else "night"
+
+
+def suggest(vectors: np.ndarray, activities: list[dict], confirmed: list[tuple[int, str]]) -> list[tuple[str, float]]:
+    """For each shot (one CLIP vector per row): the most likely activity and how sure (0..1).
+
+    confirmed: (row, activity) for the shots you confirmed. Those keep their activity, and the others are compared
+    with them: a shot that looks like your confirmed boat shots is a boat shot, whatever the words say."""
+    names = [a["name"] for a in activities]
+    n = len(vectors)
+    if not n or not names:
+        return []
+    # 1. The words: how well each picture fits each activity's description (CLIP), "Other" when nothing fits.
+    words = np.full((n, len(names)), -np.inf)
+    for j, a in enumerate(activities):
+        if a.get("vector") is not None:
+            words[:, j] = 100 * (vectors @ np.asarray(a["vector"], np.float32))
+    known = np.isfinite(words[0])
+    if OTHER in names and known.any():
+        words[:, names.index(OTHER)] = np.percentile(words[:, known], 40, axis=1) + OTHER_BAR
+    p = _softmax(words) if np.isfinite(words).any() else np.full((n, len(names)), 1 / len(names))
+    # 2. Your examples: the activity whose confirmed shots this picture looks most like. The closer it is to any of
+    # them, the more that counts.
+    examples: dict[int, list[int]] = {}
+    for row, name in confirmed:
+        if name in names and 0 <= row < n:
+            examples.setdefault(names.index(name), []).append(row)
+    if examples:
+        near = np.full((n, len(names)), -np.inf)
+        for j, rows in examples.items():
+            sims = np.sort(vectors @ vectors[rows].T, axis=1)[:, ::-1][:, :3]
+            near[:, j] = sims.mean(axis=1)
+        closest = near.max(axis=1, keepdims=True)
+        trust = np.clip((closest - LOOKS_LIKE) / (SAME - LOOKS_LIKE), 0, 1)
+        p = (1 - trust) * p + trust * _softmax(30 * near)
+    out = [(names[int(j)], float(p[i, j])) for i, j in enumerate(p.argmax(axis=1))]
+    for row, name in confirmed:
+        if 0 <= row < n:
+            out[row] = (name, 1.0)
+    return out
+
+
+OTHER_BAR = 1.0  # how far above an average fit a picture must be to get an activity rather than "Other"
+LOOKS_LIKE, SAME = 0.72, 0.9  # picture-to-picture likeness: from "a bit like" your example to "the same kind of shot"
+
+
+def _softmax(logits: np.ndarray) -> np.ndarray:
+    logits = np.where(np.isfinite(logits), logits, -1e9)
+    logits = logits - logits.max(axis=1, keepdims=True)
+    e = np.exp(logits)
+    return e / e.sum(axis=1, keepdims=True)
+
+
+def by_tags(tags: list[str], scene: str | None) -> str:
+    """Without picture fingerprints (scenes not analysed yet): a first guess from the shot's tags."""
+    known = set(tags or []) | {scene or ""}
+    rules = [
+        ("Water sports", {"Surfing", "Kayak & paddle board", "Jet ski & speedboat", "Snorkelling & diving"}),
+        ("Boat", {"Boat trip", "Sea & boats"}),
+        ("Food & drink", {"Eating & drinking", "Restaurant & café", "Food & drinks", "Cooking & barbecue"}),
+        ("Swimming & pool", {"Swimming", "Pool"}),
+        ("Beach & sea", {"Beach", "Sea", "Relaxing & sunbathing"}),
+        ("Sightseeing", {"Landmark", "Sightseeing", "Museum"}),
+        ("City streets", {"City street", "Old town", "City"}),
+        ("Nature & views", {"Mountains", "Forest & countryside", "Lake & river", "Nature", "Hiking"}),
+        ("Party & night", {"Dancing & party", "Night", "Party & nightlife", "Concert & show"}),
+        ("Travel", {"Airport & transport", "Road", "Driving", "Travel day", "Car & road trip"}),
+        ("Relaxing", {"Hotel & home", "Hotel"}),
+        ("People & portraits", {"Posing", "Group photo", "Selfie & portrait"}),
+    ]
+    for name, hits in rules:
+        if known & hits:
+            return name
+    return OTHER
+
+
+# ---------- the storyline: blocks of themes in your order ----------
+
+TIME, THEME, DAY = "time", "theme", "day"
+ORDERS = {TIME: "As it happened", THEME: "By theme", DAY: "Day by day"}
+
+
+def block_key(activity: str, person: str | None) -> str:
+    return f"{activity}|{person or ''}"
+
+
+def block_of(row: dict, split: set[str]) -> str:
+    """The block a shot belongs to: its activity, and for an activity you split by person, the first person in it."""
+    activity = row.get("theme") or OTHER
+    if activity in split:
+        named = [p for p in row.get("people") or [] if not p.startswith("Person ")]
+        return block_key(activity, named[0] if named else "everyone else")
+    return block_key(activity, None)
+
+
+def blocks_for(rows: list[dict], saved: list[dict], split: set[str]) -> list[dict]:
+    """The storyline's blocks: your saved order first (with whether each is on), then any new ones in the order
+    their first shot was taken. Each: {"key", "activity", "person", "on", "count"}."""
+    counts: dict[str, int] = {}
+    first: dict[str, str] = {}
+    for r in rows:
+        k = block_of(r, split)
+        counts[k] = counts.get(k, 0) + 1
+        first.setdefault(k, r["taken_at"])
+    out = []
+    seen = set()
+    for b in saved:
+        if b["key"] in counts and b["key"] not in seen:
+            out.append(b | {"count": counts[b["key"]]})
+            seen.add(b["key"])
+    for k in sorted(counts, key=lambda k: first[k]):
+        if k not in seen:
+            activity, _, person = k.partition("|")
+            out.append({"key": k, "activity": activity, "person": person or None, "on": True, "count": counts[k]})
+    return out
+
+
+def chapters_for(storyline: dict, rows: list[dict]) -> tuple[list[dict], list[int | None]]:
+    """Your storyline as chapters for Auto-edit, and each shot's chapter (None: left out).
+
+    As it happened: one chapter in time order. By theme: one chapter per block, in your order. Day by day: for each
+    day, its blocks in your order. A finale (the most exciting shots) closes the video if it is on."""
+    order = storyline.get("order", TIME)
+    split = set(storyline.get("split") or [])
+    blocks = blocks_for(rows, storyline.get("blocks") or [], split)
+    on = [b["key"] for b in blocks if b["on"]]
+    chapters: list[dict] = []
+    where: list[int | None] = []
+    if order == TIME:
+        chapters.append({"kind": "theme", "what": "The whole trip"})
+        where = [0 if block_of(r, split) in on else None for r in rows]
+    elif order == THEME:
+        index = {k: n for n, k in enumerate(on)}
+        chapters += [{"kind": "theme", "what": k} for k in on]
+        where = [index.get(block_of(r, split)) for r in rows]
+    else:
+        days = sorted({r["taken_at"][:10] for r in rows})
+        index = {}
+        for d in days:
+            for k in on:
+                if any(r["taken_at"][:10] == d and block_of(r, split) == k for r in rows):
+                    index[(d, k)] = len(chapters)
+                    chapters.append({"kind": "theme", "what": f"{d} {k}"})
+        where = [index.get((r["taken_at"][:10], block_of(r, split))) for r in rows]
+    if storyline.get("finale", True):
+        chapters.append({"kind": "finale", "what": "Finale"})
+    return chapters, where

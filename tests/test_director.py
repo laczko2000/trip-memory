@@ -76,10 +76,8 @@ def test_storylines_are_suggested_and_applied(trip):
     assert [s["name"] for s in stories] == ["Our own name", "Morning at the beach", stories[2]["auto_name"]]
     assert [s["enabled"] for s in stories] == [True, True, False]  # story 3 is left out
     assert trip.storyline_used() == 0
-    assert [r["path"][-5:] for r in trip.auto_edit_pool()] == ["b.jpg", "a.jpg"]
-
-    trip.apply_storyline(1)
-    assert [r["path"][-5:] for r in trip.auto_edit_pool()] == ["c.jpg", "a.jpg"]
+    # The video itself follows the Storyboard's storyline (themes): stories only you switched off stay out.
+    assert sorted(r["path"][-5:] for r in trip.auto_edit_pool()) == ["a.jpg", "b.jpg", "c.jpg"]
 
 
 def test_a_single_clip_answer_with_another_number_still_counts():
@@ -162,17 +160,14 @@ def test_stories_storyboard_and_video_agree(trip):
     trip.link_story(0, to_next=True)  # a, b and c: one story
     trip.plan_stories(FakeLeaver())
     names = lambda rows: [Path(r["path"]).name for r in rows]
-    # A shot the plan leaves out does not creep into the storyboard, Auto-edit or the video.
-    assert names(trip.storyboard()) == ["c.jpg", "a.jpg"]
-    assert sorted(names(trip.auto_edit_pool())) == ["a.jpg", "c.jpg"]
-    assert [m.path.name for m in trip.media_items()] == ["c.jpg", "a.jpg"]
+    # The storyline (themes) chooses the shots now: a story plan no longer leaves any out.
+    assert sorted(names(trip.storyboard())) == ["a.jpg", "b.jpg", "c.jpg"]
+    assert sorted(names(trip.auto_edit_pool())) == ["a.jpg", "b.jpg", "c.jpg"]
 
     # After a first cut, changing the plan reorders the storyboard to match.
     trip.execute("UPDATE items SET position = CASE WHEN path LIKE '%c.jpg' THEN 0 ELSE 1 END")
     trip.move_in_plan(str(trip.folder / "a.jpg"), -1)
-    assert names(trip.storyboard()) == ["a.jpg", "c.jpg"]
-    trip.set_plan_role(str(trip.folder / "b.jpg"), "build-up")  # put back in by you
-    assert "b.jpg" in names(trip.storyboard())
+    assert names(trip.storyboard())[:2] == ["a.jpg", "c.jpg"]
 
 
 def test_a_new_storyline_renames_and_resets_the_storyboard(trip):
@@ -189,7 +184,7 @@ def test_a_new_storyline_renames_and_resets_the_storyboard(trip):
     stories = {s["key"]: s for s in trip.stories()}
     beach = next(s for s in stories.values() if s["items"][0]["path"].endswith("a.jpg"))
     assert beach["name"] == "Sunrise swim" and not beach["renamed"]  # the new storyline's name, not the old one
-    assert [Path(r["path"]).name for r in trip.storyboard()] == ["a.jpg", "b.jpg"]  # old first cut gone
+    assert [Path(r["path"]).name for r in trip.storyboard()] == ["a.jpg", "b.jpg", "c.jpg"]  # old first cut gone
     titles = {Path(p).name: t["text"] for p, t in trip.shot_titles().items()}
     assert titles["b.jpg"] == stories[trip.stories()[1]["key"]]["name"]  # the video's story titles match too
     trip.rename_story(beach["key"], "Our swim")
@@ -237,8 +232,7 @@ def test_type_the_video_you_want(trip):
     assert stories[1]["name"] == "Morning swim"
     assert trip.wish()["summary"] == "A lively minute at the beach."
 
-    # The beach shots (the AI called them sandy beaches) are favoured; the pool shot would lose points.
-    assert {Path(r["path"]).name: r["wish"] for r in trip.auto_edit_pool()} == {"c.jpg": 1.0, "a.jpg": 1.0}
+    # The beach shots (the AI called them sandy beaches) would be favoured; the pool shot would lose points.
     pool_row = next(r for r in trip.items() if r["path"].endswith("b.jpg"))
     assert trip.wish_match(pool_row, trip.wish()) == -0.5
 

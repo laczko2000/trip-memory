@@ -528,8 +528,8 @@ def test_the_same_moment_in_two_files_is_used_once():
     assert catalog.Trip._same_moments(rows) == {"/t/IMG_1.MOV", "/t/a copy.mov", "/t/a.mov"}
 
 
-def test_chapters_choose_and_order_the_shots(tmp_path, monkeypatch):
-    from trip_memory import autoedit, chapters
+def test_the_storyline_follows_your_themes(tmp_path, monkeypatch):
+    from trip_memory import autoedit, themes
 
     monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
     (tmp_path / "app").mkdir()
@@ -540,16 +540,22 @@ def test_chapters_choose_and_order_the_shots(tmp_path, monkeypatch):
     trip = catalog.Trip(trip_dir)
     trip.prepare()
     paths = [r["path"] for r in trip.items()]
-    tags = {paths[0]: ["Eating & drinking"], paths[1]: ["Old town"], paths[2]: ["Beach"], paths[3]: ["Pool"]}
-    for path, t in tags.items():
-        trip.execute("UPDATE items SET tags_user = ? WHERE path = ?", (json.dumps(t), path))
-    trip._save_wish({"wish": "old", "versions": [{}]})
-    trip.set_chapters([chapters.chapter("words", "beach"), chapters.chapter("words", "food")], note="beach then food")
-    assert trip.wish() is None  # chapters replace the wish
-    assert [len(c) for c in trip.chapter_preview()] == [1, 1]
+    trip.execute("UPDATE items SET tags_user = ? WHERE path = ?", (json.dumps(["Eating & drinking"]), paths[0]))
+    trip.suggest_themes()  # no picture fingerprints here: a first guess from the tags
+    rows = {Path(r["path"]).name: r for r in trip.theme_rows()}
+    assert rows["p0.jpg"]["theme"] == "Food & drink" and not rows["p0.jpg"]["theme_ok"]
+    trip.set_theme([paths[2]], "Boat")
+    trip.set_theme([paths[0]], None)  # confirmed as suggested
+    rows = {Path(r["path"]).name: r for r in trip.theme_rows()}
+    assert rows["p2.jpg"]["theme"] == "Boat" and rows["p2.jpg"]["theme_ok"] and rows["p0.jpg"]["theme_ok"]
+    # By theme: boat first, then food; the two "Other" shots switched off.
+    blocks = [b | {"on": b["activity"] != themes.OTHER} for b in trip.storyline_blocks()]
+    blocks.sort(key=lambda b: b["activity"] != "Boat")
+    trip.set_storyline(order=themes.THEME, blocks=[{k: b[k] for k in ("key", "activity", "person", "on")} for b in blocks],
+                       finale=False)
     plan = trip.auto_edit_steady(autoedit.Limits(max_video=3, max_photo=2, min_shot=1), None, 0.0, "Fade")
-    assert [Path(s.path).name for s in plan.shots] == ["p2.jpg", "p0.jpg"]  # the beach first, though taken later
-    assert [Path(r["path"]).name for r in trip.storyboard()] == ["p2.jpg", "p0.jpg"]  # the others: in no chapter
-    assert all(t["auto"] != "story" for t in trip.shot_titles().values())
-    trip.set_chapters(None)
-    assert trip.chapter_info() is None and trip.chapter_list() == []
+    assert [Path(s.path).name for s in plan.shots] == ["p2.jpg", "p0.jpg"]  # the boat first, though taken later
+    assert [Path(r["path"]).name for r in trip.storyboard()] == ["p2.jpg", "p0.jpg"]
+    trip.set_storyline(order=themes.TIME)
+    plan = trip.auto_edit_steady(autoedit.Limits(max_video=3, max_photo=2, min_shot=1), None, 0.0, "Fade")
+    assert [Path(s.path).name for s in plan.shots] == ["p0.jpg", "p2.jpg"]  # as it happened (Other still off)

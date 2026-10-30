@@ -212,69 +212,6 @@ WISH_SCHEMA = {
 }
 
 
-CHAPTER_PROMPT = """Someone wrote a note about the order of their holiday video:
-
-"{note}"
-
-Turn it into the video's chapters, in the order they should play. Each chapter:
-- kind: "words" (shots showing something: an activity, food, a place...), "people" (shots with people in them),
-  "person" (shots with one named person: {people}), "finale" (the most exciting action shots, only when the note
-  asks to end or close with action, the best or the most exciting moments) or "rest" (everything not in another
-  chapter, only when the note mentions it).
-- what: for "words", 1 to 4 plain English words for what the shots show (e.g. "kitesurfing", "food", "sunset at the
-  beach"); for "person", the name exactly as given; otherwise "".
-Put chapters the note wants at the beginning first and those it wants at the end last. Do not add chapters the note
-does not ask for. Answer in JSON."""
-
-CHAPTER_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "chapters": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "kind": {"type": "string", "enum": ["words", "people", "person", "finale", "rest"]},
-                    "what": {"type": "string"},
-                },
-                "required": ["kind", "what"],
-                "additionalProperties": False,
-            },
-        }
-    },
-    "required": ["chapters"],
-    "additionalProperties": False,
-}
-
-
-def chapter_prompt(note: str, people: list[str]) -> str:
-    return CHAPTER_PROMPT.format(note=" ".join(note.split())[:2000], people=", ".join(people) or "nobody named yet")
-
-
-def clean_chapters(answer: dict, people: list[str]) -> list[dict]:
-    """The AI's chapters, keeping only what makes sense (a name it made up becomes words to look for)."""
-    from . import chapters as chaptering
-
-    known = {p.lower(): p for p in people}
-    out = []
-    for entry in answer.get("chapters") or []:
-        if not isinstance(entry, dict):
-            continue
-        kind = entry.get("kind")
-        what = " ".join(str(entry.get("what", "")).split())[:40]
-        if kind == "person":
-            if what.lower() in known:
-                out.append(chaptering.chapter("person", known[what.lower()]))
-                continue
-            kind = "words"
-        if kind == "words":
-            if what:
-                out.append(chaptering.chapter("words", what.lower(), chaptering.hint_for(what)[0]))
-        elif kind in ("people", "finale", "rest"):
-            out.append(chaptering.chapter(kind))
-    return chaptering.tidy(out)
-
-
 class DirectorError(Exception):
     """Something the person can fix (no key, Ollama not running...), with a plain explanation."""
 
@@ -356,9 +293,6 @@ class Ollama:
     def wish(self, prompt: str) -> dict:
         return self._ask(prompt, WISH_SCHEMA)
 
-    def chapters(self, prompt: str) -> dict:
-        return self._ask(prompt, CHAPTER_SCHEMA)
-
 
 # ---------- Claude ----------
 
@@ -433,9 +367,6 @@ class Claude:
 
     def wish(self, prompt: str) -> dict:
         return self._ask([{"type": "text", "text": prompt}], WISH_SCHEMA, self.story_model)
-
-    def chapters(self, prompt: str) -> dict:
-        return self._ask([{"type": "text", "text": prompt}], CHAPTER_SCHEMA)  # a small job: the fast model
 
 
 def make(settings: dict):

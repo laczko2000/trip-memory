@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
+import numpy as np
 from nicegui import app, run, ui
 
 from .catalog import Trip, app_dir, kept_part
@@ -27,10 +28,10 @@ from . import music as free_music
 from . import songmap
 from . import musicmood
 from . import pinfill
-from . import chapters as chaptering
+from . import themes
 from . import taps as song_taps
 from .beats import song_length
-from .autoedit import CUT_ON, STORYLINES
+from .autoedit import CUT_ON
 from .autoedit import Limits as AutoLimits
 from .render import TRANSITIONS, RenderSettings, clip_range, held, render, source_factor
 from .scenes import SCENES, text_vectors
@@ -160,7 +161,12 @@ class Page:
         self.recording = False  # the browser is listening for "speak your idea"
         self.voice_base = ""  # what was in the box before you started speaking
         self.talk_button = None
-        self.wish_box = None
+        self.wish_box = None  # where "speak your idea" writes
+        self.theme_shown = ""  # the activity open in the Themes tab
+        self.theme_selected: set[str] = set()
+        self.theme_limit = 60
+        self.theme_tiles: dict = {}  # path -> its tile, to show a selection without building the page again
+        self.theme_count = self.theme_move = None
 
     # ---------- data ----------
 
@@ -227,22 +233,22 @@ class Page:
                 # The path to a video, left to right; then the extra tabs for looking things up.
                 self.choose_tab = ui.tab("Choose files", icon="checklist")
                 self.panels = None
-                stories_tab = ui.tab("Stories", icon="auto_stories")
+                themes_tab = ui.tab("Themes", icon="category")
                 music_tab = ui.tab("Music & audio", icon="graphic_eq")
                 story_tab = ui.tab("Storyboard", icon="view_timeline")
                 video_tab = ui.tab("Make video", icon="movie")
                 ui.separator().props("vertical").classes("mx-2")
                 library_tab = ui.tab("Library", icon="photo_library").classes("opacity-70")
                 people_tab = ui.tab("People", icon="people").classes("opacity-70")
+                stories_tab = ui.tab("Stories", icon="auto_stories").classes("opacity-70")
             self.library_tab = library_tab
             self.music_tab = music_tab
             self.people_tab = people_tab
             with ui.tab_panels(tabs, value=self.choose_tab, on_change=self.tab_opened).classes("w-full") as self.panels:
                 with ui.tab_panel(self.choose_tab):
                     self.choose_view()
-                with ui.tab_panel(stories_tab):
-                    self.director_card()
-                    self.stories_view()
+                with ui.tab_panel(themes_tab):
+                    self.themes_view()
                 with ui.tab_panel(music_tab):
                     self.music_tab_view()
                 with ui.tab_panel(story_tab):
@@ -253,6 +259,9 @@ class Page:
                     self.build_library()
                 with ui.tab_panel(people_tab):
                     self.people_view()
+                with ui.tab_panel(stories_tab):
+                    self.director_card()
+                    self.stories_view()
         ui.timer(1.0, self.tick)
         last = load_settings().get("folder")
         if last and Path(last).is_dir():
@@ -367,6 +376,7 @@ class Page:
         self.titles_card.refresh()
         self.looks_card.refresh()
         self.storyboard_view.refresh()
+        self.themes_view.refresh()
         self.stories_view.refresh()
         self.director_card.refresh()
 
@@ -1919,16 +1929,15 @@ class Page:
         if not self.trip:
             ui.label("Open a trip first.").classes("text-gray-500")
             return
-        self.wish_card()
-        self.auto_edit_card()
+        self.storyline_card()
         board = self.trip.storyboard()
         if not board:
             ui.label("Nothing is in the video yet. Tick files in the Library, or let Auto-edit choose.").classes("text-gray-500")
             return
         with ui.row().classes("w-full items-center gap-4"):
             ui.label(f"{len(board)} clips in this order").classes("text-lg font-semibold")
-            ui.button("Back to story order", icon="restart_alt", on_click=self.reset_order).props("flat dense") \
-                .tooltip("Forget the order you set here: the shots follow the stories and their plans again")
+            ui.button("Back to time order", icon="restart_alt", on_click=self.reset_order).props("flat dense") \
+                .tooltip("Forget the order you set here: the shots go back to the order they were taken")
         ui.label(
             "Use the arrows to change the order. For videos, drag the two ends of the bar to choose which part to keep. "
             "The transition setting is for the cut after that clip."
@@ -1944,206 +1953,323 @@ class Page:
         self.board_limit += STORY_ROWS
         self.storyboard_view.refresh()
 
-    NOTE_EXAMPLES = ["Kiting first, then the people, food at the end, close with action",
-                     "Start with the beach, then the old town, sunsets at the end",
-                     "The kids first, then everything else, end with the best moments"]
     PACES = {  # what "calm", "medium" and "lively" mean for Auto-edit
         "calm": {"cut_on": "changes", "max_video": 6.0, "max_photo": 4.0, "min_shot": 1.5},
         "medium": {"cut_on": "strong", "max_video": 4.0, "max_photo": 2.5, "min_shot": 1.0},
         "lively": {"cut_on": "strong", "max_video": 2.5, "max_photo": 1.5, "min_shot": 0.5},
     }
-    KIND_ICONS = {chaptering.WORDS: "🔎", chaptering.PEOPLE: "🧑‍🤝‍🧑", chaptering.PERSON: "🙂",
-                  chaptering.FINALE: "🔥", chaptering.REST: "📦"}
+    ORDER_WORDS = {
+        themes.TIME: "The whole trip in the order it happened.",
+        themes.THEME: "Your themes in the order you set; inside each one, the shots run in time order.",
+        themes.DAY: "Day after day; inside each day, its themes in the order you set.",
+    }
 
-    def wish_card(self) -> None:
-        """The one place where you say what the video should be: a note (typed or spoken) becomes chapters, and the
-        video tells them in your order. The music decides how many shots and where the cuts go."""
-        wish = self.trip.wish()
-        info = self.trip.chapter_info()
+    def storyline_card(self) -> None:
+        """The one card at the top of the Storyboard: how the video is told, and the button that cuts it."""
+        line = self.trip.storyline()
+        music = self.music_path()
+        pins = song_taps.final_taps(music, app_dir() / "music-taps") if music else None
         with ui.card().classes("w-full bg-amber-50"):
-            ui.label("🎬 The video you want").classes("text-lg font-semibold")
-            self.following_line(wish, info)
-            box = ui.textarea(placeholder="Say or type the order you want, e.g. \"kiting first, then the people, food "
-                                          "at the end, close with action\".",
-                              value=(info or {}).get("note") or (wish or {}).get("wish", "")) \
-                .props("outlined autogrow").classes("w-full")
-            self.wish_box = box
-            with ui.row().classes("gap-2 items-center"):
-                talk = ui.button("Stop listening" if self.recording else "Speak your idea", icon="mic",
-                                 on_click=lambda: self.toggle_voice(talk)) \
-                    .props("outline" + (" color=negative" if self.recording else ""))
-                self.talk_button = talk
-                ui.button("Make chapters from my note", icon="format_list_numbered",
-                          on_click=lambda: self.read_note(box.value))
-                ui.label("Speaking uses your browser's own dictation (free). The chapters are worked out on this Mac.") \
-                    .classes("text-xs text-gray-500")
-            with ui.row().classes("gap-2 items-center"):
-                for example in self.NOTE_EXAMPLES:
-                    ui.chip(example, on_click=lambda e=example: box.set_value(e)).props("outline clickable dense")
-            if info:
-                self.chapters_list(info)
-
-    def chapters_list(self, info: dict) -> None:
-        chapters = info["list"]
-        preview = self.trip.chapter_preview()
-        with ui.column().classes("w-full gap-1 p-2 rounded bg-white"):
-            with ui.row().classes("w-full items-center gap-2"):
-                ui.label("Your chapters, in the order they play").classes("font-semibold")
-                if info.get("reader"):
-                    ui.label(f"(read by {info['reader']})").classes("text-xs text-gray-500")
-            for n, c in enumerate(chapters):
-                shots = preview[n] if n < len(preview) else []
-                with ui.row().classes("w-full items-center no-wrap gap-2 border-b py-1"):
-                    ui.label(f"{n + 1}.").classes("w-6 text-gray-500")
-                    ui.label(self.KIND_ICONS.get(c["kind"], "")).classes("w-6")
-                    if c["kind"] == chaptering.WORDS:
-                        name = ui.input(value=c["what"]).props("dense outlined").classes("w-48") \
-                            .tooltip("What these shots show, in your words. Change it and press Enter.")
-                        name.on("keydown.enter", lambda e, n=n, name=name: self.rename_chapter(n, name.value))
-                        name.on("blur", lambda e, n=n, name=name: self.rename_chapter(n, name.value))
-                    else:
-                        ui.label(c["what"]).classes("w-48 font-medium")
-                    with ui.column().classes("gap-0 flex-grow"):
-                        if c["kind"] == chaptering.FINALE:
-                            ui.label("The most exciting shots of the whole trip, building up to the biggest one.") \
-                                .classes("text-xs text-gray-600")
-                        else:
-                            empty = (" · every shot fits a chapter you named" if c["kind"] == chaptering.REST else
-                                     " · nothing matches yet: try other words")
-                            ui.label(f"{len(shots)} shot{'s' * (len(shots) != 1)}" +
-                                     (" · the music decides how many are used" if shots else empty)) \
-                                .classes("text-xs " + ("text-gray-600" if shots or c["kind"] == chaptering.REST
-                                                       else "text-orange-700"))
-                            if shots:
-                                with ui.row().classes("gap-1 no-wrap overflow-hidden"):
-                                    for it in shots[:8]:
-                                        if it.get("thumb"):
-                                            ui.image(data_url(it["thumb"])).classes("w-14 h-10 rounded") \
-                                                .props("fit=cover no-spinner").tooltip(it.get("ai_caption") or "")
-                    ui.button(icon="arrow_upward", on_click=lambda n=n: self.move_chapter(n, -1)) \
-                        .props("flat dense round size=sm").set_enabled(n > 0)
-                    ui.button(icon="arrow_downward", on_click=lambda n=n: self.move_chapter(n, 1)) \
-                        .props("flat dense round size=sm").set_enabled(n < len(chapters) - 1)
-                    ui.button(icon="close", on_click=lambda n=n: self.drop_chapter(n)) \
-                        .props("flat dense round size=sm").tooltip("Take this chapter out" + (
-                            ": shots in no chapter are left out of the video" if c["kind"] == chaptering.REST else ""))
-            if not any(c["kind"] == chaptering.REST for c in chapters):
-                ui.label("Shots that fit no chapter are left out (add \"Everything else\" to use them).") \
-                    .classes("text-xs text-gray-600")
-            with ui.row().classes("w-full items-center gap-2 mt-1"):
-                extra = ui.input(placeholder="Add a chapter: any words, e.g. sunset").props("dense outlined") \
-                    .classes("w-64")
-                ui.button("Add", icon="add", on_click=lambda: self.add_chapter(chaptering.WORDS, extra.value)) \
-                    .props("outline dense")
-                quick = {chaptering.PEOPLE: "People", chaptering.REST: "Everything else",
-                         chaptering.FINALE: "Finale: the most action"}
-                quick.update({f"person:{p}": p for p in self.trip.person_names()})
-                ui.select(quick, label="…or add", on_change=lambda e: e.value and self.add_chapter(
-                    *(("person", e.value[7:]) if e.value.startswith("person:") else (e.value, "")))) \
-                    .props("dense outlined").classes("w-48")
-            with ui.row().classes("w-full items-center gap-3 mt-2"):
-                ui.button("Make this video", icon="movie_filter", on_click=self.run_auto_edit)
-                ui.label("The music decides how many shots there are and where the cuts go; your chapters decide "
-                         "which shots come where.").classes("text-sm text-gray-600 flex-1")
-                ui.button("Stop using chapters", icon="close", on_click=self.stop_chapters) \
+            ui.label("Storyline").classes("text-lg font-semibold")
+            with ui.row().classes("w-full items-center gap-2 text-sm text-gray-700"):
+                ui.label(f"🎵 {Path(music).name}" if music else "🎵 No song yet").classes("font-medium")
+                ui.label(f"· {self.length_words()}")
+                ui.button("change", on_click=lambda: self.panels.set_value(self.music_tab)) \
                     .props("flat dense no-caps size=sm")
+                ui.switch("Use a different length", value=bool(self.trip.own_length()),
+                          on_change=lambda e: self.own_length_switched(e.value)).props("dense")
+            if self.trip.own_length() is not None or self.own_length_open:
+                with ui.row().classes("items-center gap-2"):
+                    field = ui.input("Length (m:ss)", value=fmt_length(self.trip.own_length())
+                                     if self.trip.own_length() else "", placeholder="e.g. 1:05") \
+                        .props("dense outlined").classes("w-36")
+                    field.on("keydown.enter", lambda: self.set_own_length(field.value))
+                    ui.button("Set", on_click=lambda: self.set_own_length(field.value)).props("outline dense no-caps")
+            ui.toggle(themes.ORDERS, value=line["order"], on_change=lambda e: self.set_order(e.value)) \
+                .props("no-caps unelevated toggle-color=primary color=white text-color=primary") \
+                .classes("border border-blue-600 rounded")
+            ui.label(self.ORDER_WORDS[line["order"]]).classes("text-sm text-gray-600")
+            if line["order"] != themes.TIME:
+                self.storyline_blocks_view(line)
+            with ui.row().classes("items-center gap-3"):
+                ui.switch("Finale: end with the most exciting shots", value=line["finale"],
+                          on_change=lambda e: self.set_finale(e.value))
+            with ui.row().classes("w-full items-center gap-3"):
+                ui.button("Make the first cut", icon="auto_fix_high", on_click=self.run_auto_edit) \
+                    .tooltip("Replaces the storyboard's order, trims and transitions; Undo brings them back")
+                ui.label("The music decides how many shots there are and where the cuts go." if music else
+                         "Without a song the cuts follow a steady pace.").classes("text-sm text-gray-600 flex-1")
+                undo = self.trip.undo_label()
+                if undo:
+                    ui.button(f"Undo {undo}", icon="undo", on_click=self.undo).props("flat dense no-caps size=sm")
+            if music and pins:
+                ui.label(f"Cuts on your {len(pins)} pins from Music & audio.").classes("text-xs text-green-700")
+            with ui.expansion("More settings: shot lengths, effects", icon="tune").classes("w-full").props("dense"):
+                self.auto_edit_settings(self.auto_limits, pins)
 
-    async def read_note(self, note: str) -> None:
-        """Your note becomes chapters: the local AI reads it if there is one, else the app's own word reader."""
-        if not (note or "").strip():
-            ui.notify("Type or say the order you want first, e.g. \"kiting first, then the people\".", type="warning")
+    def storyline_blocks_view(self, line: dict) -> None:
+        blocks = self.trip.storyline_blocks()
+        if not blocks:
+            ui.label("No themes yet: open the Themes tab first.").classes("text-sm text-orange-700")
             return
-        if self.busy():
-            return
-        people = self.trip.person_names()
-        reader = "the app's word reader"
-        found = chaptering.read_note(note, people)
-        ai = None
-        try:
-            ai = director.make(load_settings().get("ai", {}))
-        except director.DirectorError:
-            pass
-        note_box = ui.notification("Reading your note…", spinner=True, timeout=None)
-        self.ai_busy = True
-        try:
-            if ai is not None:
-                try:
-                    answer = await self.stoppable(lambda: director.clean_chapters(
-                        ai.chapters(director.chapter_prompt(note, people)), people))
-                    if answer:
-                        found, reader = answer, ("the AI on this Mac" if isinstance(ai, director.Ollama) else "Claude")
-                except Exception:
-                    traceback.print_exc()  # no AI running (or it gave nothing useful): the word reader's chapters
-            if not found:
-                ui.notify("No chapters found in the note. Name what should come first, then next, e.g. \"beach "
-                          "first, then dinner\".", type="warning", multi_line=True)
-                return
-            note_box.message = "Looking for the shots that fit each chapter…"
-            await self.set_chapter_list(found, note=note, reader=reader)
-        finally:
-            note_box.dismiss()
-            self.ai_busy = False
-        ui.notify(f"{len(found)} chapters: " + " → ".join(c["what"] for c in found) +
-                  ". Check which shots each one found, change anything, then press Make this video.",
-                  type="positive", multi_line=True, timeout=10000)
+        emoji = {a["name"]: a["emoji"] for a in self.trip.activities()}
+        split = set(line["split"])
+        rows = self.trip.theme_rows()
+        with ui.column().classes("w-full gap-1"):
+            for n, b in enumerate(blocks):
+                with ui.row().classes("w-full items-center no-wrap gap-2 p-1 rounded bg-white border" +
+                                      ("" if b["on"] else " opacity-50")):
+                    with ui.column().classes("gap-0"):
+                        ui.button(icon="arrow_upward", on_click=lambda n=n: self.move_block(n, -1)) \
+                            .props("flat dense round size=xs").set_enabled(n > 0)
+                        ui.button(icon="arrow_downward", on_click=lambda n=n: self.move_block(n, 1)) \
+                            .props("flat dense round size=xs").set_enabled(n < len(blocks) - 1)
+                    name = f"{emoji.get(b['activity'], '⭐')} {b['activity']}" + (f" · {b['person']}" if b["person"] else "")
+                    ui.label(name).classes("font-medium min-w-48")
+                    ui.label(f"{b['count']} shot{'s' * (b['count'] != 1)}").classes("text-xs text-gray-500 w-16")
+                    with ui.row().classes("gap-1 no-wrap overflow-hidden flex-grow"):
+                        for it in [r for r in rows if themes.block_of(r, split) == b["key"]][:6]:
+                            if it.get("thumb"):
+                                ui.image(data_url(it["thumb"])).classes("w-12 h-8 rounded").props("fit=cover no-spinner")
+                    if b["person"] is None and b["count"] >= 4:
+                        ui.button("By person", on_click=lambda a=b["activity"]: self.split_block(a, True)) \
+                            .props("flat dense no-caps size=sm").tooltip("One block per person in these shots")
+                    elif b["person"] is not None:
+                        ui.button("Join", on_click=lambda a=b["activity"]: self.split_block(a, False)) \
+                            .props("flat dense no-caps size=sm").tooltip("One block for all the people again")
+                    ui.switch(value=b["on"], on_change=lambda e, k=b["key"]: self.block_on(k, e.value)).props("dense") \
+                        .tooltip("Off: these shots stay out of the video")
+
+    def _saved_blocks(self) -> list[dict]:
+        return [{k: b[k] for k in ("key", "activity", "person", "on")} for b in self.trip.storyline_blocks()]
+
+    def set_order(self, order: str) -> None:
+        self.trip.set_storyline(order=order, blocks=self._saved_blocks())
         self.storyboard_view.refresh()
 
-    async def set_chapter_list(self, found: list[dict], **saved) -> None:
-        """Save the chapters, after working out what each one's words look like (for CLIP, if the app has it)."""
-        missing = [c for c in found if c["kind"] == chaptering.WORDS and c.get("vector") is None]
-        if missing and self.trip.query("SELECT 1 FROM items WHERE clip IS NOT NULL LIMIT 1"):  # scenes were found
+    def set_finale(self, on: bool) -> None:
+        self.trip.set_storyline(finale=on)
+
+    def move_block(self, n: int, steps: int) -> None:
+        blocks = self._saved_blocks()
+        if 0 <= n + steps < len(blocks):
+            blocks.insert(n + steps, blocks.pop(n))
+            self.trip.set_storyline(blocks=blocks)
+            self.storyboard_view.refresh()
+
+    def block_on(self, key: str, on: bool) -> None:
+        self.trip.set_storyline(blocks=[b | {"on": on} if b["key"] == key else b for b in self._saved_blocks()])
+        self.storyboard_view.refresh()
+
+    def split_block(self, activity: str, split: bool) -> None:
+        line = self.trip.storyline()
+        keep = [b for b in self._saved_blocks() if b["activity"] != activity]
+        at = next((k for k, b in enumerate(self._saved_blocks()) if b["activity"] == activity), len(keep))
+        names = set(line["split"]) | {activity} if split else set(line["split"]) - {activity}
+        self.trip.set_storyline(split=sorted(names), blocks=keep)
+        # The new blocks take the old one's place.
+        fresh = [b for b in self._saved_blocks() if b["activity"] == activity]
+        rest = [b for b in self._saved_blocks() if b["activity"] != activity]
+        self.trip.set_storyline(blocks=rest[:at] + fresh + rest[at:])
+        self.storyboard_view.refresh()
+
+    # ---------- Themes ----------
+
+    THEME_PAGE = 60
+
+    @ui.refreshable
+    def themes_view(self) -> None:
+        if not self.showing("Themes"):
+            return
+        if not self.trip:
+            ui.label("Open a trip first.").classes("text-gray-500")
+            return
+        rows = self.trip.theme_rows()
+        if not rows:
+            ui.label("Nothing selected yet: tick files in Choose files first.").classes("text-gray-500")
+            return
+        if all(r["theme_auto"] is None for r in rows):
+            ui.timer(0.1, self.suggest_themes, once=True)
+            ui.label("Looking at your shots…").classes("text-gray-500")
+            return
+        activities = self.trip.activities()
+        names = [a["name"] for a in activities]
+        if self.theme_shown not in names:
+            self.theme_shown = next((a for a in names if any(r["theme"] == a for r in rows)), names[0])
+        done = sum(r["theme_ok"] for r in rows)
+        with ui.row().classes("w-full items-center gap-3"):
+            ui.label("What is each shot?").classes("text-lg font-semibold")
+            ui.badge(f"{done} of {len(rows)} confirmed", color="positive" if done == len(rows) else "grey-7")
+            ui.label("The app suggests the activity; you confirm or change it. Who, where and when are filled in "
+                     "for you.").classes("text-sm text-gray-600 flex-1")
+        if not self.trip.has_fingerprints():
+            ui.label("Tip: run Analyse in Choose files first. The app then judges each picture itself; until then it "
+                     "only guesses from tags.").classes("text-sm text-orange-700")
+        with ui.row().classes("w-full no-wrap items-start gap-4"):
+            with ui.column().classes("w-56 gap-1 flex-none"):
+                for a in activities:
+                    count = sum(r["theme"] == a["name"] for r in rows)
+                    todo = sum(r["theme"] == a["name"] and not r["theme_ok"] for r in rows)
+                    on = a["name"] == self.theme_shown
+                    with ui.row().classes("w-full items-center no-wrap gap-1 px-2 py-1 rounded cursor-pointer" +
+                                          (" bg-blue-100 text-blue-800 font-semibold" if on else " hover:bg-gray-100")) \
+                            .on("click", lambda n=a["name"]: self.show_theme(n)):
+                        ui.label(f"{a['emoji']} {a['name']}").classes("flex-grow text-sm")
+                        ui.label(f"{count}" + (f" · {todo}?" if todo else "")).classes("text-xs text-gray-500")
+                with ui.row().classes("items-center gap-1 mt-2 no-wrap"):
+                    new = ui.input(placeholder="Add an activity").props("dense outlined").classes("w-36")
+                    new.on("keydown.enter", lambda: self.add_activity(new.value))
+                    ui.button(icon="add", on_click=lambda: self.add_activity(new.value)).props("flat dense round")
+            with ui.column().classes("flex-grow gap-2 min-w-0"):
+                self.theme_grid(rows, activities)
+
+    def theme_grid(self, rows: list[dict], activities: list[dict]) -> None:
+        name = self.theme_shown
+        emoji = {a["name"]: a["emoji"] for a in activities}
+        shown = [r for r in rows if r["theme"] == name]
+        todo = [r for r in shown if not r["theme_ok"]]
+        self.theme_tiles = {}
+        self.theme_selected &= {r["path"] for r in shown}
+        with ui.row().classes("w-full items-center gap-2"):
+            ui.label(f"{emoji.get(name, '⭐')} {name}").classes("text-lg font-semibold")
+            ui.label(f"{len(shown)} shots · {len(shown) - len(todo)} confirmed · {len(todo)} to check") \
+                .classes("text-sm text-gray-600")
+        with ui.row().classes("w-full items-center gap-2"):
+            ui.button("All correct", icon="done_all", on_click=lambda: self.confirm_themes([r["path"] for r in todo])) \
+                .set_enabled(bool(todo))
+            move = ui.select({a["name"]: f"{a['emoji']} {a['name']}" for a in activities if a["name"] != name},
+                             label="Move selected to…", on_change=lambda e: e.value and self.move_selected(e.value)) \
+                .props("dense outlined").classes("w-56")
+            move.set_enabled(bool(self.theme_selected))
+            self.theme_move = move
+            self.theme_count = ui.label(self.selected_words()).classes("text-sm text-gray-600")
+            if name != themes.OTHER and name not in themes.DEFAULTS:
+                ui.button("Remove this activity", icon="delete_outline", on_click=lambda: self.remove_activity(name)) \
+                    .props("flat dense no-caps size=sm")
+        if not shown:
+            ui.label("No shots here yet. Move shots here from another activity.").classes("text-gray-500")
+            return
+        # Unsure ones first (they need you), then in the order they were taken.
+        shown.sort(key=lambda r: (r["theme_ok"], (r["theme_sure"] or 0) >= themes.SURE, r["taken_at"]))
+        with ui.element("div").classes("w-full grid gap-2").style("grid-template-columns:repeat(auto-fill,minmax(150px,1fr))"):
+            for r in shown[: self.theme_limit]:
+                self.theme_tile(r)
+        if len(shown) > self.theme_limit:
+            ui.button(f"Show more ({len(shown) - self.theme_limit} left)", icon="expand_more",
+                      on_click=self.more_themes).props("outline").classes("w-full")
+
+    def theme_tile(self, r: dict) -> None:
+        picked = r["path"] in self.theme_selected
+        sure = r["theme_ok"] or (r["theme_sure"] or 0) >= themes.SURE
+        who = ", ".join(p for p in r["people"] if not p.startswith("Person ")) or \
+            ("Nobody" if r["people_tag"] == "No people" else "Someone" if r["people_tag"] else "")
+        where = r["place"] or r["country"] or ""
+        when = f"{datetime.fromisoformat(r['taken_at']).astimezone():%a %-d %b}, {r['day_part']}"
+        with ui.element("div").classes("relative rounded p-1 cursor-pointer border-2 " +
+                                       ("border-blue-600 bg-blue-50" if picked else "border-transparent bg-gray-50")) \
+                .on("click", lambda p=r["path"]: self.pick_theme_shot(p)) as tile:
+            self.theme_tiles[r["path"]] = tile
+            if r["thumb"]:
+                ui.image(data_url(r["thumb"])).classes("w-full rounded").style("aspect-ratio:16/10") \
+                    .props("fit=cover no-spinner")
+            ui.label("✓" if r["theme_ok"] else "?").classes(
+                "absolute top-2 right-2 text-xs text-white rounded-full px-1.5 " +
+                ("bg-green-600" if r["theme_ok"] else "bg-orange-500" if not sure else "bg-gray-400"))
+            if r["kind"] == "video":
+                ui.label("🎬").classes("absolute top-2 left-2 text-xs")
+            with ui.column().classes("gap-0 text-xs leading-tight mt-1"):
+                ui.label(who or "—").classes("font-semibold text-gray-800 truncate")
+                ui.label(where).classes("text-gray-500 truncate")
+                ui.label(when).classes("text-gray-500")
+
+    def show_theme(self, name: str) -> None:
+        self.theme_shown = name
+        self.theme_selected = set()
+        self.theme_limit = self.THEME_PAGE
+        self.themes_view.refresh()
+
+    def more_themes(self) -> None:
+        self.theme_limit += self.THEME_PAGE
+        self.themes_view.refresh()
+
+    def selected_words(self) -> str:
+        return (f"{len(self.theme_selected)} selected" if self.theme_selected else
+                "Click shots to select them. ? marks a suggestion worth a look.")
+
+    def pick_theme_shot(self, path: str) -> None:
+        """Select or unselect a shot (only that tile changes: quick on a big trip)."""
+        self.theme_selected ^= {path}
+        tile = self.theme_tiles.get(path)
+        if tile is not None:
+            on = path in self.theme_selected
+            tile.classes(add="border-blue-600 bg-blue-50" if on else "border-transparent bg-gray-50",
+                         remove="border-transparent bg-gray-50" if on else "border-blue-600 bg-blue-50")
+        self.theme_count.set_text(self.selected_words())
+        self.theme_move.set_enabled(bool(self.theme_selected))
+
+    async def suggest_themes(self) -> None:
+        if self.trip and self.trip.has_fingerprints():
+            await self.activity_vectors()
+        await run.io_bound(self.trip.suggest_themes)
+        self.themes_view.refresh()
+
+    async def activity_vectors(self) -> None:
+        """What each activity's words look like to CLIP (once; the words never change)."""
+        activities = self.trip.activities()
+        missing = [a for a in activities if a.get("vector") is None and a["describe"]]
+        if not missing:
+            return
+        try:
+            for a in missing:
+                vectors = await run.io_bound(text_vectors, [f"a holiday photo of {d}" for d in a["describe"]],
+                                             app_dir() / "models" / "clip")
+                mean = vectors.mean(axis=0)
+                a["vector"] = [round(float(x), 5) for x in mean / np.linalg.norm(mean)]
+            self.trip.save_activities(activities)
+        except Exception:
+            traceback.print_exc()  # without the picture model: tags and your examples still work
+
+    async def confirm_themes(self, paths: list[str]) -> None:
+        await run.io_bound(self.trip.set_theme, paths, None)
+        ui.notify(f"{len(paths)} shot{'s' * (len(paths) != 1)} confirmed. The app looked again at the rest, "
+                  "comparing them with the shots you confirmed.", type="positive")
+        self.theme_selected = set()
+        self.themes_view.refresh()
+
+    async def move_selected(self, activity: str) -> None:
+        paths = sorted(self.theme_selected)
+        if not paths:
+            return
+        await run.io_bound(self.trip.set_theme, paths, activity)
+        ui.notify(f"Moved {len(paths)} to {activity}. The app looked again at the shots you haven't confirmed.",
+                  type="positive")
+        self.theme_selected = set()
+        self.themes_view.refresh()
+
+    async def add_activity(self, name: str) -> None:
+        name = " ".join((name or "").split())[:30]
+        if not name:
+            ui.notify("Type the activity's name first, e.g. Kitesurfing.", type="warning")
+            return
+        vector = None
+        if self.trip.has_fingerprints():
             try:
-                vectors = await run.io_bound(text_vectors, [f"a holiday photo of {c['search'] or c['what']}"
-                                                                   for c in missing], app_dir() / "models" / "clip")
-                for c, v in zip(missing, vectors):
-                    c["vector"] = [round(float(x), 5) for x in v]
+                v = await run.io_bound(text_vectors, [f"a holiday photo of {name.lower()}"], app_dir() / "models" / "clip")
+                vector = [round(float(x), 5) for x in v[0]]
             except Exception:
-                traceback.print_exc()  # without the picture model the tags, captions and people still match
-        self.trip.set_chapters(found, **saved)
+                traceback.print_exc()
+        await run.io_bound(self.trip.add_activity, name, vector)
+        self.theme_shown = name
+        self.theme_selected = set()
+        ui.notify(f"{name} added. The app put the shots that look like it here; move more in and it learns from them.",
+                  type="positive", multi_line=True)
+        self.themes_view.refresh()
 
-    async def rename_chapter(self, n: int, words: str) -> None:
-        chapters = self.trip.chapter_list()
-        words = " ".join((words or "").split())[:40]
-        if not (0 <= n < len(chapters)) or not words or words == chapters[n]["what"]:
-            return
-        chapters[n] = chaptering.chapter(chaptering.WORDS, words, chaptering.hint_for(words)[0])
-        await self.set_chapter_list(chapters)
-        self.storyboard_view.refresh()
-
-    def move_chapter(self, n: int, steps: int) -> None:
-        chapters = self.trip.chapter_list()
-        if 0 <= n + steps < len(chapters):
-            chapters.insert(n + steps, chapters.pop(n))
-            self.trip.set_chapters(chapters)
-            self.storyboard_view.refresh()
-
-    def drop_chapter(self, n: int) -> None:
-        chapters = self.trip.chapter_list()
-        if 0 <= n < len(chapters):
-            chapters.pop(n)
-            if not chapters:
-                ui.notify("No chapters left: Auto-edit's own storyline is back.")
-            self.trip.set_chapters(chapters)
-            self.storyboard_view.refresh()
-
-    async def add_chapter(self, kind: str, what: str) -> None:
-        what = " ".join((what or "").split())[:40]
-        if kind == chaptering.WORDS and not what:
-            ui.notify("Type what the shots should show first, e.g. sunset.", type="warning")
-            return
-        chapters = self.trip.chapter_list()
-        new = chaptering.chapter(kind, what, chaptering.hint_for(what)[0] if kind == chaptering.WORDS else "")
-        finale = next((k for k, c in enumerate(chapters) if c["kind"] == chaptering.FINALE), len(chapters))
-        if kind == chaptering.FINALE and finale < len(chapters):
-            return
-        chapters.insert(len(chapters) if kind == chaptering.FINALE else finale, new)  # the finale stays last
-        await self.set_chapter_list(chapters)
-        self.storyboard_view.refresh()
-
-    def stop_chapters(self) -> None:
-        self.trip.set_chapters(None)
-        ui.notify("The video no longer follows chapters: Auto-edit's own storyline is back.")
-        self.storyboard_view.refresh()
+    async def remove_activity(self, name: str) -> None:
+        await run.io_bound(self.trip.remove_activity, name)
+        self.theme_shown = ""
+        ui.notify(f"{name} removed: its shots got a new suggestion.")
+        self.themes_view.refresh()
 
     async def toggle_voice(self, button) -> None:
         """Dictation by the browser itself (Safari and Chrome on a Mac, free): your words appear in the box as you
@@ -2207,59 +2333,6 @@ class Page:
         if self.wish_box is not None and "text" in args:
             self.wish_box.set_value((self.voice_base + " " + args["text"]).strip())
 
-    def version_words(self, v: dict) -> str:
-        bits = [f"{v.get('pace', 'medium')} pace"]
-        if v.get("look"):
-            bits.append(looks.LOOKS.get(v["look"], (v["look"],))[0])
-        if v.get("teaser"):
-            bits.append("opens with a teaser")
-        if v.get("slow_motion"):
-            bits.append("slow motion")
-        return " · ".join(bits)
-
-    def following_line(self, wish: dict | None, info: dict | None = None) -> None:
-        """One line saying what the video follows now, what you set yourself, and Undo."""
-        with ui.column().classes("w-full gap-1 p-2 rounded bg-white"):
-            if info:
-                ui.label(f"Following: your {len(info['list'])} chapters · {self.length_words()}") \
-                    .classes("text-sm font-medium text-amber-900")
-            elif wish:
-                size = "upright for phones" if self.trip.video_size() == "phone" else "landscape"
-                name = f"Version {wish.get('used', 0) + 1}: {wish['name']}" if wish.get("name") else "Your wish"
-                ui.label(f"Following: {name} · {self.length_words()} · {self.version_words(wish)} · {size}") \
-                    .classes("text-sm font-medium text-amber-900")
-                if wish.get("summary"):
-                    ui.label(wish["summary"]).classes("text-xs text-gray-600")
-                if wish.get("people") or wish.get("focus"):
-                    ui.label("More of: " + ", ".join(wish.get("people", []) + wish.get("focus", []))) \
-                        .classes("text-xs text-gray-600")
-            else:
-                ui.label("Following: Auto-edit's own storyline below (no chapters yet).") \
-                    .classes("text-sm font-medium text-gray-700")
-            mine = self.trip.hand_changes()
-            with ui.row().classes("items-center gap-2"):
-                if mine:
-                    ui.label("Kept as you set them: " + ", ".join(mine) + ".").classes("text-xs text-gray-600")
-                    if any("switched" in m for m in mine):
-                        ui.button("Let the AI choose the stories again", on_click=self.forget_my_story_switches) \
-                            .props("flat dense no-caps size=sm")
-                undo = self.trip.undo_label()
-                if undo:
-                    ui.button(f"Undo {undo}", icon="undo", on_click=self.undo).props("flat dense no-caps size=sm")
-                if wish:
-                    ui.button("Stop following the wish", icon="close", on_click=self.forget_wish) \
-                        .props("flat dense no-caps size=sm")
-
-    def forget_wish(self) -> None:
-        self.trip.forget_wish()
-        ui.notify("The video no longer follows the wish: Auto-edit's own settings are back (Undo brings the wish back).")
-        self.storyboard_view.refresh()
-
-    def forget_my_story_switches(self) -> None:
-        self.trip.forget_my_story_switches()
-        ui.notify("The AI chooses the stories again from its next version or first cut.")
-        self.storyboard_view.refresh()
-
     def undo(self) -> None:
         if self.busy():
             return
@@ -2283,22 +2356,14 @@ class Page:
             self.trip.set_video_size("phone" if value == PHONE else "landscape")
 
     def limits_now(self) -> AutoLimits:
-        """Auto-edit's settings: from the wish you follow, else your own."""
+        """Auto-edit's settings: the song's style sets the pace; the rest are yours (More settings)."""
         limits = AutoLimits(**asdict(self.auto_limits))
-        wish = self.trip.wish() if self.trip else None
-        if wish:
-            for key, value in self.PACES[wish.get("pace", "medium")].items():
+        music = self.music_path()
+        song = self.song_maps.get(music) if music else None
+        if song:
+            style = musicmood.reading(song, music, app_dir() / "music-taps")["style"]
+            for key, value in self.PACES[musicmood.STYLES[style]["pace"]].items():
                 setattr(limits, key, value)
-            limits.storyline = "teaser" if wish.get("teaser") else "stories"
-            limits.speed_effects = bool(wish.get("slow_motion", True))
-            limits.camera_effects = bool(wish.get("camera_effects", True))
-        else:
-            music = self.music_path()
-            song = self.song_maps.get(music) if music else None
-            if song:  # the song's style sets the pace
-                style = musicmood.reading(song, music, app_dir() / "music-taps")["style"]
-                for key, value in self.PACES[musicmood.STYLES[style]["pace"]].items():
-                    setattr(limits, key, value)
         return limits
 
     def length_now(self) -> object:
@@ -2349,21 +2414,6 @@ class Page:
                      else ". Trim the song above to make the video shorter or longer.")
         ui.label(text).classes("font-medium text-green-800 mt-2")
 
-    def length_card(self) -> None:
-        """The video's one length: your track's, unless you switch on your own and type it as m:ss."""
-        own = self.trip.own_length()
-        with ui.column().classes("w-full gap-1 mt-2"):
-            with ui.row().classes("w-full items-center gap-4"):
-                ui.label(f"Video length: {self.length_words()}").classes("font-medium")
-                ui.switch("Use a different length", value=bool(own), on_change=lambda e: self.own_length_switched(e.value)) \
-                    .tooltip("Off: the video lasts as long as the track you saved in Music & audio")
-            if own is not None or self.own_length_open:
-                with ui.row().classes("items-center gap-2"):
-                    field = ui.input("Length (m:ss)", value=fmt_length(own) if own else "", placeholder="e.g. 1:05") \
-                        .props("dense outlined").classes("w-36")
-                    field.on("keydown.enter", lambda: self.set_own_length(field.value))
-                    ui.button("Set", on_click=lambda: self.set_own_length(field.value)).props("outline dense no-caps")
-
     def own_length_switched(self, on: bool) -> None:
         self.own_length_open = on
         if not on and self.trip.own_length():
@@ -2386,58 +2436,6 @@ class Page:
         self.storyboard_view.refresh()
         self.music_tab_view.refresh()
 
-    def auto_edit_card(self) -> None:
-        music = self.music_path()
-        limits = self.auto_limits
-        with ui.card().classes("w-full bg-blue-50"):
-            ui.label("✨ Auto-edit: the music leads, the shots follow").classes("text-lg font-semibold")
-            pins = song_taps.final_taps(music, app_dir() / "music-taps") if music else None
-            self.song_line(music, pins)
-            self.length_card()
-            wish = self.trip.wish()
-            if wish:  # the wish sets pace and effects: one button, nothing to contradict it
-                with ui.row().classes("w-full items-center gap-4 mt-2"):
-                    ui.button("Make a new cut", icon="auto_fix_high", on_click=self.run_auto_edit)
-                    ui.label(f"Following your wish: {wish.get('pace', 'medium')} pace. To set the pace yourself, stop "
-                             "following the wish (above).").classes("text-sm text-gray-600 flex-1")
-                return
-            with ui.row().classes("w-full items-center gap-4 mt-2"):
-                ui.button("Make a first cut", icon="auto_fix_high", on_click=self.run_auto_edit) \
-                    .tooltip("Replaces the storyboard's order, trims and transitions; Undo (above) brings them back")
-            with ui.expansion("More settings: shot lengths, storyline, beats, effects", icon="tune") \
-                    .classes("w-full").props("dense"):
-                self.auto_edit_settings(limits, pins)
-
-    def song_line(self, music: str | None, pins: list[float] | None) -> None:
-        """The song (chosen in the Music tab, the one place for it) and what the cuts follow."""
-        with ui.row().classes("w-full items-center gap-3"):
-            ui.label("Song:").classes("font-medium")
-            ui.label(Path(music).name if music else "none chosen yet").classes("text-gray-700")
-            ui.button("Change it in Music & audio" if music else "Choose one in Music & audio",
-                      icon="graphic_eq", on_click=lambda: self.panels.set_value(self.music_tab)).props("flat dense no-caps")
-        if music:
-            bits = []
-            source = song_taps.trimmed_from(music, app_dir() / "music-taps")
-            if source:
-                bits.append(f"{fmt_length(source[1])}–{fmt_length(source[2])} of {Path(source[0]).name}")
-            fades = song_taps.fades_of(music, app_dir() / "music-taps")
-            if fades and any(fades):
-                bits.append(f"fades {fades[0]:g} s / {fades[1]:g} s")
-            song = self.song_maps.get(music)
-            if song:
-                reading = musicmood.reading(song, music, app_dir() / "music-taps")
-                bits.append(f"Style: {musicmood.STYLES[reading['style']]['label']}")
-            if bits:
-                ui.label(" · ".join(bits)).classes("text-sm text-gray-600")
-        if not music:
-            ui.label("Without a song the cuts follow a steady pace.").classes("text-sm text-gray-600")
-        elif pins:
-            ui.label(f"Cuts: on your {len(pins)} pins from Music & audio; after the last pin, on the beat.") \
-                .classes("text-sm text-green-700")
-        else:
-            ui.label("Cuts: on the song's beats, found by the app (place pins in Music & audio to choose them "
-                     "yourself).").classes("text-sm text-gray-600")
-
     def auto_edit_settings(self, limits: AutoLimits, pins: list[float] | None) -> None:
         with ui.row().classes("w-full gap-8"):
             for key, label, lo, hi in (("max_video", "Longest video clip", 1.0, 10.0),
@@ -2448,11 +2446,6 @@ class Page:
                     ui.slider(min=lo, max=hi, step=0.5, value=getattr(limits, key),
                               on_change=lambda e, k=key: self.set_limit(k, e.value)).props("label-always").classes("mt-6")
         with ui.row().classes("w-full items-center gap-3"):
-            if self.trip.chapter_list():
-                ui.label("Storyline: your chapters (above)").classes("w-56 text-sm")
-            else:
-                ui.select(STORYLINES, value=limits.storyline if limits.storyline in STORYLINES else "teaser",
-                          label="Storyline", on_change=lambda e: self.set_limit("storyline", e.value)).classes("w-56")
             beats = {k: v for k, v in CUT_ON.items() if k != "taps"}  # your pins always lead when there are some
             meaning = {
                 "strong": "The hardest hits (drums, accents), keeping the pace of each part of the song.",
@@ -2469,14 +2462,6 @@ class Page:
         ui.switch("Camera effects: zoom transitions, punch-ins and shakes on big hits, speed ramps, slow push-ins, "
                   "freeze-frames introducing the people you named",
                   value=limits.camera_effects, on_change=lambda e: self.set_limit("camera_effects", e.value))
-        ui.label("" if self.trip.chapter_list() else {
-            "teaser": "Storyline: opens with a quick teaser of the most exciting shots, then tells each story; every "
-                      "story starts with a wide, calm view, look-alike shots never come back to back, and the "
-                      "video ends on a calm shot.",
-            "stories": "Storyline: each story starts with a wide, calm view, look-alike shots never come back to "
-                       "back, and the video ends on a calm shot.",
-            "date": "Storyline: everything in the order it was taken.",
-        }.get(limits.storyline, "")).classes("text-sm text-gray-600")
         ui.label(
             "Cuts land on the beat: quick shots in the lively parts, longer ones in the calm parts, and a cut at every "
             "change in the music. Action clips go to lively music, calm and cinematic clips and photos to calm music, "

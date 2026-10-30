@@ -281,6 +281,7 @@ def choose(rows: list[dict]) -> list[dict]:
 
 
 FINALE_SHARE = 0.12  # of the video, for the finale (the most exciting shots)
+FINALE_FROM = 12  # shots needed before a finale is worth it
 REST_WEIGHT = 0.6  # "Everything else" gets a little less time than a chapter you named
 SPAN_PENALTY = 20.0  # how strongly a chapter's shots keep to their part of the video
 
@@ -295,6 +296,8 @@ def by_chapters(rows: list[dict], chapters: list[dict]) -> list[dict]:
     for r in rows:
         if r.get("chapter") is not None:
             groups.setdefault(r["chapter"], []).append(r)
+    if finale is not None and len(rows) < FINALE_FROM:
+        finale = None  # too few shots for a finale of their own: they stay where they belong
     if finale is not None:
         size = int(np.clip(round(0.1 * len(rows)), 2, 10))
         best = sorted(rows, key=excitement, reverse=True)[:size]

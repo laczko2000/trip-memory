@@ -28,7 +28,7 @@ from PIL import Image, ImageOps
 
 from .faces import FaceFinder, group_faces
 from .media import MediaItem, scan_folder
-from . import autoedit, chapters as chaptering, director, motion, musicmood, stories
+from . import autoedit, director, motion, musicmood, stories, themes
 from .scenes import SceneTagger, mean_vector
 from .tags import TAG_GROUP, Tagger, group_name, look_alike_groups, people_tag, story_subject
 from .tools import ffmpeg_paths, probe
@@ -175,6 +175,7 @@ class Trip:
             "effects TEXT", "effects_why TEXT", "ai_caption TEXT", "ai_score INTEGER", "removed INTEGER DEFAULT 0", "features BLOB",
             "plan_role TEXT", "plan_pos REAL", "title_text TEXT", "title_sub TEXT", "title_style TEXT", "title_where TEXT",
             "focus_x REAL", "keep_start REAL", "keep_end REAL", "part_of TEXT",
+            "theme TEXT", "theme_auto TEXT", "theme_sure REAL",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
@@ -190,6 +191,7 @@ class Trip:
         (self.dir / "folder.txt").write_text(str(self.folder))
         self.progress = Progress()
         self._repeats: set[str] = set()  # the last pool's files that repeat another file
+        self._chapters: list[dict] | None = None  # the last pool's storyline, as chapters for Auto-edit
 
     # ---------- reading ----------
 
@@ -302,7 +304,7 @@ class Trip:
         off = {r["path"] for s in stories if not s["enabled"] for r in s["items"]}
         rank = {r["path"]: n for n, s in enumerate(stories) for r in s["items"]}
         left_out = self._left_out_by_plan(stories)
-        if self.chapter_list():  # your chapters choose the shots: only stories you switched off yourself stay out
+        if self.storyline():  # your storyline chooses the shots: only stories you switched off yourself stay out
             mine = {r["key"] for r in self.query("SELECT key FROM story_info WHERE mine_enabled = 0")}
             off = {r["path"] for s in stories if s["key"] in mine for r in s["items"]}
             left_out = set()
@@ -480,7 +482,8 @@ class Trip:
             return {}
         t = self.title_settings()
         names = {s["number"]: s["name"] for s in self.stories()}
-        chapters_on = bool(self.chapter_list())  # the shots follow your chapters, not the stories: no story titles
+        # By theme or day by day, the shots don't follow the stories: no story titles then.
+        chapters_on = self.storyline()["order"] != themes.TIME
         result: dict[str, dict] = {}
         previous = object()
         for k, r in enumerate(board):
@@ -620,9 +623,10 @@ class Trip:
         story by story in your story order, leaving out stories you switched off and shots a story's plan
         leaves out. With chapters, each shot carries its chapter ("chapter", "chapter_fit"); shots in no chapter
         are left out, and only the stories you switched off yourself are (the plans and the wish don't count)."""
-        chapters = self.chapter_list()
-        if chapters:
-            return self._chapter_pool(chapters)
+        storyline = self.storyline()
+        if storyline:
+            return self._storyline_pool(storyline)
+        self._chapters = None
         items = self.items()
         stories = self.stories(items)
         left_out = self._left_out_by_plan(stories)
@@ -642,68 +646,130 @@ class Trip:
                         pool.append(r | {"story_rank": rank, "story_name": story["name"]})
         return pool
 
-    def _chapter_pool(self, chapters: list[dict]) -> list[dict]:
-        items = self.items()
+    def _storyline_pool(self, storyline: dict) -> list[dict]:
+        """The shots for your storyline, each with its chapter; self._chapters gets the chapters for Auto-edit."""
         off = {r["key"] for r in self.query("SELECT key FROM story_info WHERE mine_enabled = 0")}
-        stories = self.stories(items)
+        stories = self.stories(self.items())
         rows = []
         for rank, story in enumerate(stories):
             if story["key"] in off:
                 continue
             for r in story["items"]:
                 if r["chosen"] and r["included"]:
-                    rows.append(r | {"story_rank": rank, "story_name": story["name"]})
+                    rows.append(r | {"story_rank": rank, "story_name": story["name"],
+                                     "theme": r["theme"] or r["theme_auto"]})
         repeats = self._repeats = self._same_moments(rows)
         rows = [r for r in rows if r["path"] not in repeats]
+        chapters, where = themes.chapters_for(storyline, rows)
+        self._chapters = chapters
         pool = []
-        for r, (where, fit) in zip(rows, self.chapter_matches(rows, chapters)):
-            if where is None:
+        for r, chapter in zip(rows, where):
+            if chapter is None:
                 continue
-            if kept_part(r):
+            if kept_part(r):  # a clip you cut: Auto-edit only sees the part you kept
                 start, end = kept_part(r)
                 r = r | {"duration": end - start, "keep_offset": start, "full_duration": r["duration"]}
-            pool.append(r | {"chapter": where, "chapter_fit": fit})
+            pool.append(r | {"chapter": chapter})
         return pool
 
-    def chapter_matches(self, rows: list[dict], chapters: list[dict]) -> list[tuple[int | None, float]]:
-        """Which chapter each shot belongs to (None: none), from its tags, captions, people and CLIP picture."""
-        vectors = {r["path"]: np.frombuffer(r["clip"], dtype=np.float32)
-                   for r in self.query("SELECT path, clip FROM items WHERE clip IS NOT NULL")}
-        subjects = {r["path"]: [s[0] for s in json.loads(r["subjects"])]
-                    for r in self.query("SELECT path, subjects FROM items WHERE subjects IS NOT NULL")}
-        rows = [r | {"subject_names": subjects.get(r["path"], [])} for r in rows]
-        return chaptering.assign(rows, chapters, vectors)
+    # ---------- themes ----------
 
-    def chapter_preview(self) -> list[list[dict]]:
-        """For each chapter, the selected shots that go in it (best fit first); the finale shows none (it takes the
-        most exciting shots of all when cutting)."""
-        chapters = self.chapter_list()
-        pool = self._chapter_pool(chapters) if chapters else []
-        out: list[list[dict]] = [[] for _ in chapters]
-        for r in sorted(pool, key=lambda r: -r["chapter_fit"]):
-            out[r["chapter"]].append(r)
-        return out
+    def activities(self) -> list[dict]:
+        """The activities a shot can have (the app's own and the ones you added), with their CLIP vectors."""
+        rows = self.query("SELECT value FROM meta WHERE key = 'activities'")
+        return json.loads(rows[0]["value"]) if rows else themes.default_activities()
 
-    def chapter_info(self) -> dict | None:
-        """Your chapters: {"note": what you wrote, "list": the chapters, "reader": who read the note}."""
-        rows = self.query("SELECT value FROM meta WHERE key = 'chapters'")
-        saved = json.loads(rows[0]["value"]) if rows and rows[0]["value"] else None
-        return saved if saved and saved.get("list") else None
+    def save_activities(self, activities: list[dict]) -> None:
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('activities', ?)", (json.dumps(activities),))
 
-    def chapter_list(self) -> list[dict]:
-        saved = self.chapter_info()
-        return saved["list"] if saved else []
+    def theme_rows(self) -> list[dict]:
+        """Your selected shots with their theme: activity (yours if you confirmed it, else the app's suggestion), who,
+        where and when."""
+        rows = [r for r in self.items() if r["chosen"]]
+        for r in rows:
+            r["theme_ok"] = r["theme"] is not None
+            r["theme"] = r["theme"] or r["theme_auto"] or themes.OTHER
+            r["day_part"] = themes.day_part(r["taken_at"])
+        return rows
 
-    def set_chapters(self, chapter_list: list[dict] | None, note: str | None = None, reader: str | None = None) -> None:
-        """Save your chapters (None or []: stop using chapters). Following chapters replaces the wish."""
-        saved = self.chapter_info() or {}
-        if chapter_list and self.wish():
-            self.execute("DELETE FROM meta WHERE key = 'wish'")
-        value = {"note": saved.get("note", "") if note is None else note,
-                 "reader": saved.get("reader", "") if reader is None else reader,
-                 "list": chapter_list or []}
-        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('chapters', ?)",
-                     (json.dumps(value) if chapter_list else "",))
+    def has_fingerprints(self) -> bool:
+        return bool(self.query("SELECT 1 FROM items WHERE clip IS NOT NULL LIMIT 1"))
+
+    def suggest_themes(self) -> None:
+        """Suggest an activity for every selected shot you haven't confirmed, learning from the ones you have."""
+        rows = self.query("SELECT path, clip, theme, tags, tags_user, scene, scene_user FROM items "
+                          "WHERE chosen = 1 AND removed = 0 AND part_of IS NULL ORDER BY taken_at, path")
+        activities = self.activities()
+        names = {a["name"] for a in activities}
+        seen = [r for r in rows if r["clip"] is not None]
+        vectors = np.array([np.frombuffer(r["clip"], dtype=np.float32) for r in seen]) if seen else np.zeros((0, 512))
+        confirmed = [(i, r["theme"]) for i, r in enumerate(seen) if r["theme"] in names]
+        guesses = {r["path"]: g for r, g in zip(seen, themes.suggest(vectors, activities, confirmed))}
+        updates = []
+        for r in rows:
+            if r["path"] in guesses:
+                name, sure = guesses[r["path"]]
+            else:  # no picture fingerprint yet: a first guess from its tags
+                tags = json.loads(r["tags_user"]) if r["tags_user"] is not None else json.loads(r["tags"] or "[]")
+                name, sure = themes.by_tags(tags, r["scene_user"] or r["scene"]), 0.3
+            updates.append((name, round(sure, 3), r["path"]))
+        with self._lock:
+            self.db.executemany("UPDATE items SET theme_auto = ?, theme_sure = ? WHERE path = ?", updates)
+            self.db.commit()
+
+    def set_theme(self, paths: list[str], activity: str | None) -> None:
+        """Confirm these shots' activity (activity None: the one suggested now), then suggest the rest again."""
+        with self._lock:
+            if activity is None:
+                self.db.executemany("UPDATE items SET theme = COALESCE(theme, theme_auto, ?) WHERE path = ?",
+                                    [(themes.OTHER, p) for p in paths])
+            else:
+                self.db.executemany("UPDATE items SET theme = ? WHERE path = ?", [(activity, p) for p in paths])
+            self.db.commit()
+        self.suggest_themes()
+
+    def unconfirm_theme(self, paths: list[str]) -> None:
+        with self._lock:
+            self.db.executemany("UPDATE items SET theme = NULL WHERE path = ?", [(p,) for p in paths])
+            self.db.commit()
+        self.suggest_themes()
+
+    def add_activity(self, name: str, vector: list[float] | None) -> None:
+        activities = self.activities()
+        if any(a["name"].lower() == name.lower() for a in activities):
+            return
+        new = themes.new_activity(name) | {"vector": vector}
+        at = next((k for k, a in enumerate(activities) if a["name"] == themes.OTHER), len(activities))
+        activities.insert(at, new)
+        self.save_activities(activities)
+        self.suggest_themes()
+
+    def remove_activity(self, name: str) -> None:
+        """Take an activity away: its shots get a new suggestion (the ones you confirmed for it too)."""
+        if name == themes.OTHER:
+            return
+        self.save_activities([a for a in self.activities() if a["name"] != name])
+        self.execute("UPDATE items SET theme = NULL WHERE theme = ?", (name,))
+        self.suggest_themes()
+
+    # ---------- the storyline ----------
+
+    def storyline(self) -> dict:
+        """How the video is told: {"order": time|theme|day, "blocks": [{"key", "activity", "person", "on"}],
+        "split": activities shown per person, "finale": bool}. As it happened, with a finale, until you change it."""
+        rows = self.query("SELECT value FROM meta WHERE key = 'storyline'")
+        saved = json.loads(rows[0]["value"]) if rows and rows[0]["value"] else {}
+        return {"order": themes.TIME, "blocks": [], "split": [], "finale": True} | saved
+
+    def set_storyline(self, **changes) -> None:
+        value = self.storyline() | changes
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('storyline', ?)", (json.dumps(value),))
+
+    def storyline_blocks(self) -> list[dict]:
+        """The theme blocks of your selection, in your order, each with how many shots it has."""
+        line = self.storyline()
+        rows = [r for r in self.theme_rows() if r["included"]]
+        return themes.blocks_for(rows, line["blocks"], set(line["split"]))
 
     @staticmethod
     def _same_moments(rows: list[dict]) -> set[str]:
@@ -761,7 +827,7 @@ class Trip:
         if gap and song.taps:
             song.taps = musicmood.thin(song.taps, gap)  # a calm style cuts only on some of your pins
         result = autoedit.plan_to_music(rows, scores, song, limits, target, transition_seconds, soft_transition,
-                                        self.chapter_list())
+                                        self._chapters)
         result.outside = self._never_offered(rows)
         if mine:  # too few shots for all your pins: remember which ones this cut used (Music & audio greys the rest)
             kept = result.kept_pins or (song.taps if len(song.taps or []) < len(mine) else None)
@@ -837,7 +903,7 @@ class Trip:
         """Selected files Auto-edit did not get to choose from: repeats of another file, and (with chapters) shots
         in no chapter. They stay selected, but are out of this cut."""
         seen = {r["path"] for r in rows}
-        if not self.chapter_list():  # without chapters: only the repeats (switched-off stories keep their place)
+        if not self._chapters:  # without a storyline: only the repeats (switched-off stories keep their place)
             seen |= {r["path"] for r in self.items()} - self._repeats
         return [r["path"] for r in self.query("SELECT path FROM items WHERE chosen = 1 AND included = 1 AND removed = 0 "
                                               "AND part_of IS NULL ORDER BY taken_at") if r["path"] not in seen]
@@ -897,7 +963,7 @@ class Trip:
         steady = SongMap(duration=length, bpm=120, period=0.5, first_beat=0.0, clear_beat=False, downbeat=0,
                          sections=[Section(0.0, length, 0.5, "Medium")])
         result = autoedit.plan_to_music(rows, scores, steady, limits, None, transition_seconds, soft_transition,
-                                        self.chapter_list())
+                                        self._chapters)
         result.outside = self._never_offered(rows)
         self._apply_plan(result)
         report(1.0, "Done")
