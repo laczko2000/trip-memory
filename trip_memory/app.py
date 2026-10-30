@@ -1243,6 +1243,10 @@ class Page:
         note.dismiss()
         beat = result.beat
         on_beat = f", cuts on the beat ({beat.bpm:.0f} BPM)" if music and beat and beat.clear else ""
+        if music and limits.cut_on == "taps":
+            on_beat = (f", cut exactly on your {result.pins} pins" if result.pins else
+                       ". This song has no final pins, so it cut on the beat: in the Music tab, place pins and click "
+                       "These are final")
         song = self.song_maps.get(music) if music else None
         wanted = song.duration if song and target == "song" else (float(target) if target not in ("song", "all") else None)
         pool = self.trip.auto_edit_pool()

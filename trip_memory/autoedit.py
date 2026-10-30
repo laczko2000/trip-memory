@@ -43,6 +43,7 @@ class Plan:
     left_out: list[str] = field(default_factory=list)
     length: float = 0.0
     beat: Beat | None = None
+    pins: int = 0  # how many of your pins (Music tab) the cuts follow; 0 = cut on the music by itself
 
 
 def loudness_steps(path: str) -> list[float]:
@@ -275,7 +276,7 @@ class Slot:
     end: float  # the cut after it
     energy: float  # how lively the music is here, 0..1
     soft_before: bool = False  # a soft transition (fade) into this slot instead of a hard cut
-    tapped: bool = False  # both its cuts are yours (Music tab): never joined with another, never cut shorter
+    tapped: bool = False  # both its cuts are your pins (Music tab): never joined, never split, however long
 
     @property
     def seconds(self) -> float:
@@ -328,12 +329,10 @@ def music_slots(song, limits: Limits, end: float, longest: float | None = None) 
         if len(cuts) > 2 and cuts[-1] - cuts[-2] < limits.min_shot and cuts[-1] - cuts[-3] <= longest:
             cuts.pop(-2)
         slots += [Slot(a, b, section.energy) for a, b in zip(cuts, cuts[1:]) if b - a > 1e-3]
-    # Any piece still longer than allowed is split evenly on beats. (Between two of your taps: only if it is
-    # longer than your own limits; trying shorter pieces to fit more shots never adds cuts between your taps.)
+    # Any piece still longer than allowed is split evenly on beats; never the time between two of your pins.
     result: list[Slot] = []
     for s in slots:
-        allowed = max(limits.max_video, limits.max_photo) if s.tapped else longest
-        pieces = int(np.ceil(s.seconds / (allowed * 1.03)))
+        pieces = 1 if s.tapped else int(np.ceil(s.seconds / (longest * 1.03)))
         if pieces <= 1:
             result.append(s)
             continue
@@ -349,10 +348,10 @@ def music_slots(song, limits: Limits, end: float, longest: float | None = None) 
 
 
 def _tap_slots(song, taps: list[float], end: float) -> list[Slot]:
-    """Your own cuts: exactly where you tapped (very short pieces from a double tap are joined)."""
+    """Your own cuts: exactly where you put the pins, as close together as a tenth of a second."""
     cuts = [0.0]
     for t in sorted(taps):
-        if 0.25 <= t - cuts[-1] and t < end - 0.25:
+        if 0.1 <= t - cuts[-1] and t < end - 0.1:
             cuts.append(float(t))
     cuts.append(end)
     return [Slot(a, b, song.energy_at((a + b) / 2), tapped=True) for a, b in zip(cuts, cuts[1:])]
@@ -473,6 +472,9 @@ def effects_for(row: dict, slot: Slot, seconds: float, speed: float, hits: list[
     return {}, None
 
 
+MIN_FILL_SPEED = 0.5  # a video a little shorter than the time between two pins may be slowed down this far
+
+
 def fill_slots(slots: list[Slot], candidates: list[dict], limits: Limits) -> list[int]:
     """Choose a shot for every slot, keeping the trip in time order, matching lively shots to lively music.
 
@@ -492,11 +494,14 @@ def fill_slots(slots: list[Slot], candidates: list[dict], limits: Limits) -> lis
                 best_prev, best_idx = score[j - 1, i - 1], i - 1
             if best_prev <= neg / 2:
                 continue
-            if c["kind"] == "video":
+            if slot.tapped:
+                # Your pins come first, whatever your length limits: any photo, or any video that fills the time
+                # (slowed down to half speed at most if it is a little short).
+                if c["kind"] == "video" and (c["duration"] or 0) < slot.seconds * MIN_FILL_SPEED - 0.05:
+                    continue
+            elif c["kind"] == "video":
                 # Fits in the clip's longest good stretch (or, if that is very short, the clip as a whole).
                 room = c.get("usable") if (c.get("usable") or 0) >= limits.min_shot else c["duration"]
-                if slot.tapped:  # your cut comes first: the whole clip may be used, rather than lose the cut
-                    room = max(room or 0, c["duration"] or 0)
                 if (room or 0) < slot.seconds - 0.05 or slot.seconds > limits.max_video * 1.03 + 0.05:
                     continue
             elif slot.seconds > limits.max_photo * 1.03 + 0.05:
@@ -594,6 +599,12 @@ def plan_to_music(
         since_fx = 0 if effects.get("punch") or effects.get("ramp") else since_fx + 1
         if effects.get("ramp") and not limits.speed_effects:
             effects, effects_why = {}, None
+        if slot.tapped and c["kind"] == "video" and (c["duration"] or 0) < seconds * speed * (1.4 if effects.get("ramp") else 1.0) - 0.01:
+            # Too short for the time between your pins: slow it down so it fills it, rather than add a cut.
+            if effects.get("ramp"):
+                effects, effects_why = {}, None
+            speed = max(MIN_FILL_SPEED, (c["duration"] or 0) / seconds - 0.001)
+            speed_why = "Slowed down to fill the time between your pins"
         if c["kind"] == "video":
             curve = curves.get(c["path"])
             used = seconds * speed * (1.4 if effects.get("ramp") else 1.0)  # of the video itself
@@ -605,4 +616,6 @@ def plan_to_music(
                           why=why, speed=speed, speed_why=speed_why, effects=effects, effects_why=effects_why))
     used = {s.path for s in shots}
     length = begin / 30
-    return Plan(shots=shots, left_out=[r["path"] for r in rows if r["path"] not in used], length=length, beat=song.beat)
+    pins = sum(1 for k in range(1, len(slots)) if slots[k].tapped or slots[k - 1].tapped)
+    return Plan(shots=shots, left_out=[r["path"] for r in rows if r["path"] not in used], length=length, beat=song.beat,
+                pins=pins)

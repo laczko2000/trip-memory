@@ -144,6 +144,23 @@ def test_every_tap_is_kept_even_with_fewer_shots_than_taps():
     assert max(abs(c - t) for c, t in zip(cuts, song.taps)) <= 1 / 30  # ...but no tap was joined away or moved
 
 
+def test_pins_are_the_only_cuts_however_long_or_short():
+    song = _song()
+    song.taps = [0.25, 0.5, 0.75, 1.0, 12.0, 12.25]  # a burst of quick cuts, a long 11 s shot, two more quick ones
+    rows = [_clip(n, action=1.0, duration=8.0 if n == 4 else 3.0) for n in range(10)]
+    limits = autoedit.Limits(max_video=2.0, max_photo=2.0, min_shot=1.0, cut_on="taps", storyline="date")
+    plan = autoedit.plan_to_music(rows, {}, song, limits, 14.0, 0.8, "Fade")
+    cuts, begin = [], 0.0
+    for shot in plan.shots[:-1]:
+        overlap = transitions.seconds_of(shot.transition, 0.8)
+        cuts.append(begin + shot.seconds - overlap / 2)
+        begin += shot.seconds - overlap
+    assert plan.pins == 6
+    assert max(abs(c - t) for c, t in zip(cuts, song.taps)) <= 1 / 30
+    long_shot = plan.shots[4]  # 1.0 -> 12.0: the only clip long enough, slowed down to fill it
+    assert long_shot.path.endswith("04.mov") and long_shot.speed < 1
+
+
 def test_transitions_are_suggested_with_a_reason():
     rows = [_clip(n, action=20.0 if 8 <= n < 24 else 0.5, camera=1.5) for n in range(40)]
     for r in rows:
