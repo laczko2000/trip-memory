@@ -15,6 +15,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from nicegui import app, run, ui
+from starlette.requests import Request
 
 from .catalog import Trip, app_dir
 from .media import MediaItem
@@ -24,6 +25,7 @@ from . import titles
 from . import stories
 from . import music as free_music
 from . import songmap
+from . import voice
 from . import taps as song_taps
 from .beats import song_length
 from .autoedit import CUT_ON, STORYLINES
@@ -146,6 +148,8 @@ class Page:
         self.ollama_found: tuple[list[str], list[str]] | None = None  # (models that see pictures, all models)
         self.ollama_checked = False
         self.ai_busy = False  # the AI director is working (its progress shows in its own card)
+        self.recording = False  # the microphone is on for "speak your idea"
+        self.wish_box = None
 
     # ---------- data ----------
 
@@ -203,6 +207,7 @@ class Page:
 
     def build(self) -> None:
         ui.colors(primary="#2563eb")
+        ui.on("tm_voice", self.voice_ready)
         ui.add_css(".thumb { height: 150px; object-fit: cover; }")
         with ui.column().classes("w-full max-w-6xl mx-auto p-4 gap-3"):
             ui.label("Trip Memory").classes("text-3xl font-bold")
@@ -1615,6 +1620,15 @@ class Page:
             box = ui.textarea(placeholder="Describe the video you want, in as many words as you like. Leave it empty "
                                           "and the AI surprises you.",
                               value=(wish or {}).get("wish", "")).props("outlined autogrow").classes("w-full")
+            self.wish_box = box
+            with ui.row().classes("gap-2 items-center"):
+                talk = ui.button("Stop and turn it into text" if self.recording else "Speak your idea", icon="mic",
+                                 on_click=lambda: self.toggle_voice(talk)) \
+                    .props("outline" + (" color=negative" if self.recording else ""))
+                ui.button("Make it short and clear", icon="auto_fix_normal", on_click=self.tidy_wish) \
+                    .props("outline").tooltip("The AI tidies your words into a short brief you can change before using it")
+                ui.label("Talk as long as you like; your words are written into the box (on this Mac, free).") \
+                    .classes("text-xs text-gray-500")
             with ui.row().classes("gap-2 items-center"):
                 for example in self.WISH_EXAMPLES:
                     ui.chip(example, on_click=lambda e=example: box.set_value(e)).props("outline clickable dense")
@@ -1638,6 +1652,98 @@ class Page:
                             ui.button("Using this" if on else "Use this", icon="check" if on else None,
                                       on_click=lambda i=i: self.use_version(i)) \
                                 .props("dense" + (" outline" if on else "")).set_enabled(not on)
+
+    async def toggle_voice(self, button) -> None:
+        if not self.recording:
+            try:
+                result = await ui.run_javascript("tmVoiceStart()", timeout=30)
+            except Exception as exc:
+                result = str(exc)
+            if result != "ok":
+                ui.notify(f"Could not use the microphone ({result}). Allow the microphone for this page in your "
+                          "browser, then try again.", type="warning", multi_line=True, timeout=10000)
+                return
+            self.recording = True
+            button.set_text("Stop and turn it into text")
+            button.props("color=negative")
+            ui.notify("Listening… Talk as long as you like, then press Stop.", type="info")
+        else:
+            self.recording = False
+            button.set_text("Speak your idea")
+            button.props("color=primary")
+            ui.run_javascript("tmVoiceStop()")
+
+    async def voice_ready(self, e) -> None:
+        name = e.args[0] if isinstance(e.args, list) else e.args
+        path = app_dir() / "voice" / Path(str(name)).name
+        if not path.is_file():
+            return
+        note = ui.notification("Turning your words into text… The very first time, the app downloads its speech model "
+                               "(about 500 MB, once).", spinner=True, timeout=None, multi_line=True)
+        try:
+            text = await run.io_bound(voice.transcribe, str(path), app_dir() / "speech-model")
+        except Exception as exc:
+            traceback.print_exc()
+            ui.notify(f"Could not turn the recording into text: {exc}", type="negative", multi_line=True)
+            return
+        finally:
+            note.dismiss()
+            path.unlink(missing_ok=True)
+        if not text:
+            ui.notify("No words were heard. Is the right microphone on?", type="warning")
+            return
+        if self.wish_box is not None:
+            self.wish_box.set_value(((self.wish_box.value or "") + " " + text).strip())
+        ui.notify("Your words are in the box. Press Make it short and clear to let the AI tidy them up, or make the "
+                  "video straight away.", type="positive", multi_line=True)
+
+    async def tidy_wish(self) -> None:
+        words = (self.wish_box.value if self.wish_box is not None else "") or ""
+        if not words.strip():
+            ui.notify("Type or speak your idea first.", type="warning")
+            return
+        if self.busy():
+            return
+        ai = self.make_director()
+        if not ai:
+            return
+        note = ui.notification("The AI is making your idea short and clear…", spinner=True, timeout=None)
+        self.ai_busy = True
+        try:
+            brief = await self.stoppable(lambda: director.clean_brief(ai.brief(director.brief_prompt(words))))
+        except director.DirectorError as exc:
+            ui.notify(str(exc), type="warning", multi_line=True, timeout=10000)
+            return
+        except Exception as exc:
+            traceback.print_exc()
+            ui.notify(f"Stopped: {exc}", type="negative")
+            return
+        finally:
+            note.dismiss()
+            self.ai_busy = False
+        if brief is None:
+            return
+        if not brief:
+            ui.notify("The AI did not come up with a brief. Try again.", type="warning")
+            return
+        with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl"):
+            ui.label("Your idea, short and clear").classes("text-lg font-semibold")
+            ui.label("Change anything you like. Your own words stay in the box if you'd rather keep them.") \
+                .classes("text-sm text-gray-600")
+            edited = ui.textarea(value=brief).props("outlined autogrow").classes("w-full")
+
+            async def use(make: bool) -> None:
+                dialog.close()
+                if self.wish_box is not None:
+                    self.wish_box.set_value(edited.value)
+                if make:
+                    await self.make_wish(edited.value)
+
+            with ui.row().classes("justify-end w-full gap-2"):
+                ui.button("Cancel", on_click=dialog.close).props("flat")
+                ui.button("Put it in the box", on_click=lambda: use(False)).props("outline")
+                ui.button("Make this video", icon="movie_filter", on_click=lambda: use(True))
+        dialog.open()
 
     def version_words(self, v: dict) -> str:
         bits = [f"{v.get('pace', 'medium')} pace"]
@@ -2583,6 +2689,47 @@ setInterval(() => {
 """
 
 
+VOICE_SCRIPT = """
+<script>
+window.tmVoice = {rec: null, chunks: []};
+async function tmVoiceStart() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+    const rec = new MediaRecorder(stream);
+    tmVoice.chunks = [];
+    rec.ondataavailable = (e) => { if (e.data.size) tmVoice.chunks.push(e.data); };
+    rec.onstop = async () => {
+      stream.getTracks().forEach((t) => t.stop());
+      const blob = new Blob(tmVoice.chunks, {type: rec.mimeType || 'audio/webm'});
+      const answer = await fetch('/voice', {method: 'POST', headers: {'Content-Type': blob.type}, body: blob});
+      emitEvent('tm_voice', (await answer.json()).name);
+    };
+    tmVoice.rec = rec;
+    rec.start(1000);
+    return 'ok';
+  } catch (e) {
+    return e.message || String(e);
+  }
+}
+function tmVoiceStop() {
+  if (tmVoice.rec && tmVoice.rec.state !== 'inactive') tmVoice.rec.stop();
+}
+</script>
+"""
+
+
+@app.post("/voice")
+async def voice_upload(request: Request) -> dict:
+    """A recording from "speak your idea", kept until it has been turned into text."""
+    kind = request.headers.get("content-type", "").split(";")[0].strip()
+    folder = app_dir() / "voice"
+    folder.mkdir(parents=True, exist_ok=True)
+    ending = {"audio/mp4": "m4a", "audio/ogg": "ogg", "audio/wav": "wav"}.get(kind, "webm")
+    name = f"{time.time_ns()}.{ending}"
+    (folder / name).write_bytes(await request.body())
+    return {"name": name}
+
+
 TAP_SCRIPT = """
 <script>
 // The Music tab: play the song, press the RIGHT Shift key wherever you want a cut. Pins can be dragged,
@@ -2860,6 +3007,7 @@ def main() -> None:
     app.add_static_files("/data", app_dir())
     ui.add_body_html(HOVER_SCRIPT, shared=True)
     ui.add_body_html(TAP_SCRIPT, shared=True)
+    ui.add_body_html(VOICE_SCRIPT, shared=True)
     ui.page("/")(lambda: Page().build())
     print("\nTrip Memory is running. Your browser should open by itself.")
     print("If it does not, open http://localhost:8765 . Close this window to stop the app.\n")

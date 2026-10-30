@@ -212,6 +212,33 @@ WISH_SCHEMA = {
 }
 
 
+BRIEF_PROMPT = """Someone described, in their own words (maybe spoken, rambling, with repeats and corrections), the
+holiday memory video they want made from their trip:
+
+"{words}"
+
+Write it up as a short, clear brief for the video editor, in the same language they used:
+- brief: 2 to 5 short sentences. Keep every wish they made (length, format such as Instagram, who and what to show,
+  mood, pace, music, beginning and ending, things to leave out); when they corrected themselves, keep the correction.
+  Leave out filler. Do not add wishes they did not make.
+Answer in JSON."""
+
+BRIEF_SCHEMA = {
+    "type": "object",
+    "properties": {"brief": {"type": "string"}},
+    "required": ["brief"],
+    "additionalProperties": False,
+}
+
+
+def brief_prompt(words: str) -> str:
+    return BRIEF_PROMPT.format(words=" ".join(words.split())[:6000])
+
+
+def clean_brief(answer: dict) -> str:
+    return " ".join(str(answer.get("brief", "")).split())[:1200]
+
+
 class DirectorError(Exception):
     """Something the person can fix (no key, Ollama not running...), with a plain explanation."""
 
@@ -293,6 +320,9 @@ class Ollama:
     def wish(self, prompt: str) -> dict:
         return self._ask(prompt, WISH_SCHEMA)
 
+    def brief(self, prompt: str) -> dict:
+        return self._ask(prompt, BRIEF_SCHEMA)
+
 
 # ---------- Claude ----------
 
@@ -367,6 +397,9 @@ class Claude:
 
     def wish(self, prompt: str) -> dict:
         return self._ask([{"type": "text", "text": prompt}], WISH_SCHEMA, self.story_model)
+
+    def brief(self, prompt: str) -> dict:
+        return self._ask([{"type": "text", "text": prompt}], BRIEF_SCHEMA, self.story_model)
 
 
 def make(settings: dict):
