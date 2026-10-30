@@ -16,7 +16,6 @@ from pathlib import Path
 from urllib.parse import quote
 
 from nicegui import app, run, ui
-from starlette.requests import Request
 
 from .catalog import Trip, app_dir, kept_part
 from .media import MediaItem
@@ -28,13 +27,13 @@ from . import music as free_music
 from . import songmap
 from . import musicmood
 from . import pinfill
-from . import voice
+from . import chapters as chaptering
 from . import taps as song_taps
 from .beats import song_length
 from .autoedit import CUT_ON, STORYLINES
 from .autoedit import Limits as AutoLimits
 from .render import TRANSITIONS, RenderSettings, clip_range, held, render, source_factor
-from .scenes import SCENES
+from .scenes import SCENES, text_vectors
 from .tags import ALL_TAGS, EDITABLE_TAGS, TAG_GROUP
 
 OUTPUT_DIR = Path.home() / "Movies" / "Trip Memory"
@@ -158,7 +157,9 @@ class Page:
         self.ollama_found: tuple[list[str], list[str]] | None = None  # (models that see pictures, all models)
         self.ollama_checked = False
         self.ai_busy = False  # the AI director is working (its progress shows in its own card)
-        self.recording = False  # the microphone is on for "speak your idea"
+        self.recording = False  # the browser is listening for "speak your idea"
+        self.voice_base = ""  # what was in the box before you started speaking
+        self.talk_button = None
         self.wish_box = None
 
     # ---------- data ----------
@@ -217,7 +218,7 @@ class Page:
 
     def build(self) -> None:
         ui.colors(primary="#2563eb")
-        ui.on("tm_voice", self.voice_ready)
+        ui.on("tm_dictation", self.dictation)
         ui.add_css(".thumb { height: 150px; object-fit: cover; }")
         with ui.column().classes("w-full max-w-6xl mx-auto p-4 gap-3"):
             ui.label("Trip Memory").classes("text-3xl font-bold")
@@ -1147,7 +1148,7 @@ class Page:
                             if person["faces"]:
                                 ui.image(data_url(person["faces"][0])).classes("w-16 h-16 rounded")
                             ui.label(f"In {person['count']}").classes("text-xs text-gray-500")
-                            ui.button("Restore", on_click=lambda pid=person["id"]: self.restore(pid)).props("flat dense size=sm")
+                            ui.button("Restore", on_click=lambda pid=person["id"]: self.restore_person(pid)).props("flat dense size=sm")
 
     def no_people_yet(self) -> None:
         """Why the People tab is empty, and what to do about it."""
@@ -1206,7 +1207,7 @@ class Page:
         self.trip.mark_unknown(person_ids)
         self.refresh_all()
 
-    def restore(self, person_id: int) -> None:
+    def restore_person(self, person_id: int) -> None:
         self.trip.restore_person(person_id)
         self.refresh_all()
 
@@ -1943,149 +1944,268 @@ class Page:
         self.board_limit += STORY_ROWS
         self.storyboard_view.refresh()
 
-    WISH_EXAMPLES = ["2 minutes, beach and kids, energetic",
-                     "A calm 3-minute film of the whole trip, with slow motion",
-                     "1 minute for Instagram: only the best moments, very lively"]
+    NOTE_EXAMPLES = ["Kiting first, then the people, food at the end, close with action",
+                     "Start with the beach, then the old town, sunsets at the end",
+                     "The kids first, then everything else, end with the best moments"]
     PACES = {  # what "calm", "medium" and "lively" mean for Auto-edit
         "calm": {"cut_on": "changes", "max_video": 6.0, "max_photo": 4.0, "min_shot": 1.5},
         "medium": {"cut_on": "strong", "max_video": 4.0, "max_photo": 2.5, "min_shot": 1.0},
         "lively": {"cut_on": "strong", "max_video": 2.5, "max_photo": 1.5, "min_shot": 0.5},
     }
+    KIND_ICONS = {chaptering.WORDS: "🔎", chaptering.PEOPLE: "🧑‍🤝‍🧑", chaptering.PERSON: "🙂",
+                  chaptering.FINALE: "🔥", chaptering.REST: "📦"}
 
     def wish_card(self) -> None:
-        """The one place where the AI shapes the whole video: describe it (or leave it empty to be surprised), the AI
-        offers 3 versions and the first is cut straight away. What you set yourself is never overwritten."""
+        """The one place where you say what the video should be: a note (typed or spoken) becomes chapters, and the
+        video tells them in your order. The music decides how many shots and where the cuts go."""
         wish = self.trip.wish()
+        info = self.trip.chapter_info()
         with ui.card().classes("w-full bg-amber-50"):
             ui.label("🎬 The video you want").classes("text-lg font-semibold")
-            self.following_line(wish)
-            box = ui.textarea(placeholder="Describe the video you want, in as many words as you like. Leave it empty "
-                                          "and the AI surprises you.",
-                              value=(wish or {}).get("wish", "")).props("outlined autogrow").classes("w-full")
+            self.following_line(wish, info)
+            box = ui.textarea(placeholder="Say or type the order you want, e.g. \"kiting first, then the people, food "
+                                          "at the end, close with action\".",
+                              value=(info or {}).get("note") or (wish or {}).get("wish", "")) \
+                .props("outlined autogrow").classes("w-full")
             self.wish_box = box
             with ui.row().classes("gap-2 items-center"):
-                talk = ui.button("Stop and turn it into text" if self.recording else "Speak your idea", icon="mic",
+                talk = ui.button("Stop listening" if self.recording else "Speak your idea", icon="mic",
                                  on_click=lambda: self.toggle_voice(talk)) \
                     .props("outline" + (" color=negative" if self.recording else ""))
-                ui.button("Make it short and clear", icon="auto_fix_normal", on_click=self.tidy_wish) \
-                    .props("outline").tooltip("The AI tidies your words into a short brief you can change before using it")
-                ui.label("Talk as long as you like; your words are written into the box (on this Mac, free).") \
+                self.talk_button = talk
+                ui.button("Make chapters from my note", icon="format_list_numbered",
+                          on_click=lambda: self.read_note(box.value))
+                ui.label("Speaking uses your browser's own dictation (free). The chapters are worked out on this Mac.") \
                     .classes("text-xs text-gray-500")
             with ui.row().classes("gap-2 items-center"):
-                for example in self.WISH_EXAMPLES:
+                for example in self.NOTE_EXAMPLES:
                     ui.chip(example, on_click=lambda e=example: box.set_value(e)).props("outline clickable dense")
-            with ui.row().classes("items-center gap-3"):
-                ui.button("Make this video", icon="movie_filter", on_click=lambda: self.make_wish(box.value))
-                ui.label("The AI offers 3 versions and cuts the first one to your song straight away. Story names you "
-                         "typed, stories you switched on or off and your titles stay as you set them. Describe the "
-                         "clips first (Stories tab), so it knows what is in them.").classes("text-sm text-gray-600 flex-1")
-            versions = (wish or {}).get("versions") or []
-            if len(versions) > 1:
-                with ui.row().classes("w-full gap-3 items-stretch"):
-                    for i, v in enumerate(versions):
-                        on = i == wish.get("used", 0)
-                        with ui.card().classes("p-3 flex-1 min-w-60" + (" ring-2 ring-amber-500" if on else "")):
-                            ui.label(f"Version {i + 1}: {v.get('name') or 'no name'}").classes("font-semibold")
-                            if v.get("idea"):
-                                ui.label(v["idea"]).classes("text-sm text-gray-600")
-                            if v.get("story_names"):
-                                ui.label(" → ".join(v["story_names"])).classes("text-xs text-gray-500")
-                            ui.label(self.version_words(v)).classes("text-xs text-gray-500")
-                            ui.button("Using this" if on else "Use this", icon="check" if on else None,
-                                      on_click=lambda i=i: self.use_version(i)) \
-                                .props("dense" + (" outline" if on else "")).set_enabled(not on)
+            if info:
+                self.chapters_list(info)
 
-    async def toggle_voice(self, button) -> None:
-        if not self.recording:
-            try:
-                result = await ui.run_javascript("tmVoiceStart()", timeout=30)
-            except Exception as exc:
-                result = str(exc)
-            if result != "ok":
-                ui.notify(f"Could not use the microphone ({result}). Allow the microphone for this page in your "
-                          "browser, then try again.", type="warning", multi_line=True, timeout=10000)
-                return
-            self.recording = True
-            button.set_text("Stop and turn it into text")
-            button.props("color=negative")
-            ui.notify("Listening… Talk as long as you like, then press Stop.", type="info")
-        else:
-            self.recording = False
-            button.set_text("Speak your idea")
-            button.props("color=primary")
-            ui.run_javascript("tmVoiceStop()")
+    def chapters_list(self, info: dict) -> None:
+        chapters = info["list"]
+        preview = self.trip.chapter_preview()
+        with ui.column().classes("w-full gap-1 p-2 rounded bg-white"):
+            with ui.row().classes("w-full items-center gap-2"):
+                ui.label("Your chapters, in the order they play").classes("font-semibold")
+                if info.get("reader"):
+                    ui.label(f"(read by {info['reader']})").classes("text-xs text-gray-500")
+            for n, c in enumerate(chapters):
+                shots = preview[n] if n < len(preview) else []
+                with ui.row().classes("w-full items-center no-wrap gap-2 border-b py-1"):
+                    ui.label(f"{n + 1}.").classes("w-6 text-gray-500")
+                    ui.label(self.KIND_ICONS.get(c["kind"], "")).classes("w-6")
+                    if c["kind"] == chaptering.WORDS:
+                        name = ui.input(value=c["what"]).props("dense outlined").classes("w-48") \
+                            .tooltip("What these shots show, in your words. Change it and press Enter.")
+                        name.on("keydown.enter", lambda e, n=n, name=name: self.rename_chapter(n, name.value))
+                        name.on("blur", lambda e, n=n, name=name: self.rename_chapter(n, name.value))
+                    else:
+                        ui.label(c["what"]).classes("w-48 font-medium")
+                    with ui.column().classes("gap-0 flex-grow"):
+                        if c["kind"] == chaptering.FINALE:
+                            ui.label("The most exciting shots of the whole trip, building up to the biggest one.") \
+                                .classes("text-xs text-gray-600")
+                        else:
+                            empty = (" · every shot fits a chapter you named" if c["kind"] == chaptering.REST else
+                                     " · nothing matches yet: try other words")
+                            ui.label(f"{len(shots)} shot{'s' * (len(shots) != 1)}" +
+                                     (" · the music decides how many are used" if shots else empty)) \
+                                .classes("text-xs " + ("text-gray-600" if shots or c["kind"] == chaptering.REST
+                                                       else "text-orange-700"))
+                            if shots:
+                                with ui.row().classes("gap-1 no-wrap overflow-hidden"):
+                                    for it in shots[:8]:
+                                        if it.get("thumb"):
+                                            ui.image(data_url(it["thumb"])).classes("w-14 h-10 rounded") \
+                                                .props("fit=cover no-spinner").tooltip(it.get("ai_caption") or "")
+                    ui.button(icon="arrow_upward", on_click=lambda n=n: self.move_chapter(n, -1)) \
+                        .props("flat dense round size=sm").set_enabled(n > 0)
+                    ui.button(icon="arrow_downward", on_click=lambda n=n: self.move_chapter(n, 1)) \
+                        .props("flat dense round size=sm").set_enabled(n < len(chapters) - 1)
+                    ui.button(icon="close", on_click=lambda n=n: self.drop_chapter(n)) \
+                        .props("flat dense round size=sm").tooltip("Take this chapter out" + (
+                            ": shots in no chapter are left out of the video" if c["kind"] == chaptering.REST else ""))
+            if not any(c["kind"] == chaptering.REST for c in chapters):
+                ui.label("Shots that fit no chapter are left out (add \"Everything else\" to use them).") \
+                    .classes("text-xs text-gray-600")
+            with ui.row().classes("w-full items-center gap-2 mt-1"):
+                extra = ui.input(placeholder="Add a chapter: any words, e.g. sunset").props("dense outlined") \
+                    .classes("w-64")
+                ui.button("Add", icon="add", on_click=lambda: self.add_chapter(chaptering.WORDS, extra.value)) \
+                    .props("outline dense")
+                quick = {chaptering.PEOPLE: "People", chaptering.REST: "Everything else",
+                         chaptering.FINALE: "Finale: the most action"}
+                quick.update({f"person:{p}": p for p in self.trip.person_names()})
+                ui.select(quick, label="…or add", on_change=lambda e: e.value and self.add_chapter(
+                    *(("person", e.value[7:]) if e.value.startswith("person:") else (e.value, "")))) \
+                    .props("dense outlined").classes("w-48")
+            with ui.row().classes("w-full items-center gap-3 mt-2"):
+                ui.button("Make this video", icon="movie_filter", on_click=self.run_auto_edit)
+                ui.label("The music decides how many shots there are and where the cuts go; your chapters decide "
+                         "which shots come where.").classes("text-sm text-gray-600 flex-1")
+                ui.button("Stop using chapters", icon="close", on_click=self.stop_chapters) \
+                    .props("flat dense no-caps size=sm")
 
-    async def voice_ready(self, e) -> None:
-        name = e.args[0] if isinstance(e.args, list) else e.args
-        path = app_dir() / "voice" / Path(str(name)).name
-        if not path.is_file():
-            return
-        note = ui.notification("Turning your words into text… The very first time, the app downloads its speech model "
-                               "(about 500 MB, once).", spinner=True, timeout=None, multi_line=True)
-        try:
-            text = await run.io_bound(voice.transcribe, str(path), app_dir() / "speech-model")
-        except Exception as exc:
-            traceback.print_exc()
-            ui.notify(f"Could not turn the recording into text: {exc}", type="negative", multi_line=True)
-            return
-        finally:
-            note.dismiss()
-            path.unlink(missing_ok=True)
-        if not text:
-            ui.notify("No words were heard. Is the right microphone on?", type="warning")
-            return
-        if self.wish_box is not None:
-            self.wish_box.set_value(((self.wish_box.value or "") + " " + text).strip())
-        ui.notify("Your words are in the box. Press Make it short and clear to let the AI tidy them up, or make the "
-                  "video straight away.", type="positive", multi_line=True)
-
-    async def tidy_wish(self) -> None:
-        words = (self.wish_box.value if self.wish_box is not None else "") or ""
-        if not words.strip():
-            ui.notify("Type or speak your idea first.", type="warning")
+    async def read_note(self, note: str) -> None:
+        """Your note becomes chapters: the local AI reads it if there is one, else the app's own word reader."""
+        if not (note or "").strip():
+            ui.notify("Type or say the order you want first, e.g. \"kiting first, then the people\".", type="warning")
             return
         if self.busy():
             return
-        ai = self.make_director()
-        if not ai:
-            return
-        note = ui.notification("The AI is making your idea short and clear…", spinner=True, timeout=None)
+        people = self.trip.person_names()
+        reader = "the app's word reader"
+        found = chaptering.read_note(note, people)
+        ai = None
+        try:
+            ai = director.make(load_settings().get("ai", {}))
+        except director.DirectorError:
+            pass
+        note_box = ui.notification("Reading your note…", spinner=True, timeout=None)
         self.ai_busy = True
         try:
-            brief = await self.stoppable(lambda: director.clean_brief(ai.brief(director.brief_prompt(words))))
-        except director.DirectorError as exc:
-            ui.notify(str(exc), type="warning", multi_line=True, timeout=10000)
-            return
-        except Exception as exc:
-            traceback.print_exc()
-            ui.notify(f"Stopped: {exc}", type="negative")
-            return
+            if ai is not None:
+                try:
+                    answer = await self.stoppable(lambda: director.clean_chapters(
+                        ai.chapters(director.chapter_prompt(note, people)), people))
+                    if answer:
+                        found, reader = answer, ("the AI on this Mac" if isinstance(ai, director.Ollama) else "Claude")
+                except Exception:
+                    traceback.print_exc()  # no AI running (or it gave nothing useful): the word reader's chapters
+            if not found:
+                ui.notify("No chapters found in the note. Name what should come first, then next, e.g. \"beach "
+                          "first, then dinner\".", type="warning", multi_line=True)
+                return
+            note_box.message = "Looking for the shots that fit each chapter…"
+            await self.set_chapter_list(found, note=note, reader=reader)
         finally:
-            note.dismiss()
+            note_box.dismiss()
             self.ai_busy = False
-        if brief is None:
-            return
-        if not brief:
-            ui.notify("The AI did not come up with a brief. Try again.", type="warning")
-            return
-        with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl"):
-            ui.label("Your idea, short and clear").classes("text-lg font-semibold")
-            ui.label("Change anything you like. Your own words stay in the box if you'd rather keep them.") \
-                .classes("text-sm text-gray-600")
-            edited = ui.textarea(value=brief).props("outlined autogrow").classes("w-full")
+        ui.notify(f"{len(found)} chapters: " + " → ".join(c["what"] for c in found) +
+                  ". Check which shots each one found, change anything, then press Make this video.",
+                  type="positive", multi_line=True, timeout=10000)
+        self.storyboard_view.refresh()
 
-            async def use(make: bool) -> None:
-                dialog.close()
-                if self.wish_box is not None:
-                    self.wish_box.set_value(edited.value)
-                if make:
-                    await self.make_wish(edited.value)
+    async def set_chapter_list(self, found: list[dict], **saved) -> None:
+        """Save the chapters, after working out what each one's words look like (for CLIP, if the app has it)."""
+        missing = [c for c in found if c["kind"] == chaptering.WORDS and c.get("vector") is None]
+        if missing and self.trip.query("SELECT 1 FROM items WHERE clip IS NOT NULL LIMIT 1"):  # scenes were found
+            try:
+                vectors = await run.io_bound(text_vectors, [f"a holiday photo of {c['search'] or c['what']}"
+                                                                   for c in missing], app_dir() / "models" / "clip")
+                for c, v in zip(missing, vectors):
+                    c["vector"] = [round(float(x), 5) for x in v]
+            except Exception:
+                traceback.print_exc()  # without the picture model the tags, captions and people still match
+        self.trip.set_chapters(found, **saved)
 
-            with ui.row().classes("justify-end w-full gap-2"):
-                ui.button("Cancel", on_click=dialog.close).props("flat")
-                ui.button("Put it in the box", on_click=lambda: use(False)).props("outline")
-                ui.button("Make this video", icon="movie_filter", on_click=lambda: use(True))
-        dialog.open()
+    async def rename_chapter(self, n: int, words: str) -> None:
+        chapters = self.trip.chapter_list()
+        words = " ".join((words or "").split())[:40]
+        if not (0 <= n < len(chapters)) or not words or words == chapters[n]["what"]:
+            return
+        chapters[n] = chaptering.chapter(chaptering.WORDS, words, chaptering.hint_for(words)[0])
+        await self.set_chapter_list(chapters)
+        self.storyboard_view.refresh()
+
+    def move_chapter(self, n: int, steps: int) -> None:
+        chapters = self.trip.chapter_list()
+        if 0 <= n + steps < len(chapters):
+            chapters.insert(n + steps, chapters.pop(n))
+            self.trip.set_chapters(chapters)
+            self.storyboard_view.refresh()
+
+    def drop_chapter(self, n: int) -> None:
+        chapters = self.trip.chapter_list()
+        if 0 <= n < len(chapters):
+            chapters.pop(n)
+            if not chapters:
+                ui.notify("No chapters left: Auto-edit's own storyline is back.")
+            self.trip.set_chapters(chapters)
+            self.storyboard_view.refresh()
+
+    async def add_chapter(self, kind: str, what: str) -> None:
+        what = " ".join((what or "").split())[:40]
+        if kind == chaptering.WORDS and not what:
+            ui.notify("Type what the shots should show first, e.g. sunset.", type="warning")
+            return
+        chapters = self.trip.chapter_list()
+        new = chaptering.chapter(kind, what, chaptering.hint_for(what)[0] if kind == chaptering.WORDS else "")
+        finale = next((k for k, c in enumerate(chapters) if c["kind"] == chaptering.FINALE), len(chapters))
+        if kind == chaptering.FINALE and finale < len(chapters):
+            return
+        chapters.insert(len(chapters) if kind == chaptering.FINALE else finale, new)  # the finale stays last
+        await self.set_chapter_list(chapters)
+        self.storyboard_view.refresh()
+
+    def stop_chapters(self) -> None:
+        self.trip.set_chapters(None)
+        ui.notify("The video no longer follows chapters: Auto-edit's own storyline is back.")
+        self.storyboard_view.refresh()
+
+    async def toggle_voice(self, button) -> None:
+        """Dictation by the browser itself (Safari and Chrome on a Mac, free): your words appear in the box as you
+        speak."""
+        if not self.recording:
+            self.voice_base = (self.wish_box.value or "").strip() if self.wish_box is not None else ""
+            try:
+                result = await ui.run_javascript("tmDictateStart()", timeout=10)
+            except Exception as exc:
+                result = str(exc)
+            if result != "ok":
+                self.voice_problem(result)
+                return
+            self.recording = True
+            button.set_text("Stop listening")
+            button.props("color=negative")
+            ui.notify("Listening… Speak, and your words appear in the box. Press Stop listening when you're done.",
+                      type="info")
+        else:
+            self.listening_stopped()
+            ui.run_javascript("tmDictateStop()")
+
+    VOICE_PROBLEMS = {
+        "unsupported": "This browser can't turn speech into text. Open the app in Safari or Chrome, or use the "
+                       "Mac's own dictation: click in the box and press the 🎤 key (or Fn twice).",
+        "not-allowed": "The browser was not allowed to use the microphone. Allow it for this page (in Safari: Safari "
+                       "menu > Settings for 127.0.0.1 > Microphone > Allow; in Chrome: the icon left of the address), "
+                       "then try again.",
+        "service-not-allowed": "Speech recognition is switched off on this Mac. Switch on System Settings > Keyboard "
+                               "> Dictation, then try again (or press the 🎤 key in the box).",
+        "audio-capture": "No microphone was found. Check System Settings > Sound > Input.",
+        "network": "Speech recognition needs the internet in this browser. Check the connection, or use the Mac's "
+                   "own dictation: click in the box and press the 🎤 key (or Fn twice).",
+        "no-speech": "No words were heard. Is the right microphone on (System Settings > Sound > Input)?",
+        "language-not-supported": "Speech recognition doesn't support this language here. Try Safari or Chrome.",
+    }
+
+    def listening_stopped(self) -> None:
+        """The browser stopped listening: the button says Speak your idea again (what you said stays in the box)."""
+        self.recording = False
+        if self.talk_button is not None:
+            self.talk_button.set_text("Speak your idea")
+            self.talk_button.props("color=primary")
+
+    def voice_problem(self, code: str) -> None:
+        text = self.VOICE_PROBLEMS.get(code, f"Speech recognition stopped ({code}). Try again, or use the Mac's own "
+                                              "dictation: click in the box and press the 🎤 key (or Fn twice).")
+        ui.notify(text, type="warning", multi_line=True, timeout=15000)
+
+    def dictation(self, e) -> None:
+        args = e.args if isinstance(e.args, dict) else {}
+        if args.get("error"):
+            if self.recording and args["error"] != "aborted":
+                self.voice_problem(args["error"])
+            if args["error"] not in ("no-speech", "aborted"):
+                self.listening_stopped()
+            return
+        if args.get("ended"):
+            self.listening_stopped()
+            return
+        if self.wish_box is not None and "text" in args:
+            self.wish_box.set_value((self.voice_base + " " + args["text"]).strip())
 
     def version_words(self, v: dict) -> str:
         bits = [f"{v.get('pace', 'medium')} pace"]
@@ -2097,10 +2217,13 @@ class Page:
             bits.append("slow motion")
         return " · ".join(bits)
 
-    def following_line(self, wish: dict | None) -> None:
+    def following_line(self, wish: dict | None, info: dict | None = None) -> None:
         """One line saying what the video follows now, what you set yourself, and Undo."""
         with ui.column().classes("w-full gap-1 p-2 rounded bg-white"):
-            if wish:
+            if info:
+                ui.label(f"Following: your {len(info['list'])} chapters · {self.length_words()}") \
+                    .classes("text-sm font-medium text-amber-900")
+            elif wish:
                 size = "upright for phones" if self.trip.video_size() == "phone" else "landscape"
                 name = f"Version {wish.get('used', 0) + 1}: {wish['name']}" if wish.get("name") else "Your wish"
                 ui.label(f"Following: {name} · {self.length_words()} · {self.version_words(wish)} · {size}") \
@@ -2111,7 +2234,7 @@ class Page:
                     ui.label("More of: " + ", ".join(wish.get("people", []) + wish.get("focus", []))) \
                         .classes("text-xs text-gray-600")
             else:
-                ui.label("Following: your own settings in Auto-edit below (no wish yet).") \
+                ui.label("Following: Auto-edit's own storyline below (no chapters yet).") \
                     .classes("text-sm font-medium text-gray-700")
             mine = self.trip.hand_changes()
             with ui.row().classes("items-center gap-2"):
@@ -2126,42 +2249,6 @@ class Page:
                 if wish:
                     ui.button("Stop following the wish", icon="close", on_click=self.forget_wish) \
                         .props("flat dense no-caps size=sm")
-
-    async def make_wish(self, text: str) -> None:
-        if self.busy():
-            return
-        ai = self.make_director()
-        if not ai:
-            return
-        music = self.music_path()
-        song = self.song_maps.get(music) if music else None
-        note = ui.notification("The AI is thinking about your video…", spinner=True, timeout=None)
-        self.ai_busy = True
-        try:
-            target = self.length_now()
-            seconds = (song.duration if song else self.track_seconds(music)) if target == "song" else target
-            wish = await self.stoppable(self.trip.make_wish, ai, text or "", seconds, self.music_words())
-            if wish is None:
-                return
-        except director.DirectorError as exc:
-            ui.notify(str(exc), type="warning", multi_line=True, timeout=10000)
-            return
-        except Exception as exc:
-            traceback.print_exc()
-            ui.notify(f"Stopped: {exc}", type="negative")
-            return
-        finally:
-            note.dismiss()
-            self.ai_busy = False
-        self.sync_video_size()
-        ui.notify(wish["summary"] or "Got it. Making the first cut…", type="info", multi_line=True)
-        await self.run_auto_edit()
-
-    async def use_version(self, index: int) -> None:
-        if self.busy():
-            return
-        self.trip.use_version(index)
-        await self.run_auto_edit()
 
     def forget_wish(self) -> None:
         self.trip.forget_wish()
@@ -2361,8 +2448,11 @@ class Page:
                     ui.slider(min=lo, max=hi, step=0.5, value=getattr(limits, key),
                               on_change=lambda e, k=key: self.set_limit(k, e.value)).props("label-always").classes("mt-6")
         with ui.row().classes("w-full items-center gap-3"):
-            ui.select(STORYLINES, value=limits.storyline if limits.storyline in STORYLINES else "teaser",
-                      label="Storyline", on_change=lambda e: self.set_limit("storyline", e.value)).classes("w-56")
+            if self.trip.chapter_list():
+                ui.label("Storyline: your chapters (above)").classes("w-56 text-sm")
+            else:
+                ui.select(STORYLINES, value=limits.storyline if limits.storyline in STORYLINES else "teaser",
+                          label="Storyline", on_change=lambda e: self.set_limit("storyline", e.value)).classes("w-56")
             beats = {k: v for k, v in CUT_ON.items() if k != "taps"}  # your pins always lead when there are some
             meaning = {
                 "strong": "The hardest hits (drums, accents), keeping the pace of each part of the song.",
@@ -2379,7 +2469,7 @@ class Page:
         ui.switch("Camera effects: zoom transitions, punch-ins and shakes on big hits, speed ramps, slow push-ins, "
                   "freeze-frames introducing the people you named",
                   value=limits.camera_effects, on_change=lambda e: self.set_limit("camera_effects", e.value))
-        ui.label({
+        ui.label("" if self.trip.chapter_list() else {
             "teaser": "Storyline: opens with a quick teaser of the most exciting shots, then tells each story; every "
                       "story starts with a wide, calm view, look-alike shots never come back to back, and the "
                       "video ends on a calm shot.",
@@ -3124,45 +3214,50 @@ setInterval(() => {
 """
 
 
-VOICE_SCRIPT = """
+DICTATE_SCRIPT = """
 <script>
-window.tmVoice = {rec: null, chunks: []};
-async function tmVoiceStart() {
+// "Speak your idea": the browser's own speech recognition (Safari and Chrome), words straight into the box.
+window.tmDictate = {rec: null, on: false, done: ''};
+function tmDictateStart() {
+  const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!Rec) return 'unsupported';
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({audio: true});
-    const rec = new MediaRecorder(stream);
-    tmVoice.chunks = [];
-    rec.ondataavailable = (e) => { if (e.data.size) tmVoice.chunks.push(e.data); };
-    rec.onstop = async () => {
-      stream.getTracks().forEach((t) => t.stop());
-      const blob = new Blob(tmVoice.chunks, {type: rec.mimeType || 'audio/webm'});
-      const answer = await fetch('/voice', {method: 'POST', headers: {'Content-Type': blob.type}, body: blob});
-      emitEvent('tm_voice', (await answer.json()).name);
+    const rec = new Rec();
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.lang = navigator.language || 'en-GB';
+    tmDictate.done = '';
+    rec.onresult = (e) => {
+      let now = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        if (e.results[i].isFinal) tmDictate.done += e.results[i][0].transcript + ' ';
+        else now += e.results[i][0].transcript;
+      }
+      emitEvent('tm_dictation', {text: (tmDictate.done + now).replace(/\\s+/g, ' ').trim()});
     };
-    tmVoice.rec = rec;
-    rec.start(1000);
+    rec.onerror = (e) => {
+      if (e.error !== 'no-speech') tmDictate.on = false;
+      emitEvent('tm_dictation', {error: e.error || 'unknown'});
+    };
+    rec.onend = () => {
+      // Browsers stop listening after a pause: keep listening until you press Stop.
+      if (tmDictate.on) { try { rec.start(); return; } catch (err) {} }
+      emitEvent('tm_dictation', {ended: true});
+    };
+    tmDictate.rec = rec;
+    tmDictate.on = true;
+    rec.start();
     return 'ok';
   } catch (e) {
     return e.message || String(e);
   }
 }
-function tmVoiceStop() {
-  if (tmVoice.rec && tmVoice.rec.state !== 'inactive') tmVoice.rec.stop();
+function tmDictateStop() {
+  tmDictate.on = false;
+  if (tmDictate.rec) tmDictate.rec.stop();
 }
 </script>
 """
-
-
-@app.post("/voice")
-async def voice_upload(request: Request) -> dict:
-    """A recording from "speak your idea", kept until it has been turned into text."""
-    kind = request.headers.get("content-type", "").split(";")[0].strip()
-    folder = app_dir() / "voice"
-    folder.mkdir(parents=True, exist_ok=True)
-    ending = {"audio/mp4": "m4a", "audio/ogg": "ogg", "audio/wav": "wav"}.get(kind, "webm")
-    name = f"{time.time_ns()}.{ending}"
-    (folder / name).write_bytes(await request.body())
-    return {"name": name}
 
 
 TAP_SCRIPT = """
@@ -3561,7 +3656,7 @@ def main() -> None:
     app.add_static_files("/data", app_dir())
     ui.add_body_html(HOVER_SCRIPT, shared=True)
     ui.add_body_html(TAP_SCRIPT, shared=True)
-    ui.add_body_html(VOICE_SCRIPT, shared=True)
+    ui.add_body_html(DICTATE_SCRIPT, shared=True)
     ui.page("/")(lambda: Page().build())
     print("\nTrip Memory is running. Your browser should open by itself.")
     print("If it does not, open http://localhost:8765 . Close this window to stop the app.\n")

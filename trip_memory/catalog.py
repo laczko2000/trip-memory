@@ -28,7 +28,7 @@ from PIL import Image, ImageOps
 
 from .faces import FaceFinder, group_faces
 from .media import MediaItem, scan_folder
-from . import autoedit, director, motion, musicmood, stories
+from . import autoedit, chapters as chaptering, director, motion, musicmood, stories
 from .scenes import SceneTagger, mean_vector
 from .tags import TAG_GROUP, Tagger, group_name, look_alike_groups, people_tag, story_subject
 from .tools import ffmpeg_paths, probe
@@ -189,6 +189,7 @@ class Trip:
                 pass
         (self.dir / "folder.txt").write_text(str(self.folder))
         self.progress = Progress()
+        self._repeats: set[str] = set()  # the last pool's files that repeat another file
 
     # ---------- reading ----------
 
@@ -301,6 +302,10 @@ class Trip:
         off = {r["path"] for s in stories if not s["enabled"] for r in s["items"]}
         rank = {r["path"]: n for n, s in enumerate(stories) for r in s["items"]}
         left_out = self._left_out_by_plan(stories)
+        if self.chapter_list():  # your chapters choose the shots: only stories you switched off yourself stay out
+            mine = {r["key"] for r in self.query("SELECT key FROM story_info WHERE mine_enabled = 0")}
+            off = {r["path"] for s in stories if s["key"] in mine for r in s["items"]}
+            left_out = set()
         source = {it["path"]: it["part_of"] or it["path"] for it in items}
         clips = {it["path"]: it for it in items if not it["part_of"]}
         rows = [it for it in items if it["chosen"] and it["included"] and not it["cut_out"]
@@ -475,10 +480,11 @@ class Trip:
             return {}
         t = self.title_settings()
         names = {s["number"]: s["name"] for s in self.stories()}
+        chapters_on = bool(self.chapter_list())  # the shots follow your chapters, not the stories: no story titles
         result: dict[str, dict] = {}
         previous = object()
         for k, r in enumerate(board):
-            if r["story"] != previous and t["stories"] and k > 0:
+            if r["story"] != previous and t["stories"] and k > 0 and not chapters_on:
                 places = [x["place"] or x["country"] for x in board if x["story"] == r["story"] and (x["place"] or x["country"])]
                 when = datetime.fromisoformat(r["taken_at"]).astimezone()
                 sub = (max(set(places), key=places.count) + " · " if places else "") + f"{when:%a %-d %b}"
@@ -612,7 +618,11 @@ class Trip:
     def auto_edit_pool(self) -> list[dict]:
         """What Auto-edit picks from: your selection (ticked in Choose files and "In the video" in the Library),
         story by story in your story order, leaving out stories you switched off and shots a story's plan
-        leaves out."""
+        leaves out. With chapters, each shot carries its chapter ("chapter", "chapter_fit"); shots in no chapter
+        are left out, and only the stories you switched off yourself are (the plans and the wish don't count)."""
+        chapters = self.chapter_list()
+        if chapters:
+            return self._chapter_pool(chapters)
         items = self.items()
         stories = self.stories(items)
         left_out = self._left_out_by_plan(stories)
@@ -620,6 +630,7 @@ class Trip:
         pool = []
         repeats = self._same_moments([r for s in stories if s["enabled"] for r in s["items"]
                                       if r["chosen"] and r["included"] and r["path"] not in left_out])
+        self._repeats = repeats
         for rank, story in enumerate(stories):
             if story["enabled"]:
                 for r in story["items"]:
@@ -630,6 +641,69 @@ class Trip:
                             r = r | {"duration": end - start, "keep_offset": start, "full_duration": r["duration"]}
                         pool.append(r | {"story_rank": rank, "story_name": story["name"]})
         return pool
+
+    def _chapter_pool(self, chapters: list[dict]) -> list[dict]:
+        items = self.items()
+        off = {r["key"] for r in self.query("SELECT key FROM story_info WHERE mine_enabled = 0")}
+        stories = self.stories(items)
+        rows = []
+        for rank, story in enumerate(stories):
+            if story["key"] in off:
+                continue
+            for r in story["items"]:
+                if r["chosen"] and r["included"]:
+                    rows.append(r | {"story_rank": rank, "story_name": story["name"]})
+        repeats = self._repeats = self._same_moments(rows)
+        rows = [r for r in rows if r["path"] not in repeats]
+        pool = []
+        for r, (where, fit) in zip(rows, self.chapter_matches(rows, chapters)):
+            if where is None:
+                continue
+            if kept_part(r):
+                start, end = kept_part(r)
+                r = r | {"duration": end - start, "keep_offset": start, "full_duration": r["duration"]}
+            pool.append(r | {"chapter": where, "chapter_fit": fit})
+        return pool
+
+    def chapter_matches(self, rows: list[dict], chapters: list[dict]) -> list[tuple[int | None, float]]:
+        """Which chapter each shot belongs to (None: none), from its tags, captions, people and CLIP picture."""
+        vectors = {r["path"]: np.frombuffer(r["clip"], dtype=np.float32)
+                   for r in self.query("SELECT path, clip FROM items WHERE clip IS NOT NULL")}
+        subjects = {r["path"]: [s[0] for s in json.loads(r["subjects"])]
+                    for r in self.query("SELECT path, subjects FROM items WHERE subjects IS NOT NULL")}
+        rows = [r | {"subject_names": subjects.get(r["path"], [])} for r in rows]
+        return chaptering.assign(rows, chapters, vectors)
+
+    def chapter_preview(self) -> list[list[dict]]:
+        """For each chapter, the selected shots that go in it (best fit first); the finale shows none (it takes the
+        most exciting shots of all when cutting)."""
+        chapters = self.chapter_list()
+        pool = self._chapter_pool(chapters) if chapters else []
+        out: list[list[dict]] = [[] for _ in chapters]
+        for r in sorted(pool, key=lambda r: -r["chapter_fit"]):
+            out[r["chapter"]].append(r)
+        return out
+
+    def chapter_info(self) -> dict | None:
+        """Your chapters: {"note": what you wrote, "list": the chapters, "reader": who read the note}."""
+        rows = self.query("SELECT value FROM meta WHERE key = 'chapters'")
+        saved = json.loads(rows[0]["value"]) if rows and rows[0]["value"] else None
+        return saved if saved and saved.get("list") else None
+
+    def chapter_list(self) -> list[dict]:
+        saved = self.chapter_info()
+        return saved["list"] if saved else []
+
+    def set_chapters(self, chapter_list: list[dict] | None, note: str | None = None, reader: str | None = None) -> None:
+        """Save your chapters (None or []: stop using chapters). Following chapters replaces the wish."""
+        saved = self.chapter_info() or {}
+        if chapter_list and self.wish():
+            self.execute("DELETE FROM meta WHERE key = 'wish'")
+        value = {"note": saved.get("note", "") if note is None else note,
+                 "reader": saved.get("reader", "") if reader is None else reader,
+                 "list": chapter_list or []}
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('chapters', ?)",
+                     (json.dumps(value) if chapter_list else "",))
 
     @staticmethod
     def _same_moments(rows: list[dict]) -> set[str]:
@@ -686,7 +760,9 @@ class Trip:
         gap = musicmood.STYLES[music["style"]]["pin_gap"]
         if gap and song.taps:
             song.taps = musicmood.thin(song.taps, gap)  # a calm style cuts only on some of your pins
-        result = autoedit.plan_to_music(rows, scores, song, limits, target, transition_seconds, soft_transition)
+        result = autoedit.plan_to_music(rows, scores, song, limits, target, transition_seconds, soft_transition,
+                                        self.chapter_list())
+        result.outside = self._never_offered(rows)
         if mine:  # too few shots for all your pins: remember which ones this cut used (Music & audio greys the rest)
             kept = result.kept_pins or (song.taps if len(song.taps or []) < len(mine) else None)
             taps.set_extra(song_path, app_dir() / "music-taps", "used", {"pins": mine, "kept": kept} if kept else None)
@@ -757,6 +833,15 @@ class Trip:
                 scores[r["path"]] = score
         return scores
 
+    def _never_offered(self, rows: list[dict]) -> list[str]:
+        """Selected files Auto-edit did not get to choose from: repeats of another file, and (with chapters) shots
+        in no chapter. They stay selected, but are out of this cut."""
+        seen = {r["path"] for r in rows}
+        if not self.chapter_list():  # without chapters: only the repeats (switched-off stories keep their place)
+            seen |= {r["path"] for r in self.items()} - self._repeats
+        return [r["path"] for r in self.query("SELECT path FROM items WHERE chosen = 1 AND included = 1 AND removed = 0 "
+                                              "AND part_of IS NULL ORDER BY taken_at") if r["path"] not in seen]
+
     def _apply_plan(self, result: autoedit.Plan) -> None:
         self.checkpoint("the first cut")
         offsets = {r["path"]: r["keep_start"] for r in self.query(
@@ -789,7 +874,8 @@ class Trip:
             parts = [(p,) for shot in result.shots for p in (shot.effects or {}).get("collage", [])]
             self.db.executemany("UPDATE items SET cut_out = 0, position = NULL WHERE path = ?", parts)
             # Left out of this cut, but still in your selection, so the next Auto-edit can use it again.
-            self.db.executemany("UPDATE items SET cut_out = 1, position = NULL WHERE path = ?", [(p,) for p in result.left_out])
+            self.db.executemany("UPDATE items SET cut_out = 1, position = NULL WHERE path = ?",
+                                [(p,) for p in result.left_out + result.outside])
             self.db.commit()
 
     def auto_edit_steady(
@@ -810,7 +896,9 @@ class Trip:
         length = target or 3600.0  # "use everything": it stops when the shots run out
         steady = SongMap(duration=length, bpm=120, period=0.5, first_beat=0.0, clear_beat=False, downbeat=0,
                          sections=[Section(0.0, length, 0.5, "Medium")])
-        result = autoedit.plan_to_music(rows, scores, steady, limits, None, transition_seconds, soft_transition)
+        result = autoedit.plan_to_music(rows, scores, steady, limits, None, transition_seconds, soft_transition,
+                                        self.chapter_list())
+        result.outside = self._never_offered(rows)
         self._apply_plan(result)
         report(1.0, "Done")
         return result

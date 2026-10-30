@@ -75,6 +75,20 @@ class SceneTagger:
         return classify(vector, self.category_vectors)
 
 
+_text_model = None
+
+
+def text_vectors(sentences: list[str], cache_dir: Path) -> np.ndarray:
+    """Meaning vectors for sentences, comparable with the pictures' (only the small text half of CLIP is loaded)."""
+    global _text_model
+    if _text_model is None:
+        from fastembed import TextEmbedding
+
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        _text_model = TextEmbedding(TEXT_MODEL, cache_dir=str(cache_dir))
+    return _unit(np.array(list(_text_model.embed(sentences)))).astype(np.float32)
+
+
 def classify(vector: np.ndarray, category_vectors: np.ndarray) -> list[tuple[str, float]]:
     logits = 100 * category_vectors @ vector
     probs = np.exp(logits - logits.max())

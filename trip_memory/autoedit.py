@@ -48,6 +48,7 @@ class Plan:
     # Short of shots, a long clip gives two or three: "clip.mov#2" is its second part. path -> (the file, where in
     # it (seconds into the part of the clip Auto-edit saw) the part starts).
     parts: dict[str, tuple[str, float]] = field(default_factory=dict)
+    outside: list[str] = field(default_factory=list)  # selected, but never offered (a repeat, or in no chapter)
 
 
 def loudness_steps(path: str) -> list[float]:
@@ -277,6 +278,49 @@ def choose(rows: list[dict]) -> list[dict]:
     # In a planned story, the plan's order first; shots the plan left out after it, as taken.
     return sorted(rows, key=lambda r: (r.get("story_rank", 0), r.get("plan_pos") is None,
                                        r.get("plan_pos") or 0, r["taken_at"], r["path"]))
+
+
+FINALE_SHARE = 0.12  # of the video, for the finale (the most exciting shots)
+REST_WEIGHT = 0.6  # "Everything else" gets a little less time than a chapter you named
+SPAN_PENALTY = 20.0  # how strongly a chapter's shots keep to their part of the video
+
+
+def by_chapters(rows: list[dict], chapters: list[dict]) -> list[dict]:
+    """The shots in your chapters' order (row["chapter"] says which), each chapter in the order it was taken. Every
+    shot gets the part of the video its chapter should fill (r["span"], fractions 0..1): bigger chapters get more
+    time. The finale takes the most exciting shots of all and ends on the most exciting one."""
+    rows = [dict(r, must=False) for r in rows]
+    finale = next((j for j, c in enumerate(chapters) if c["kind"] == "finale"), None)
+    groups: dict[int, list[dict]] = {}
+    for r in rows:
+        if r.get("chapter") is not None:
+            groups.setdefault(r["chapter"], []).append(r)
+    if finale is not None:
+        size = int(np.clip(round(0.1 * len(rows)), 2, 10))
+        best = sorted(rows, key=excitement, reverse=True)[:size]
+        for r in best:
+            if r.get("chapter") is not None and r["chapter"] != finale:
+                groups[r["chapter"]].remove(r)
+            r["chapter"] = finale
+        groups[finale] = sorted(best, key=lambda r: (excitement(r), r["taken_at"]))  # building up to the biggest
+        if groups[finale]:
+            groups[finale][-1]["must"] = True
+    order = [j for j in range(len(chapters)) if groups.get(j)]
+    weights = {j: (np.sqrt(len(groups[j])) * (REST_WEIGHT if chapters[j]["kind"] == "rest" else 1.0))
+               for j in order if j != finale}
+    room = 1.0 - (FINALE_SHARE if finale in order and weights else 0.0)
+    total = sum(weights.values()) or 1.0
+    out: list[dict] = []
+    at = 0.0
+    for j in order:
+        share = FINALE_SHARE if j == finale and weights else room * weights.get(j, total) / total
+        members = groups[j] if j == finale else _spread_look_alikes(
+            sorted(groups[j], key=lambda r: (r["taken_at"], r["path"])))
+        for r in members:
+            r["span"] = (at, at + share)
+        out += members
+        at += share
+    return out
 
 
 # ---------- music-driven editing ----------
@@ -662,12 +706,18 @@ def fill_slots(slots: list[Slot], candidates: list[dict], limits: Limits) -> lis
     if not n_slots or not n:
         return []
     paces = [pace_of(c)[0] for c in candidates]
-    values = [shot_value(c) + (4.0 if c.get("must") else 0.0) for c in candidates]
+    values = [shot_value(c) + (4.0 if c.get("must") else 0.0) + 0.3 * min(3.0, c.get("chapter_fit") or 0.0)
+              for c in candidates]
+    # Chapters: a shot outside the part of the video its chapter should fill costs points, the further the more.
+    total = slots[-1].end - slots[0].start or 1.0
+    spans = np.array([c.get("span") or (0.0, 1.0) for c in candidates])
     neg = -1e9
     score = np.full((n_slots, n), neg)
     back = np.full((n_slots, n), -1, dtype=int)
     for j, slot in enumerate(slots):
         best_prev, best_idx = (0.0, -1) if j == 0 else (neg, -1)
+        where = ((slot.start + slot.end) / 2 - slots[0].start) / total
+        off = SPAN_PENALTY * np.maximum(0.0, np.maximum(spans[:, 0] - where, where - spans[:, 1]))
         for i, c in enumerate(candidates):
             if j > 0 and i > 0 and score[j - 1, i - 1] > best_prev:
                 best_prev, best_idx = score[j - 1, i - 1], i - 1
@@ -686,7 +736,7 @@ def fill_slots(slots: list[Slot], candidates: list[dict], limits: Limits) -> lis
             elif slot.seconds > limits.max_photo * 1.03 + 0.05:
                 continue
             fit = 1.0 - abs(slot.energy - paces[i])
-            score[j, i] = best_prev + 3.0 + 0.5 * values[i] + 2.0 * fit
+            score[j, i] = best_prev + 3.0 + 0.5 * values[i] + 2.0 * fit - off[i]
             back[j, i] = best_idx
     filled = [j for j in range(n_slots) if score[j].max() > neg / 2]  # always the first few slots
     if not filled:
@@ -708,12 +758,18 @@ def plan_to_music(
     target: float | None,
     transition_seconds: float,
     soft_transition: str,
+    chapters: list[dict] | None = None,
 ) -> Plan:
-    """The music-driven first cut: the song decides where the cuts are, the shots are matched to it."""
+    """The music-driven first cut: the song decides where the cuts are, the shots are matched to it.
+    chapters: your chapters (rows then carry "chapter"): they set the order instead of the storyline."""
     curves = dict(curves)
     for r in rows:
         _measure(r, curves.get(r["path"]))
-    candidates = arrange(choose(rows), limits.storyline)
+
+    def order(rows: list[dict]) -> list[dict]:
+        return by_chapters(rows, chapters) if chapters else arrange(choose(rows), limits.storyline)
+
+    candidates = order(rows)
     end = song.duration if target is None or target >= song.duration else target
     if target is not None and target < song.duration:
         taps = getattr(song, "taps", None) or []
@@ -746,7 +802,7 @@ def plan_to_music(
     parts: dict[str, tuple[str, float]] = {}
     if len(candidates) < need:
         rows, parts = split_long(rows, curves, need - len(candidates))
-        candidates = arrange(choose(rows), limits.storyline)
+        candidates = order(rows)
     if inside and len(candidates) - 1 < len(inside):  # fewer shots than your pins: a first guess
         kept = fit_pins(song, inside, max(1, len(candidates) - 1), cap)
         song.taps = kept + after
