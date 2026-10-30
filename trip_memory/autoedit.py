@@ -290,7 +290,7 @@ def by_chapters(rows: list[dict], chapters: list[dict]) -> list[dict]:
     """The shots in your chapters' order (row["chapter"] says which), each chapter in the order it was taken. Every
     shot gets the part of the video its chapter should fill (r["span"], fractions 0..1): bigger chapters get more
     time. The finale takes the most exciting shots of all and ends on the most exciting one."""
-    rows = [dict(r, must=False) for r in rows]
+    rows = [dict(r, must=bool(r.get("forced"))) for r in rows]  # (shots you ticked in My story must be in)
     finale = next((j for j, c in enumerate(chapters) if c["kind"] == "finale"), None)
     groups: dict[int, list[dict]] = {}
     for r in rows:
@@ -723,7 +723,7 @@ def fill_slots(slots: list[Slot], candidates: list[dict], limits: Limits) -> lis
         return []
     paces = [pace_of(c)[0] for c in candidates]
     wants = [c.get("pace_want") for c in candidates]
-    values = [shot_value(c) + (4.0 if c.get("must") else 0.0) + 0.3 * min(3.0, c.get("chapter_fit") or 0.0)
+    values = [shot_value(c) + (10.0 if c.get("forced") else 4.0 if c.get("must") else 0.0) + 0.3 * min(3.0, c.get("chapter_fit") or 0.0)
               for c in candidates]
     # Chapters: a shot outside the part of the video its chapter should fill costs points, the further the more.
     total = slots[-1].end - slots[0].start or 1.0

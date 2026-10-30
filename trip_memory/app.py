@@ -31,7 +31,7 @@ from . import pinfill
 from . import themes
 from . import taps as song_taps
 from .beats import song_length
-from .autoedit import CUT_ON
+from .autoedit import CUT_ON, shot_value
 from .autoedit import Limits as AutoLimits
 from .render import TRANSITIONS, RenderSettings, clip_range, held, render, source_factor
 from .scenes import SCENES, text_vectors
@@ -2132,6 +2132,12 @@ class Page:
             ui.label("No story yet: until you make one, the video runs as it happened.").classes("text-sm text-gray-500")
             return
         parts = story["parts"]
+        split = set(line["split"])
+        shots_of: dict[str, list[dict]] = {}
+        for r in self.trip.theme_rows():
+            if r["included"]:
+                shots_of.setdefault(themes.block_of(r, split), []).append(r)
+        used = {it["part_of"] or it["path"] for it in self.trip.storyboard()}
         total = self.video_seconds()
         room = total  # the parts share the whole video: the last part is the end
         times = themes.fit_times(parts, room)
@@ -2198,6 +2204,15 @@ class Page:
                             ui.select(themes.PICKS, value=entry["pick"],
                                       on_change=lambda e, n=n, m=m: self.edit_entry(n, m, pick=e.value)) \
                                 .props("dense borderless options-dense").classes("text-xs w-36")
+                            mine = shots_of.get(entry["key"], [])
+                            dropped = set(entry.get("drop") or [])
+                            n_in = sum(1 for r in mine if (r["path"] in used or r["path"] in (entry.get("keep") or []))
+                                       and r["path"] not in dropped)
+                            ui.button(f"{n_in} of {len(mine)} used", icon="photo_library",
+                                      on_click=lambda n=n, m=m, e=entry, rows=mine, t=times[n]:
+                                      self.shots_dialog(n, m, e, rows, used, t)) \
+                                .props("flat dense no-caps size=sm").classes("text-xs") \
+                                .tooltip("See this theme's shots: tick to put one in, untick to keep it out")
                             if entry["pick"] == "moment":
                                 activity = entry["key"].partition("|")[0]
                                 look = ui.input(value=entry.get("moment", ""), placeholder="e.g. kite jump") \
@@ -2230,6 +2245,83 @@ class Page:
                 for b in missing:
                     ui.button(f"+ {names[b['key']]} ({b['count']})", on_click=lambda k=b["key"]: self.add_entry(k)) \
                         .props("flat dense no-caps size=sm").tooltip("Add to the last part")
+
+    def shots_dialog(self, n: int, m: int, entry: dict, rows: list[dict], used: set[str], seconds: float) -> None:
+        """A theme's shots in My story: the ones in the cut ticked first, then the rest, best first. Tick a shot to
+        put it in, untick it to keep it out; the next cut follows."""
+        keep, drop = set(entry.get("keep") or []), set(entry.get("drop") or [])
+        state = {r["path"]: (r["path"] in keep or r["path"] in used) and r["path"] not in drop for r in rows}
+
+        def value(r: dict) -> float:
+            try:
+                return shot_value(r)
+            except (KeyError, TypeError):
+                return 0.0
+
+        ordered = sorted(rows, key=lambda r: (not state[r["path"]], r["taken_at"] if state[r["path"]] else -value(r)))
+        limits = self.limits_now()
+
+        def need() -> float:  # about how long the ticked shots take on screen
+            return sum((limits.max_video * 0.7 if r["kind"] == "video" else limits.max_photo)
+                       for r in rows if state[r["path"]])
+
+        with ui.dialog() as dialog, ui.card().classes("w-[64rem] max-w-full"):
+            with ui.row().classes("w-full items-center gap-3"):
+                ui.label(themes.block_name({"key": entry["key"], "activity": entry["key"].partition("|")[0],
+                                            "person": entry["key"].partition("|")[2] or None})) \
+                    .classes("text-lg font-semibold")
+                hint = ui.label("").classes("text-sm text-gray-600")
+            ui.label("Ticked shots are in the video (the ones the last cut used, and any you tick). Untick a shot "
+                     "to keep it out. Make the first cut again to see the change.").classes("text-xs text-gray-500")
+
+            def show_hint() -> None:
+                ticked = sum(state.values())
+                hint.set_text(f"{ticked} ticked of {len(rows)} · they need about {fmt_length(need())}; this part "
+                              f"has {fmt_length(seconds)}")
+                hint.classes(replace="text-sm " + ("text-orange-700" if need() > seconds * 1.3 else "text-gray-600"))
+
+            with ui.element("div").classes("w-full grid grid-cols-6 gap-2 max-h-[65vh] overflow-auto"):
+                for r in ordered[:300]:
+                    path = r["path"]
+                    with ui.element("div").classes("relative rounded p-1 border-2 cursor-pointer") as tile:
+                        if r.get("thumb"):
+                            ui.image(data_url(r["thumb"])).classes("w-full rounded").style("aspect-ratio:16/10") \
+                                .props("fit=cover no-spinner")
+                        mark = ui.label("").classes("absolute top-2 left-2 w-6 h-6 rounded border-2 text-center "
+                                                    "font-bold shadow")
+                        ui.label(("🎬 " if r["kind"] == "video" else "📷 ") + r["taken_at"][5:16].replace("T", " ")) \
+                            .classes("text-xs text-gray-600")
+
+                    def show(tile=tile, mark=mark, path=path) -> None:
+                        on = state[path]
+                        mark.set_text("✓" if on else "")
+                        mark.classes(replace="absolute top-2 left-2 w-6 h-6 rounded border-2 text-center font-bold "
+                                             "shadow " + ("bg-green-600 border-green-600 text-white" if on else
+                                                          "bg-white border-gray-500"))
+                        tile.classes(replace="relative rounded p-1 border-2 cursor-pointer " +
+                                             ("border-green-600" if on else "border-transparent opacity-60"))
+
+                    def toggle(path=path, show=show) -> None:
+                        state[path] = not state[path]
+                        show()
+                        show_hint()
+
+                    show()
+                    tile.on("click", toggle)
+            show_hint()
+
+            def done() -> None:
+                was_in = {p for p in state if (p in used or p in keep) and p not in drop}
+                new_keep = sorted(p for p, on in state.items() if on and (p not in used or p in drop or p in keep))
+                new_drop = sorted(p for p, on in state.items() if not on and (p in was_in or p in drop))
+                dialog.close()
+                self.edit_entry(n, m, keep=new_keep, drop=new_drop)
+                ui.notify("Saved. Make the first cut again to use your choice.", type="positive")
+
+            with ui.row().classes("w-full justify-end gap-2"):
+                ui.button("Cancel", on_click=dialog.close).props("flat no-caps")
+                ui.button("Use these shots", icon="check", on_click=done).props("no-caps")
+        dialog.open()
 
     def video_seconds(self) -> float:
         target = self.length_now()

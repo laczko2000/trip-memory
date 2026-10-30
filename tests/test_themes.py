@@ -174,3 +174,12 @@ def test_every_theme_goes_into_the_story():
     one = themes.add_missing({"parts": [{"entries": [{"key": "Boat|", "pick": "all"},
                                                      {"key": "Travel|", "pick": "all"}]}]}, blocks, when)
     assert one["parts"][0]["entries"][-1]["key"] == "Travel|"  # the last theme stays last
+
+
+def test_shots_you_tick_or_untick_in_a_theme_are_kept_or_left_out():
+    rows = [_row(n, "Water sports") | {"kind": "photo"} for n in range(6)]
+    story = {"parts": [{"name": "Warm up", "entries": [
+        {"key": "Water sports|", "pick": "early", "keep": ["/t/5.jpg"], "drop": ["/t/1.jpg"]}]}]}
+    chapters, where = themes.chapters_for({"order": themes.STORY, "story": story, "finale": False}, rows)
+    assert where == [0, None, 0, None, None, 0]  # early half without the unticked one, plus the ticked late one
+    assert rows[5].get("forced") and not rows[0].get("forced")

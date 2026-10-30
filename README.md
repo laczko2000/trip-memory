@@ -59,6 +59,7 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **0.64:** see and swap the shots of each theme in *My story*. Every theme shows how many of its shots the last cut used (e.g. *15 of 63 used*). Click it: a big window shows all its shots, the used ones ticked first, the rest best first. Tick a shot to put it in, untick one to keep it out, then *Use these shots* and *Make the first cut* again. The top line tells you how long the ticked shots need and how long the part is.
 - **0.63.1:** video previews are silent everywhere (Library, Choose files, cutting a clip, Storyboard). Only the finished video in *Make video* plays with sound.
 - **0.63:** *What I understood.* When you press *Make my story*, the AI first reads your idea back to you, cleaned up: dictation slips fixed ("kite job" becomes "kite jump") and your theme and moment names used. It asks up to 3 short questions (click an answer or type your own). Change anything, then *Make my story*. The story now has a real arc inside your order: a strong opening, a build-up, a peak and the ending you want, with parts named like film chapters. *Try another idea* keeps your answers.
 - **0.62.1:** *My story* uses every theme. The AI is told to use all of them, and if it still leaves one out, the app adds it to the part filmed nearest in time (never after your last theme). Those show in orange, *added by the app*: drag them elsewhere or remove them.

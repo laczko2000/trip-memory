@@ -1,6 +1,6 @@
 [project]
 name = "trip-memory"
-version = "0.63.1"
+version = "0.64"
 description = "Turn a folder of holiday videos and photos into one memory video."
 readme = "README.md"
 requires-python = ">=3.11"

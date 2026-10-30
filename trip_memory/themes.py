@@ -216,9 +216,12 @@ def _story_chapters(story: dict, rows: list[dict], split: set[str]) -> tuple[lis
         members[k].sort(key=lambda i: rows[i]["taken_at"])
     where: list[int | None] = [None] * len(rows)
     chapters: list[dict] = []
+    # The shots you unticked in a theme's window stay out of the video; the ones you ticked must be in it.
+    dropped = {p for part in story.get("parts") or [] for e in part.get("entries") or [] for p in e.get("drop") or []}
     for n_part, part in enumerate(story.get("parts") or []):
         for entry in part.get("entries") or []:
-            free = [i for i in members.get(entry["key"], []) if where[i] is None]
+            keep = set(entry.get("keep") or [])
+            free = [i for i in members.get(entry["key"], []) if where[i] is None and rows[i]["path"] not in dropped]
             if not free:
                 continue
             pick = entry.get("pick", "all")
@@ -240,11 +243,13 @@ def _story_chapters(story: dict, rows: list[dict], split: set[str]) -> tuple[lis
                 want = set(sorted(whole, key=lambda i: excitement(rows[i]), reverse=True)[:half])
             else:
                 want = set(whole)
-            take = [i for i in free if i in want]
+            take = [i for i in free if i in want or rows[i]["path"] in keep]
             if not take:
                 continue
             for i in take:
                 where[i] = len(chapters)
+                if rows[i]["path"] in keep:
+                    rows[i]["forced"] = True
             chapters.append({"kind": "theme", "what": f"{part.get('name', '')}: {entry['key']}",
                              "pace": PACES.get(part.get("pace"), None), "part": n_part, "count": len(take)})
     # Your time per part: shared by its themes (bigger ones get more), so Auto-edit gives each exactly that time.
