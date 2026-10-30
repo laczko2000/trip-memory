@@ -1115,9 +1115,15 @@ class Page:
                 ui.button("Hear the end", icon="play_arrow",
                           on_click=lambda: ui.run_javascript("tmTrimHear(1)")).props("outline dense no-caps")
                 with ui.button_group().props("outline"):
-                    for secs, label in ((0, "No fades"), (1, "Fades 1 s"), (3, "3 s"), (6, "6 s")):
+                    for secs, label in ((0, "No fades"), (3, "Fades 3 s"), (6, "6 s"), (9, "9 s")):
                         ui.button(label, on_click=lambda secs=secs: ui.run_javascript(f"tmFadeSet({secs}, {secs})")) \
                             .props("outline no-caps dense").tooltip("Set both fades at once (or drag the purple dots)")
+                # Your own fades, any number of seconds, the start and the end each their own.
+                fade_in = ui.number("Fade in (s)", min=0, max=60, step=0.5, format="%.1f").props("dense outlined").classes("w-28")
+                fade_out = ui.number("Fade out (s)", min=0, max=60, step=0.5, format="%.1f").props("dense outlined").classes("w-28")
+                ui.button("Set fades", on_click=lambda: ui.run_javascript(
+                    f"tmFadeSet({float(fade_in.value or 0)}, {float(fade_out.value or 0)})")).props("outline dense no-caps") \
+                    .tooltip("Longer than half the kept part is shortened to fit")
                 ui.switch("Play skips the cut-off parts", value=True,
                           on_change=lambda e: ui.run_javascript(f"tm.tap.skip = {json.dumps(bool(e.value))}; tmTapDraw()"))
                 ui.button("Use this part as the track", icon="content_cut", on_click=lambda: self.trim_song(music))
