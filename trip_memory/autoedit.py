@@ -477,6 +477,22 @@ def speed_for(row: dict, slot: Slot, seconds: float) -> tuple[float, str | None]
     return 1.0, None
 
 
+FREEZE = 1.0  # seconds a freeze-frame holds, with the person's name on it
+FREEZE_GAP = 20.0  # at most one freeze-frame in this many seconds
+
+
+def freeze_for(row: dict, slot: Slot, seconds: float, introduced: set[str], since: float) -> tuple[dict, str | None]:
+    """The first good video of someone you named ends frozen for a moment with their name, like a film
+    introducing its cast. Not in the busiest music, and not too often."""
+    names = [p for p in row.get("people") or [] if not p.startswith("Person ") and p not in introduced]
+    if (row["kind"] != "video" or not names or slot.energy >= 0.75 or seconds < 2.2 or since < FREEZE_GAP
+            or row.get("people_tag") not in ("Solo", "Couple", "Group")):
+        return {}, None
+    names = names[:2]
+    introduced.update(names)
+    return {"freeze": FREEZE, "label": " & ".join(names)}, f"Freeze-frame introducing {' & '.join(names)}"
+
+
 def effects_for(row: dict, slot: Slot, seconds: float, speed: float, hits: list[tuple[float, float]], turn: int,
                 shot_start: float | None = None) -> tuple[dict, str | None]:
     # turn: how many shots since the last one with an effect (punch-ins and ramps are kept apart)
@@ -489,8 +505,11 @@ def effects_for(row: dict, slot: Slot, seconds: float, speed: float, hits: list[
     if slot.energy >= 0.62:
         inside = [(t - slot.start, h) for t, h in hits if slot.start + 0.3 < t < slot.end - 0.3 and h >= 0.75]
         if inside and turn >= 2:
-            t, _ = max(inside, key=lambda x: x[1])
+            t, h = max(inside, key=lambda x: x[1])
             t += slot.start - (slot.start if shot_start is None else shot_start)  # from where the shot starts on screen
+            action = bool({"Fast action", "Lively", "Shaky"} & tags) or (row.get("motion_action") or 0) >= 0.6
+            if h >= 0.9 and action:
+                return {"shake": [round(t, 3)]}, "Camera shake and a flash on the hardest hit"
             return {"punch": [round(t, 3)]}, "Punch-in on a big hit"
         room = row.get("usable") or row.get("duration") or 0
         if speed == 1.0 and seconds >= 2.0 and room >= seconds * 1.4 + 0.1 and turn >= 3:
@@ -614,6 +633,9 @@ def plan_to_music(
 
     shots: list[Shot] = []
     since_fx = 99
+    introduced: set[str] = set()  # people already shown with their name on a freeze-frame
+    last_freeze = -99.0
+    previous_story = None
     begin = 0  # in video frames, where this shot starts
     for k, (slot, i) in enumerate(zip(slots, picks)):
         c = candidates[i]
@@ -625,7 +647,13 @@ def plan_to_music(
         speed, speed_why = speed_for(c, slot, seconds) if limits.speed_effects else (1.0, None)
         effects, effects_why = (effects_for(c, slot, seconds, speed, hits, since_fx, finish / 30 - seconds)
                                 if limits.camera_effects else ({}, None))
-        since_fx = 0 if effects.get("punch") or effects.get("ramp") else since_fx + 1
+        new_story = c.get("story") != previous_story  # its first shot carries the story's title already
+        previous_story = c.get("story")
+        if limits.camera_effects and not effects and not new_story:
+            effects, effects_why = freeze_for(c, slot, seconds, introduced, slot.start - last_freeze)
+            if effects:
+                last_freeze = slot.start
+        since_fx = 0 if effects.get("punch") or effects.get("ramp") or effects.get("shake") else since_fx + 1
         if effects.get("ramp") and not limits.speed_effects:
             effects, effects_why = {}, None
         if slot.tapped and c["kind"] == "video" and (c["duration"] or 0) < seconds * speed * (1.4 if effects.get("ramp") else 1.0) - 0.01:
@@ -636,7 +664,7 @@ def plan_to_music(
             speed_why = "Slowed down to fill the time between your pins"
         if c["kind"] == "video":
             curve = curves.get(c["path"])
-            used = seconds * speed * (1.4 if effects.get("ramp") else 1.0)  # of the video itself
+            used = (seconds - (effects.get("freeze") or 0)) * speed * (1.4 if effects.get("ramp") else 1.0)  # of the video
             longest_start = max(0.0, (c["duration"] or used) - used)
             start = best_start(curve, c["duration"], used) if curve is not None else longest_start / 2
             start = min(max(0.0, start), longest_start)

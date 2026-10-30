@@ -37,7 +37,7 @@ AUDIO = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
 ProgressFn = Callable[[float, str], None]
 
 # Bump when the way clips are prepared changes, so old remembered clips are not reused.
-SEGMENT_VERSION = 6
+SEGMENT_VERSION = 7
 TITLE_SECONDS = 3.0
 FONTS = [
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
@@ -125,6 +125,14 @@ def source_factor(effects: dict | None) -> float:
     return RAMP_SOURCE if (effects or {}).get("ramp") else 1.0
 
 
+def held(effects: dict | None) -> float:
+    """Seconds a shot ends frozen on its last picture (a freeze-frame with a name on it), on top of the video."""
+    return float((effects or {}).get("freeze") or 0.0)
+
+
+SHAKE = 0.05  # a shake moves the picture by up to 5% of its size, dying away in about half a second
+
+
 def _atempo(factor: float) -> str:
     """Speed sound up or down without changing its pitch (one step only goes from half to double speed)."""
     steps = []
@@ -142,7 +150,8 @@ def _video_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
     start, end = clip_range(item, s)
     speed = min(2.0, max(0.5, item.speed or 1.0))  # the range the sound can follow too
     effects = item.effects or {}
-    length = (end - start) / speed / source_factor(effects)  # on screen
+    moving = (end - start) / speed / source_factor(effects)  # the video playing
+    length = moving + held(effects)  # on screen, with a freeze-frame at the end
     smooth = f",framerate=fps={FPS}" if speed < 0.95 else ""  # slow motion: blend frames, so it doesn't stutter
     look = (_hdr_to_sdr() if item.hdr else "") + rotate_filter(item.rotation)
     graph = ""
@@ -159,7 +168,7 @@ def _video_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
     else:
         graph += f"[0:v]{look}format=yuv420p[src];"
     graph += _fit_with_blur("src", s.width, s.height, "fit")
-    graph += f";[fit]fps={FPS}{_zoom_filter(item, length)},format=yuv420p[v]"
+    graph += f";[fit]fps={FPS}{_zoom_filter(item, moving)}{_hit_filter(effects, s.width, s.height)}{_freeze_filter(effects, moving)},format=yuv420p[v]"
     inputs = ["-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", str(item.path)]
     title_png = None
     if item.overlay and (item.overlay.get("text") or item.overlay.get("sub")):
@@ -186,8 +195,39 @@ def _video_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
         graph = graph.replace(",format=yuv420p[v]", ",format=yuv420p[v0]", 1)
         graph += (f";[{n}:v]format=rgba,setpts=PTS-STARTPTS,{titles.ffmpeg_fades(length)}[title];"
                   f"[v0][title]overlay=0:0:shortest=1:format=auto,format=yuv420p[v]")
+    if held(effects) and effects.get("label"):  # the name on the freeze-frame, appearing as it freezes
+        name_png = out.with_suffix(".name.png")
+        titles.draw({"text": effects["label"], "style": "handwritten", "where": "lower-left"}, s.width, s.height) \
+            .save(name_png)
+        n = inputs.count("-i")
+        inputs += ["-loop", "1", "-t", f"{length + 0.5:.3f}", "-i", str(name_png)]
+        graph = graph.replace("format=yuv420p[v]", "format=yuv420p[vf]")
+        graph += (f";[{n}:v]format=rgba,setpts=PTS-STARTPTS,fade=t=in:st={moving:.3f}:d=0.25:alpha=1[name];"
+                  f"[vf][name]overlay=0:0:shortest=1:format=auto,format=yuv420p[v]")
     _encode_segment(inputs, graph, length, out, s)
     return length
+
+
+def _hit_filter(effects: dict, w: int, h: int) -> str:
+    """A camera shake with a flash of light on the music's biggest hits (empty when the shot has none)."""
+    hits = effects.get("shake") or []
+    if not hits:
+        return ""
+    # How hard the shake is at time t: a kick at each hit that dies away quickly.
+    kick = "+".join(f"gte(t,{t:.3f})*exp(-(t-{t:.3f})*7)" for t in hits)
+    m = SHAKE / 2
+    return (f",crop=w=iw*{1 - SHAKE:.3f}:h=ih*{1 - SHAKE:.3f}"
+            f":x='iw*{m:.4f}*(1+sin(t*83)*({kick}))':y='ih*{m:.4f}*(1+cos(t*71)*({kick}))',"
+            f"scale={w}:{h},"
+            f"eq=brightness='0.35*({kick.replace('*7)', '*14)')})':eval=frame")
+
+
+def _freeze_filter(effects: dict, moving: float) -> str:
+    """Hold the last picture (with a quick flash as it freezes); the name goes on top in _video_segment."""
+    if not held(effects):
+        return ""
+    return (f",tpad=stop_mode=clone:stop_duration={held(effects):.3f}"
+            f",eq=brightness='0.4*gte(t,{moving:.3f})*exp(-(t-{moving:.3f})*9)':eval=frame")
 
 
 ZOOM_FRAMES = 9  # a zoom through a cut takes 0.3 s on each side

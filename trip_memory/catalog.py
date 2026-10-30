@@ -30,7 +30,7 @@ from . import autoedit, director, motion, stories
 from .scenes import SceneTagger, mean_vector
 from .tags import TAG_GROUP, Tagger, group_name, look_alike_groups, people_tag, story_subject
 from .tools import ffmpeg_paths, probe
-from .render import RAMP_SOURCE, source_factor
+from .render import RAMP_SOURCE, held, source_factor
 
 
 def app_dir() -> Path:
@@ -571,8 +571,13 @@ class Trip:
         return result
 
     def clear_effects(self, path: str) -> None:
-        """Take the punch-in, speed ramp or push-in off a shot (the same part of the video stays in use)."""
-        row = self.query("SELECT effects, trim_start, trim_end FROM items WHERE path = ?", (path,))
+        """Take the punch-in, speed ramp, push-in, shake or freeze-frame off a shot (the same part of the video
+        stays in use)."""
+        row = self.query("SELECT effects, trim_start, trim_end, speed FROM items WHERE path = ?", (path,))
+        if row and row[0]["effects"] and held(json.loads(row[0]["effects"])) and row[0]["trim_end"] is not None:
+            # The freeze-frame's time goes back to the video playing, so the shot stays just as long.
+            more = held(json.loads(row[0]["effects"])) * (row[0]["speed"] or 1.0)
+            self.execute("UPDATE items SET trim_end = ? WHERE path = ?", (row[0]["trim_end"] + more, path))
         if row and row[0]["effects"] and json.loads(row[0]["effects"]).get("ramp") and row[0]["trim_end"] is not None:
             # A ramp used 40% more video for the same time on screen: keep the shot just as long.
             start, end = row[0]["trim_start"], row[0]["trim_end"]
@@ -624,7 +629,7 @@ class Trip:
     def _apply_plan(self, result: autoedit.Plan) -> None:
         with self._lock:
             for shot_no, shot in enumerate(result.shots):
-                used = shot.seconds * shot.speed * source_factor(shot.effects)  # of the video itself
+                used = (shot.seconds - held(shot.effects)) * shot.speed * source_factor(shot.effects)  # of the video
                 trim = (shot.start, shot.start + used) if shot.kind == "video" else (None, None)
                 self.db.execute(
                     "UPDATE items SET cut_out = 0, position = ?, trim_start = ?, trim_end = ?, transition = ?, "

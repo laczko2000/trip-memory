@@ -236,3 +236,27 @@ def test_the_video_ends_on_black_with_the_end_card_and_the_music_fading(tmp_path
     loud = subprocess.run([ffmpeg_paths()[0], "-ss", f"{length - 0.4:.2f}", "-i", str(out), "-af", "volumedetect",
                            "-f", "null", "-"], capture_output=True, text=True).stderr
     assert float(loud.split("max_volume:")[1].split("dB")[0]) < -12  # the music has faded out
+
+
+def test_shake_on_a_hit_and_a_freeze_frame_with_a_name(tmp_path):
+    import numpy as np
+
+    trip = tmp_path / "trip"
+    trip.mkdir()
+    make_clip(trip / "a.mp4", "640x360", 4, "2025-07-03T10:00:00Z")
+    make_clip(trip / "b.mp4", "640x360", 4, "2025-07-03T10:01:00Z")
+    a, b = scan_folder(trip)[0]
+    a.trim_start, a.trim_end, a.effects = 0.0, 2.0, {"shake": [1.0]}
+    b.trim_start, b.trim_end, b.effects = 0.0, 2.0, {"freeze": 1.0, "label": "Anna"}  # 2 s playing + 1 s frozen
+    settings = RenderSettings(width=640, height=360)
+    shaken = render([a], settings, tmp_path / "shake.mp4")
+    assert abs(float(probe(str(shaken))["format"]["duration"]) - 2.0) < 0.1
+    assert _frame(shaken, 1.03).mean() > _frame(shaken, 0.9).mean() + 15  # the flash on the hit
+    a.effects = None
+    cut = RenderSettings(width=640, height=360, transition="None (hard cut)")
+    frozen = render([b, a], cut, tmp_path / "freeze.mp4")  # (the video's own fade-out is on the last shot)
+    assert abs(float(probe(str(frozen))["format"]["duration"]) - 5.0) < 0.1
+    late, later = _frame(frozen, 2.5).astype(int), _frame(frozen, 2.9).astype(int)
+    assert np.abs(late - later).mean() < 2  # the picture holds still
+    corner = (slice(260, 340), slice(30, 200))  # the name, bottom left
+    assert late[corner].min(axis=2).max() > 220 > _frame(frozen, 1.0)[corner].min(axis=2).max()

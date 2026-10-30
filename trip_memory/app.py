@@ -27,7 +27,7 @@ from . import taps as song_taps
 from .beats import song_length
 from .autoedit import CUT_ON, STORYLINES
 from .autoedit import Limits as AutoLimits
-from .render import TRANSITIONS, RenderSettings, clip_range, render, source_factor
+from .render import TRANSITIONS, RenderSettings, clip_range, held, render, source_factor
 from .scenes import SCENES
 from .tags import ALL_TAGS, EDITABLE_TAGS, TAG_GROUP
 
@@ -1697,7 +1697,8 @@ class Page:
             choice.on_value_change(lambda e: (self.set_limit("cut_on", e.value), note.set_text(meaning.get(e.value, ""))))
         ui.switch("Speed effects: slow motion in calm, cinematic moments; slow shots sped up in lively music",
                   value=limits.speed_effects, on_change=lambda e: self.set_limit("speed_effects", e.value))
-        ui.switch("Camera effects: zoom transitions, punch-ins on big hits, speed ramps, slow push-ins on still shots",
+        ui.switch("Camera effects: zoom transitions, punch-ins and shakes on big hits, speed ramps, slow push-ins, "
+                  "freeze-frames introducing the people you named",
                   value=limits.camera_effects, on_change=lambda e: self.set_limit("camera_effects", e.value))
         ui.label({
             "teaser": "Storyline: opens with a quick teaser of the most exciting shots, then tells each story; every "
@@ -1981,8 +1982,9 @@ class Page:
 
         def show(lo: float, hi: float) -> None:
             speed = (it.get("speed") or 1.0) * source_factor(json.loads(it["effects"]) if it.get("effects") else None)
+            frozen = held(json.loads(it["effects"]) if it.get("effects") else None)
             label.text = f"Keeping {fmt_length(lo)} to {fmt_length(hi)} ({hi - lo:.1f} s of {fmt_length(it['duration'])})" + (
-                f" · {(hi - lo) / speed:.1f} s on screen" if abs(speed - 1) > 1e-3 else "")
+                f" · {(hi - lo) / speed + frozen:.1f} s on screen" if abs(speed - 1) > 1e-3 or frozen else "")
 
         it["_show_trim"] = lambda: show(*self.kept_part(it))
 

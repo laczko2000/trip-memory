@@ -234,10 +234,10 @@ def test_camera_effects_suit_the_music():
     limits = autoedit.Limits(max_video=4.0, max_photo=2.0, min_shot=1.0, storyline="date", cut_on="beats")
     plan = autoedit.plan_to_music(rows, {}, song, limits, None, 0.8, "Fade")
     kinds = {k for s in plan.shots for k in s.effects}
-    assert {"push", "punch"} <= kinds
+    assert "push" in kinds and kinds & {"punch", "shake"}  # (action clips shake on the hardest hits)
     assert any(s.transition in ("Zoom through", "Zoom out reveal") for s in plan.shots)
     for s in plan.shots:
-        for t in s.effects.get("punch", []):
+        for t in s.effects.get("punch", []) + s.effects.get("shake", []):
             assert 0 < t < s.seconds
     plain = autoedit.plan_to_music(rows, {}, song, autoedit.Limits(max_video=4.0, max_photo=2.0, min_shot=1.0,
                                                                    storyline="date", camera_effects=False),
@@ -264,3 +264,25 @@ def test_a_planned_montage_is_cut_quickly_in_the_lively_music():
     assert all(16 <= start + 0.1 < 32 for start, _ in montage)  # in the lively part
     assert np.mean([s for _, s in montage]) < 2.5  # quick
     assert by_path[plan.shots[0].path]["plan_role"] == "opening"
+
+
+def test_freeze_frames_introduce_each_named_person_once():
+    slot = autoedit.Slot(0.0, 3.0, 0.5)
+    introduced: set[str] = set()
+    anna = {"kind": "video", "people": ["Anna", "Person 4"], "people_tag": "Solo"}
+    assert autoedit.freeze_for(anna, slot, 3.0, introduced, 99) == (
+        {"freeze": autoedit.FREEZE, "label": "Anna"}, "Freeze-frame introducing Anna")
+    assert autoedit.freeze_for(anna, slot, 3.0, introduced, 99) == ({}, None)  # already introduced
+    ben = {"kind": "video", "people": ["Ben"], "people_tag": "Solo"}
+    assert autoedit.freeze_for(ben, slot, 3.0, introduced, 5) == ({}, None)  # too soon after the last one
+    assert autoedit.freeze_for(ben, autoedit.Slot(0.0, 3.0, 0.9), 3.0, introduced, 99) == ({}, None)  # busy music
+    assert autoedit.freeze_for(ben, slot, 3.0, introduced, 99)[0]["label"] == "Ben"
+
+
+def test_the_hardest_hit_shakes_an_action_shot():
+    slot = autoedit.Slot(10.0, 13.0, 0.8)
+    row = {"kind": "video", "tags_final": ["Fast action"], "duration": 8}
+    effects, why = autoedit.effects_for(row, slot, 3.0, 1.0, [(11.5, 0.95)], 5)
+    assert effects == {"shake": [1.5]} and "shake" in why
+    effects, _ = autoedit.effects_for(row, slot, 3.0, 1.0, [(11.5, 0.8)], 5)
+    assert effects == {"punch": [1.5]}
