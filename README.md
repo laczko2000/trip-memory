@@ -59,6 +59,7 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **0.24.5:** a finer Music timeline. It shows the song's waveform (the spikes are the hits). Scroll up or down on it, or pinch, to zoom in around the mouse, down to about a second across; scroll sideways to move along. Time marks get down to a tenth of a second. Click a pin and nudge it with ← → (10 ms, or 1 ms with Alt). *Show* also has 4 s and 1.5 s.
 - **0.24.4:** your pins are the only cuts. No cut is added between two pins, however long the gap (your clip and photo limits don't apply there; a clip that is a bit short is slowed down to fill it), and pins can be as close as a tenth of a second. After *Make a first cut* the message says how many pins it followed, or that the song has no final pins yet.
 - **0.24.3:** fixed 0.24.2 not starting (a typo in the screen code). Every update is now checked to start before it is published.
 - **0.24.2:** People: faces are sorted into people straight after they are found, so a problem in a later analysis step can no longer leave the People tab empty. When it is empty, the tab now says why (not checked yet, found but not sorted, the face finder could not start, or really no faces) with the button to fix it, plus *Look for faces again*.

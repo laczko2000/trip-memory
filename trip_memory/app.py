@@ -744,8 +744,9 @@ class Page:
         saved = song_taps.load(music, app_dir() / "music-taps")
         ui.label(
             "Press Play and tap the RIGHT Shift key wherever you want the video to cut. Each tap puts a pin on the "
-            "line below. Play it back to check: every pin makes a click as it passes. Drag a pin to move it, click it "
-            "and press Delete to remove it. Then let the app snap the pins onto the exact hits, and mark them final."
+            "line below. Play it back to check: every pin makes a click as it passes. Scroll on the line to zoom in "
+            "(the spikes are the hits), drag a pin to move it, or click it and nudge it with the arrow keys; Delete "
+            "removes it. Then let the app snap the pins onto the exact hits, and mark them final."
         ).classes("text-sm text-gray-600")
         ui.html(f'<audio id="tm-song" preload="auto" src="{serve_song(music)}" onloadedmetadata="tmTapDraw()" '
                 f'onplay="tmTapOnPlay()" onpause="tmTapUnschedule(); tmTapDraw()"></audio>', sanitize=False)
@@ -753,11 +754,12 @@ class Page:
             ui.button("Play / pause", icon="play_arrow", on_click=lambda: ui.run_javascript("tmTapPlay()"))
             ui.button("5 s back", icon="replay_5", on_click=lambda: ui.run_javascript("tmTapSeek(-5)")).props("outline")
             ui.button("From the start", icon="skip_previous", on_click=lambda: ui.run_javascript("tmTapStart()")).props("outline")
-            ui.select({0: "Whole song", 30: "30 seconds", 10: "10 seconds"}, value=0, label="Show",
+            ui.select({0: "Whole song", 30: "30 seconds", 10: "10 seconds", 4: "4 seconds", 1.5: "1.5 seconds"}, value=0,
+                      label="Show",
                       on_change=lambda e: ui.run_javascript(f"tmTapZoom({e.value})")).classes("w-36")
             ui.button("Delete selected pin", icon="delete", on_click=lambda: ui.run_javascript("tmTapDelete()")).props("flat")
             ui.button("Clear all", icon="clear_all", on_click=self.clear_taps).props("flat")
-        ui.html('<div id="tm-tl" style="position:relative;width:100%;height:96px;background:#f1f5f9;border-radius:8px;'
+        ui.html('<div id="tm-tl" style="position:relative;width:100%;height:150px;background:#f1f5f9;border-radius:8px;'
                 'touch-action:none;user-select:none;cursor:pointer;overflow:hidden"></div>', sanitize=False).classes("w-full")
         ui.html('<div id="tm-tap-info" style="font-size:13px;color:#475569"></div>', sanitize=False)
         with ui.row().classes("w-full items-center gap-3"):
@@ -1693,7 +1695,9 @@ TAP_SCRIPT = """
 // The Music tab: play the song, press the RIGHT Shift key wherever you want a cut. Pins can be dragged,
 // selected and deleted; on playback every pin you pass makes a click so you hear where it is.
 window.tm = window.tm || {};
-tm.tap = {pins: [], sel: -1, view: 0, span: 0, until: -1, ctx: null, raf: 0, drag: -1, osc: [], srcEl: null};
+tm.tap = {pins: [], sel: -1, view: 0, span: 0, until: -1, ctx: null, raf: 0, drag: -1, osc: [], srcEl: null,
+          wave: null, waveSrc: '', follow: true};
+const TM_WAVE_STEP = 0.002;  // the waveform keeps the loudest moment of every 2 ms
 
 function tmTapAudio() { return document.getElementById('tm-song'); }
 function tmTapVisible() { const tl = document.getElementById('tm-tl'); return tl && tl.offsetParent !== null; }
@@ -1703,16 +1707,68 @@ function tmTapInit(pins, span) {
   const T = tm.tap;
   T.pins = (pins || []).slice().sort((a, b) => a - b);
   T.sel = -1; T.view = 0; T.span = span || 0; tmTapUnschedule();
+  tmTapLoadWave();
   tmTapDraw();
 }
-function tmTapOnPlay() {
+
+// The song's waveform, so you can see the hits (the spikes) and put pins exactly on them.
+function tmTapLoadWave() {
   const T = tm.tap, a = tmTapAudio();
+  if (!a || !a.src || T.waveSrc === a.src) return;
+  T.waveSrc = a.src; T.wave = null;
+  const Off = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  fetch(a.src).then(r => r.arrayBuffer()).then(buf => new Promise((ok, bad) => {
+    const p = new Off(1, 2, 44100).decodeAudioData(buf, ok, bad); if (p && p.then) p.then(ok, bad);
+  })).then(audio => {
+    const data = audio.getChannelData(0), per = Math.max(1, Math.round(audio.sampleRate * TM_WAVE_STEP));
+    const peaks = new Float32Array(Math.ceil(data.length / per));
+    for (let i = 0; i < peaks.length; i++) {
+      let m = 0; const end = Math.min(data.length, (i + 1) * per);
+      for (let j = i * per; j < end; j++) { const v = Math.abs(data[j]); if (v > m) m = v; }
+      peaks[i] = m;
+    }
+    let top = 0; for (let i = 0; i < peaks.length; i++) if (peaks[i] > top) top = peaks[i];
+    if (top > 0) for (let i = 0; i < peaks.length; i++) peaks[i] /= top;
+    T.wave = peaks; tmTapDraw();
+  }).catch(e => console.warn('waveform', e));
+}
+
+function tmTapWaveSvg(v0, span) {
+  const peaks = tm.tap.wave; if (!peaks) return '';
+  const cols = 800, top = [], bottom = [];
+  for (let c = 0; c < cols; c++) {
+    const a = Math.floor((v0 + span * c / cols) / TM_WAVE_STEP), b = Math.max(a + 1, Math.floor((v0 + span * (c + 1) / cols) / TM_WAVE_STEP));
+    let m = 0; for (let i = Math.max(0, a); i < Math.min(peaks.length, b); i++) if (peaks[i] > m) m = peaks[i];
+    const h = (m * 34).toFixed(1);
+    top.push(`${c},${(36 - h)}`); bottom.push(`${c},${(36 + +h)}`);
+  }
+  return `<svg viewBox="0 0 ${cols} 72" preserveAspectRatio="none" style="position:absolute;left:0;top:6px;width:100%;height:calc(100% - 34px);pointer-events:none">` +
+         `<polygon points="${top.join(' ')} ${bottom.reverse().join(' ')}" fill="#cbd5e1"/></svg>`;
+}
+function tmTapOnPlay() {
+  const T = tm.tap, a = tmTapAudio(); T.follow = true;
   tmTapCtx(); tmTapUnschedule(); cancelAnimationFrame(T.raf); tmTapLoop(); tmTapDraw();
 }
 // Listen on the whole page: the line itself is rebuilt whenever the screen refreshes or the tab opens.
 document.addEventListener('pointerdown', ev => { if (ev.target.closest && ev.target.closest('#tm-tl')) tmTapPointerDown(ev); });
 window.addEventListener('pointermove', ev => tmTapPointerMove(ev));
 window.addEventListener('pointerup', () => { if (tm.tap.drag >= 0) { tm.tap.drag = -1; tm.tap.pins.sort((a, b) => a - b); tmTapDraw(); } });
+// Scroll up/down (or pinch) on the line to zoom in and out around the mouse; scroll sideways to move along.
+document.addEventListener('wheel', ev => {
+  const tl = ev.target.closest && ev.target.closest('#tm-tl'); if (!tl) return;
+  ev.preventDefault();
+  const T = tm.tap, d = tmTapLength(); if (!d) return;
+  const [v0, span] = tmTapWindow();
+  if (Math.abs(ev.deltaX) > Math.abs(ev.deltaY)) {
+    T.span = span; T.view = Math.max(0, Math.min(d - span, v0 + ev.deltaX / tl.getBoundingClientRect().width * span));
+  } else {
+    const at = tmTapTimeAt(ev), wanted = Math.max(1, Math.min(d, span * Math.exp(ev.deltaY * 0.004)));
+    T.span = wanted >= d ? 0 : wanted;
+    T.view = T.span ? Math.max(0, Math.min(d - T.span, at - (at - v0) * wanted / span)) : 0;
+  }
+  const a = tmTapAudio(); T.follow = !(a && !a.paused && (a.currentTime < T.view || a.currentTime > T.view + (T.span || d)));
+  tmTapDraw();
+}, {passive: false});
 // When the Music tab opens, draw the pins.
 setInterval(() => { const tl = document.getElementById('tm-tl'); if (tl && !tl.childElementCount) tmTapDraw(); }, 300);
 
@@ -1758,7 +1814,7 @@ function tmTapLoop() {
   const ahead = now + 0.25;
   if (T.ctx) T.pins.forEach(p => { if (p > T.until && p <= ahead) tmTapClick(false, T.ctx.currentTime + (p - now) / rate); });
   T.until = ahead;
-  if (T.span && (now < T.view || now > T.view + T.span * 0.9)) T.view = Math.max(0, now - T.span * 0.1);
+  if (T.span && T.follow && (now < T.view || now > T.view + T.span * 0.9)) T.view = Math.max(0, now - T.span * 0.1);
   tmTapDraw();
   T.raf = requestAnimationFrame(tmTapLoop);
 }
@@ -1773,18 +1829,20 @@ function tmTapDraw() {
   const tl = document.getElementById('tm-tl'); if (!tl) return;
   const T = tm.tap, a = tmTapAudio(), [v0, span] = tmTapWindow();
   const x = t => ((t - v0) / span * 100).toFixed(3) + '%';
-  let html = '';
-  // Second marks along the bottom.
-  const stepS = span > 120 ? 30 : span > 40 ? 10 : span > 15 ? 5 : 1;
-  for (let s = Math.ceil(v0 / stepS) * stepS; s <= v0 + span; s += stepS) {
-    const m = Math.floor(s / 60), sec = String(Math.round(s % 60)).padStart(2, '0');
+  let html = tmTapWaveSvg(v0, span);
+  // Time marks along the bottom: finer as you zoom in (down to a tenth of a second).
+  const steps = [0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60];
+  const stepS = steps.find(st => span / st <= 14) || 60;
+  for (let k = Math.ceil(v0 / stepS - 1e-9); k * stepS <= v0 + span; k++) {
+    const s = k * stepS, m = Math.floor(s / 60);
+    const sec = stepS < 1 ? (s % 60).toFixed(stepS < 0.25 ? 1 : 2).padStart(stepS < 0.25 ? 4 : 5, '0') : String(Math.round(s % 60)).padStart(2, '0');
     html += `<div style="position:absolute;left:${x(s)};bottom:0;height:10px;border-left:1px solid #94a3b8"></div>` +
             `<div style="position:absolute;left:${x(s)};bottom:10px;font-size:10px;color:#64748b;transform:translateX(-50%)">${m}:${sec}</div>`;
   }
   T.pins.forEach((p, i) => {
     if (p < v0 || p > v0 + span) return;
     const c = i === T.sel ? '#dc2626' : '#2563eb';
-    html += `<div data-pin="${i}" title="${p.toFixed(2)} s" style="position:absolute;left:${x(p)};top:0;bottom:24px;width:14px;` +
+    html += `<div data-pin="${i}" title="${p.toFixed(3)} s" style="position:absolute;left:${x(p)};top:0;bottom:24px;width:14px;` +
             `margin-left:-7px;cursor:ew-resize;display:flex;justify-content:center"><div style="width:3px;background:${c};height:100%"></div>` +
             `<div style="position:absolute;top:-2px;width:12px;height:12px;border-radius:6px;background:${c}"></div></div>`;
   });
@@ -1796,7 +1854,8 @@ function tmTapDraw() {
     const t = a ? a.currentTime : 0;
     info.textContent = `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')} · ${n} cut${n === 1 ? '' : 's'}` +
       (d && n ? ` → ${n + 1} shots, about ${(d / (n + 1)).toFixed(1)} s each` : '') +
-      (T.sel >= 0 ? ` · selected cut at ${T.pins[T.sel].toFixed(2)} s (Delete key removes it)` : '');
+      (T.sel >= 0 ? ` · selected cut at ${T.pins[T.sel].toFixed(3)} s (← → move it 10 ms, with Alt 1 ms; Delete removes it)` : '') +
+      ` · showing ${span < 10 ? span.toFixed(1) : Math.round(span)} s (scroll on the line to zoom, sideways to move)`;
   }
 }
 
@@ -1830,6 +1889,11 @@ document.addEventListener('keydown', ev => {
     tmTapClick(true);
     tmTapDraw();
     ev.preventDefault();
+  } else if ((ev.key === 'ArrowLeft' || ev.key === 'ArrowRight') && T.sel >= 0 &&
+             !['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
+    const by = (ev.key === 'ArrowLeft' ? -1 : 1) * (ev.altKey ? 0.001 : 0.01), p = T.pins[T.sel] + by;
+    T.pins[T.sel] = Math.max(0, p); T.pins.sort((x, y) => x - y); T.sel = T.pins.indexOf(Math.max(0, p));
+    tmTapUnschedule(); tmTapDraw(); ev.preventDefault();
   } else if ((ev.key === 'Delete' || ev.key === 'Backspace') && T.sel >= 0 && !['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
     T.pins.splice(T.sel, 1); T.sel = -1; tmTapUnschedule(); tmTapDraw(); ev.preventDefault();
   }
@@ -1840,7 +1904,10 @@ function tmTapSeek(by) { const a = tmTapAudio(); if (!a) return; a.currentTime =
 function tmTapStart() { const a = tmTapAudio(); if (!a) return; a.currentTime = 0; tmTapUnschedule(); tm.tap.view = 0; tmTapDraw(); }
 function tmTapDelete() { const T = tm.tap; if (T.sel >= 0) { T.pins.splice(T.sel, 1); T.sel = -1; tmTapUnschedule(); tmTapDraw(); } }
 function tmTapClear() { tm.tap.pins = []; tm.tap.sel = -1; tmTapDraw(); }
-function tmTapZoom(span) { const a = tmTapAudio(); tm.tap.span = span; tm.tap.view = a ? Math.max(0, a.currentTime - span * 0.1) : 0; tmTapDraw(); }
+function tmTapZoom(span) {
+  const T = tm.tap, a = tmTapAudio(), at = T.sel >= 0 ? T.pins[T.sel] : a ? a.currentTime : 0;
+  T.span = span; T.follow = true; T.view = Math.max(0, at - span * (T.sel >= 0 ? 0.5 : 0.1)); tmTapDraw();
+}
 function tmTapGet() { return tm.tap.pins.slice().sort((a, b) => a - b); }
 function tmTapSet(pins) { tm.tap.pins = pins.slice().sort((a, b) => a - b); tm.tap.sel = -1; tmTapUnschedule(); tmTapDraw(); }
 </script>
