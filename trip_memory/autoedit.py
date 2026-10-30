@@ -624,6 +624,11 @@ COLLAGE_GAP = 12.0  # at least this many seconds between two collages
 COLLAGE_SHOT = 1.6  # only quick shots are gathered into a collage
 
 
+def _group_of(row: dict) -> tuple:
+    """What a collage must not mix: the story, and with a storyline the chapter (your theme order)."""
+    return row.get("story"), row.get("chapter")
+
+
 def collages(shots: list[Shot], slots: list[Slot], rows: dict[str, dict], transition_seconds: float) -> list[Shot]:
     """In the lively parts, a quick run of 3 or 4 photos from one story becomes one collage: the photos pop in one
     after another on the same beats where they would have been cut, and stay together on screen."""
@@ -633,10 +638,10 @@ def collages(shots: list[Shot], slots: list[Slot], rows: dict[str, dict], transi
     def fits(n: int, story) -> bool:
         shot = shots[n]
         return (shot.kind == "photo" and not shot.effects and shot.seconds <= COLLAGE_SHOT and n < len(slots)
-                and slots[n].energy >= 0.62 and rows.get(shot.path, {}).get("story") == story)
+                and slots[n].energy >= 0.62 and _group_of(rows.get(shot.path, {})) == story)
 
     while k < len(shots):
-        story = rows.get(shots[k].path, {}).get("story")
+        story = _group_of(rows.get(shots[k].path, {}))
         run = k
         while run < len(shots) and run - k < COLLAGE_MAX and fits(run, story) and (
                 run == k or shots[run - 1].transition in (None, HARD_CUT)):
