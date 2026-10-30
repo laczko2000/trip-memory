@@ -145,6 +145,8 @@ class Progress:
     message: str = ""
     running: bool = False
     notes: list[str] = field(default_factory=list)
+    stop: bool = False  # you pressed Stop: the AI stops after what it is doing now, keeping what it finished
+    turn: int = 0  # counts single AI requests, so a late answer to a stopped one is never used
 
 
 class Trip:
@@ -795,7 +797,7 @@ class Trip:
 
     def _run(self, step, on_change) -> None:
         p = self.progress
-        p.running, p.notes, p.fraction = True, [], 0.0
+        p.running, p.notes, p.fraction, p.stop = True, [], 0.0, False
         notify = on_change or (lambda: None)
         try:
             step(notify)
@@ -1130,6 +1132,11 @@ class Trip:
         done = 0
         started = time.monotonic()
         for start in range(0, len(todo), ai.batch):
+            if p.stop:
+                p.message = (f"Stopped. The AI described {done} files; the other {len(todo) - start} to look at "
+                             "have no description yet (Describe clips carries on from there).")
+                p.notes.append(p.message)
+                return
             batch = todo[start : start + ai.batch]
             p.fraction = start / len(todo)
             left = ""
@@ -1198,6 +1205,10 @@ class Trip:
         todo = [s for s in self._director_stories() if keys is None or s["key"] in keys]
         started = time.monotonic()
         for k, story in enumerate(todo):
+            if p.stop:
+                p.message = f"Stopped. The AI planned {k} of {len(todo)} stories; the others keep their old plan or none."
+                p.notes.append(p.message)
+                return
             p.fraction = k / max(1, len(todo))
             left = ""
             if k:
@@ -1298,6 +1309,19 @@ class Trip:
                            [(it["path"],) for it in story["items"]])
         self.execute("UPDATE story_info SET theme = NULL, idea = NULL, plan_notes = NULL WHERE key = ?", (key,))
 
+    def stop_ai(self) -> None:
+        """Stop the AI: it finishes the clip or story it is on, keeps what it has done, and leaves the rest."""
+        self.progress.stop = True
+
+    def _new_turn(self) -> int:
+        self.progress.stop = False
+        self.progress.turn += 1
+        return self.progress.turn
+
+    def _stopped(self, turn: int) -> bool:
+        """Whether you stopped this AI request (or started another since)."""
+        return self.progress.stop or self.progress.turn != turn
+
     def _director_stories(self) -> list[dict]:
         return [s for s in self.stories() if any(it["chosen"] for it in s["items"])]
 
@@ -1319,7 +1343,10 @@ class Trip:
                 "captions": [it["ai_caption"] for it in members if it.get("ai_caption")],
                 "idea": s.get("idea"),
             })
+        mine = self._new_turn()
         answer = director.clean_storylines(ai.storylines(director.storyline_prompt(described)), len(by_time))
+        if self._stopped(mine):
+            raise director.Stopped("Stopped: the storylines you had are kept.")
         if not answer["storylines"]:
             raise director.DirectorError("The AI did not come up with a usable storyline. Try again.")
         saved = {
@@ -1382,8 +1409,11 @@ class Trip:
         stories, people = self._wish_stories()
         if not stories:
             raise director.DirectorError("No stories yet. Click Analyse first.")
+        mine = self._new_turn()
         answer = director.clean_wish(ai.wish(director.wish_prompt(wish, stories, people, song_seconds)),
                                      len(stories), people)
+        if self._stopped(mine):
+            raise director.Stopped("Stopped: nothing was changed.")
         if answer["stories"]:
             self._use_stories([stories[n - 1]["key"] for n in answer["stories"]])
         if answer["title"]:

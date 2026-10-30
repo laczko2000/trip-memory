@@ -239,3 +239,43 @@ def test_type_the_video_you_want(trip):
 def test_a_wish_with_nothing_usable_keeps_things_as_they_are():
     w = director.clean_wish({"length_seconds": -5, "pace": "wild", "stories": ["1", 0]}, 2, [])
     assert w["length_seconds"] == 0 and w["pace"] == "medium" and w["stories"] == [] and w["slow_motion"]
+
+
+class FakeStopper(FakeDirector):
+    """You press Stop while the AI is on its first batch."""
+
+    def __init__(self, trip):
+        super().__init__()
+        self.trip = trip
+
+    def describe(self, clips):
+        self.trip.stop_ai()
+        return super().describe(clips)
+
+    def storylines(self, prompt):
+        self.trip.stop_ai()
+        return super().storylines(prompt)
+
+    def wish(self, prompt):
+        self.trip.stop_ai()
+        return FakeWisher.wish(self, prompt)
+
+
+def test_stop_keeps_what_the_ai_already_described(trip):
+    trip.describe_clips(FakeStopper(trip))
+    captions = [i["ai_caption"] for i in trip.items()]
+    assert captions[:2] == ["Waves on a sandy beach", "Empty pool"] and captions[2] is None  # one batch of 2 kept
+    assert "Stopped" in trip.progress.notes[-1]
+    trip.describe_clips(FakeDirector())  # carries on later with the rest
+    assert all(i["ai_caption"] for i in trip.items())
+
+
+def test_a_stopped_storyline_or_wish_changes_nothing(trip):
+    trip.describe_clips(FakeDirector())
+    before = [(s["name"], s["enabled"]) for s in trip.stories()]
+    with pytest.raises(director.Stopped):
+        trip.suggest_storylines(FakeStopper(trip))
+    with pytest.raises(director.Stopped):
+        trip.make_wish(FakeStopper(trip), "beach only", 60.0)
+    assert [(s["name"], s["enabled"]) for s in trip.stories()] == before and trip.wish() is None
+    assert trip.suggest_storylines(FakeDirector())["storylines"]  # a new request works again

@@ -255,6 +255,10 @@ class Page:
             ).classes("text-gray-600")
             self.notes_label = ui.label("").classes("text-orange-600 text-sm whitespace-pre-line")
             self.progress_bar.set_visibility(False)
+            # Any AI step can be stopped; what it finished so far is kept.
+            self.ai_stop = ui.button("Stop the AI (keep what it has done)", icon="stop_circle", on_click=self.stop_ai) \
+                .props("outline color=negative dense no-caps")
+            self.ai_stop.set_visibility(False)
 
     async def browse_folder(self) -> None:
         path = await run.io_bound(choose_with_finder, "folder")
@@ -326,6 +330,10 @@ class Page:
                     f"{self.trip.folder.name}: {len(self.all_items)} files in the folder, {len(self.items)} chosen."
                 )
             self.notes_label.text = "\n".join(p.notes[:8])
+        if getattr(self, "ai_stop", None) is not None:
+            self.ai_stop.set_visibility(self.ai_busy)
+            if getattr(self, "ai_stop_here", None) is not None:
+                self.ai_stop_here.set_visibility(self.ai_busy)
         r = self.rendering
         if r["busy"]:
             self.render_progress.value = r["progress"]
@@ -1157,7 +1165,7 @@ class Page:
     @ui.refreshable
     def director_card(self) -> None:
         if not self.trip or not self.showing("Stories"):
-            self.ai_bar = None
+            self.ai_bar = self.ai_stop_here = None
             return
         ai = load_settings().get("ai", {})
         provider = ai.get("provider", "ollama")
@@ -1182,6 +1190,9 @@ class Page:
             self.ai_bar = ui.linear_progress(value=0, show_value=False).classes("w-full")
             self.ai_label = ui.label("").classes("text-sm text-indigo-800")
             self.ai_bar.set_visibility(self.ai_busy)
+            self.ai_stop_here = ui.button("Stop (keep what the AI has done)", icon="stop_circle", on_click=self.stop_ai) \
+                .props("outline color=negative dense no-caps")
+            self.ai_stop_here.set_visibility(self.ai_busy)
             with ui.row().classes("items-center gap-2"):
                 left = len(chosen) - described
                 looks = len({it["similar_set"] if it["similar_set"] is not None else it["path"]
@@ -1306,6 +1317,8 @@ class Page:
         finally:
             self.ai_busy = False
         now = sum(1 for it in self.items if it.get("ai_caption"))
+        if self.trip.progress.stop:
+            return  # Stop says what was kept
         if now > before or again:
             ui.notify(f"The AI described {now if again else now - before} files.", type="positive")
 
@@ -1324,6 +1337,8 @@ class Page:
             self.ai_busy = False
         if keys:
             self.open_plans.update(keys)
+        if self.trip.progress.stop:
+            return
         ui.notify("Plans ready: open a story's plan below to see or change it. Make a first cut in the Storyboard "
                   "to use them.", type="positive", multi_line=True)
 
@@ -1340,8 +1355,8 @@ class Page:
         self.ai_bar.set_visibility(True)
         self.ai_label.text = "The AI is thinking about storylines…"
         try:
-            await run.io_bound(self.trip.suggest_storylines, ai)
-            ui.notify("Storylines ready below. Pick one with Use this.", type="positive")
+            if await self.stoppable(self.trip.suggest_storylines, ai) is not None:
+                ui.notify("Storylines ready below. Pick one with Use this.", type="positive")
         except director.DirectorError as exc:
             ui.notify(str(exc), type="warning", multi_line=True, timeout=10000)
         except Exception as exc:
@@ -1351,6 +1366,27 @@ class Page:
             note.dismiss()
             self.ai_busy = False
         self.director_card.refresh()
+
+    async def stoppable(self, fn, *args):
+        """Run one AI request; Stop gives up waiting for it straight away (its answer is then thrown away).
+        None when stopped."""
+        self.ai_stopped = asyncio.Event()
+        job = asyncio.ensure_future(run.io_bound(fn, *args))
+        halt = asyncio.ensure_future(self.ai_stopped.wait())
+        await asyncio.wait({job, halt}, return_when=asyncio.FIRST_COMPLETED)
+        halt.cancel()
+        if not job.done():
+            job.add_done_callback(lambda j: j.exception())  # its late answer is ignored (catalog checks Stop)
+            return None
+        return job.result()
+
+    def stop_ai(self) -> None:
+        if not self.trip or not self.ai_busy:
+            return
+        self.trip.stop_ai()
+        if getattr(self, "ai_stopped", None) is not None:
+            self.ai_stopped.set()
+        ui.notify("Stopping the AI. Everything it finished is kept; the rest is left as it was.", type="info")
 
     def use_storyline(self, index: int) -> None:
         self.trip.apply_storyline(index)
@@ -1608,7 +1644,9 @@ class Page:
         note = ui.notification("The AI is reading your wish…", spinner=True, timeout=None)
         self.ai_busy = True
         try:
-            wish = await run.io_bound(self.trip.make_wish, ai, text, song.duration if song else None)
+            wish = await self.stoppable(self.trip.make_wish, ai, text, song.duration if song else None)
+            if wish is None:
+                return
         except director.DirectorError as exc:
             ui.notify(str(exc), type="warning", multi_line=True, timeout=10000)
             return

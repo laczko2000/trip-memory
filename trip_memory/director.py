@@ -196,6 +196,10 @@ class DirectorError(Exception):
     """Something the person can fix (no key, Ollama not running...), with a plain explanation."""
 
 
+class Stopped(DirectorError):
+    """You pressed Stop: what the AI finished before is kept, the rest is left as it was."""
+
+
 @dataclass
 class Caption:
     text: str
