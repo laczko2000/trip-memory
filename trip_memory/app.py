@@ -2153,6 +2153,15 @@ class Page:
                             ui.select(themes.PICKS, value=entry["pick"],
                                       on_change=lambda e, n=n, m=m: self.edit_entry(n, m, pick=e.value)) \
                                 .props("dense borderless options-dense").classes("text-xs w-36")
+                            if entry["pick"] == "moment":
+                                look = ui.input(value=entry.get("moment", ""), placeholder="e.g. big jumps") \
+                                    .props("dense borderless").classes("text-xs w-32")
+                                look.on("blur", lambda e, n=n, m=m, f=look: self.edit_entry(n, m, moment=f.value))
+                                found = len(entry.get("shots") or [])
+                                ui.button(f"{found} ticked" if found else "Find", icon="search",
+                                          on_click=lambda n=n, m=m, f=look: self.find_moment(n, m, f.value, names)) \
+                                    .props(("outline" if found else "unelevated") + " dense no-caps size=sm") \
+                                    .tooltip("Look inside the videos for this moment and tick the right ones")
                             ui.button(icon="close", on_click=lambda n=n, m=m: self.remove_entry(n, m)) \
                                 .props("flat dense round size=xs")
                     ui.button("Add theme", icon="add", on_click=lambda n=n: self.add_theme_dialog(n, blocks, names)) \
@@ -2173,6 +2182,101 @@ class Page:
                 for b in missing:
                     ui.button(f"+ {names[b['key']]} ({b['count']})", on_click=lambda k=b["key"]: self.add_entry(k)) \
                         .props("flat dense no-caps size=sm").tooltip("Add to the last part")
+
+    async def find_moment(self, n: int, m: int, words: str, names: dict, ticked: list[dict] | None = None) -> None:
+        """Look for a moment (a big jump...) inside the shots of one theme of the story, then let you tick them."""
+        words = " ".join((words or "").split())
+        story = self.trip.storyline().get("story") or {}
+        try:
+            entry = story["parts"][n]["entries"][m]
+        except (KeyError, IndexError):
+            return
+        if not words:
+            ui.notify("Write what to look for first, e.g. big jumps.", type="warning")
+            return
+        if entry.get("moment") != words:
+            self.edit_entry(n, m, moment=words)
+        if self.ai_busy:
+            ui.notify("Still busy with the last request.", type="warning")
+            return
+        if ticked is None:
+            ticked = entry.get("shots") or []
+        self.ai_busy = True
+        done = {"share": 0.0}
+        note = ui.notification("", spinner=True, timeout=None, multi_line=True)
+        started = time.time()
+
+        def tick() -> None:
+            note.message = (f"🔍 Looking for \"{words}\" inside the videos: {int(100 * done['share'])}% "
+                            f"({int(time.time() - started)} s). The first time takes longest: the app looks at a "
+                            "frame every second and remembers it.")
+
+        tick()
+        ticker = ui.timer(1.0, tick)
+        try:
+            vector = (await run.io_bound(text_vectors, [f"a holiday photo of {words}"], app_dir() / "models" / "clip"))[0]
+            found = await run.io_bound(self.trip.find_moment, entry["key"], vector, ticked,
+                                       lambda share: done.update(share=share))
+        except Exception as exc:
+            traceback.print_exc()
+            ui.notify(f"Couldn't look for the moment: {exc}", type="negative", multi_line=True)
+            return
+        finally:
+            self.ai_busy = False
+            ticker.cancel()
+            note.dismiss()
+        if not found:
+            ui.notify("No shots to look in: analyse the trip first (Choose files, Analyse).", type="warning")
+            return
+        self.moment_dialog(n, m, words, names.get(entry["key"], entry["key"]), found, names)
+
+    def moment_dialog(self, n: int, m: int, words: str, theme: str, found: list[dict], names: dict) -> None:
+        picked = {f["path"]: f["t"] for f in found if f["likely"]}
+        with ui.dialog() as dialog, ui.card().classes("w-[960px] max-w-[95vw] gap-2"):
+            ui.label(f"🔍 \"{words}\" in {theme}").classes("text-lg font-semibold")
+            ui.label("Best matches first, at the second that fits best. Tick the right ones: the video keeps a few "
+                     "seconds around that moment. \"Look again\" also searches for shots like the ones you ticked.") \
+                .classes("text-sm text-gray-600")
+            count = ui.label("")
+
+            def show_count() -> None:
+                count.set_text(f"{len(picked)} ticked of {len(found)}")
+
+            def toggle(f: dict, box) -> None:
+                if f["path"] in picked:
+                    picked.pop(f["path"])
+                else:
+                    picked[f["path"]] = f["t"]
+                on = f["path"] in picked
+                box.classes(add="border-green-600 bg-green-50" if on else "border-transparent",
+                            remove="border-transparent" if on else "border-green-600 bg-green-50")
+                show_count()
+
+            with ui.element("div").classes("w-full grid gap-2 overflow-y-auto").style(
+                    "grid-template-columns:repeat(auto-fill,minmax(170px,1fr));max-height:60vh"):
+                for f in found:
+                    on = f["path"] in picked
+                    box = ui.element("div").classes("rounded p-1 border-2 cursor-pointer " +
+                                                    ("border-green-600 bg-green-50" if on else "border-transparent"))
+                    with box:
+                        if f["thumb"]:
+                            ui.image(data_url(f["thumb"])).classes("w-full rounded").style("aspect-ratio:16/10") \
+                                .props("fit=cover no-spinner")
+                        ui.label(("🎬 at " + fmt_length(f["t"]) if f["kind"] == "video" else "📷 photo") +
+                                 f" · match {f['score']:.2f}").classes("text-xs text-gray-600")
+                    box.on("click", lambda f=f, box=box: toggle(f, box))
+            show_count()
+            with ui.row().classes("w-full items-center gap-2"):
+                ui.button("Use the ticked ones", icon="check",
+                          on_click=lambda: (dialog.close(), self.edit_entry(
+                              n, m, shots=[{"path": p, "t": t} for p, t in picked.items()]))).props("no-caps")
+                async def again() -> None:
+                    dialog.close()
+                    await self.find_moment(n, m, words, names, [{"path": p, "t": t} for p, t in picked.items()])
+
+                ui.button("Look again with my ticks", icon="refresh", on_click=again).props("outline no-caps")
+                ui.button("Cancel", on_click=dialog.close).props("flat no-caps")
+        dialog.open()
 
     def video_seconds(self) -> float:
         target = self.length_now()

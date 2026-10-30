@@ -567,3 +567,34 @@ def test_the_storyline_follows_your_themes(tmp_path, monkeypatch):
     rows = {Path(r["path"]).name: r for r in trip.theme_rows()}
     assert rows["p0.jpg"]["theme"] == "Dinners"  # the tag guess finds the new name
     assert [b["key"] for b in trip.storyline_blocks()][:2] == ["Boat|", "Dinners|"]
+
+
+def test_a_moment_inside_a_clip_is_found_and_kept(tmp_path, monkeypatch):
+    from tests.test_render import make_clip
+    from trip_memory import autoedit, themes
+
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    make_clip(trip_dir / "kite.mp4", "320x180", 12, "2025-07-03T10:00:00Z")
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    path = trip.items()[0]["path"]
+    trip.set_theme([path], "Water sports")
+    jump = np.eye(4, dtype=np.float32)[0]
+    calm = np.eye(4, dtype=np.float32)[1]
+    # A stand-in for the picture model: the frame from the 8th second on is the jump.
+    trip.frame_embedder = lambda pictures: np.array([jump if n == 8 else calm for n, _ in enumerate(pictures)])
+    found = trip.find_moment("Water sports|", jump)
+    assert found[0]["path"] == path and found[0]["t"] == 8.5 and found[0]["likely"]
+    assert trip.find_moment("Water sports|", jump)[0]["t"] == 8.5  # the frames are kept: no second look
+    story = {"parts": [{"name": "Jumps", "pace": "lively", "seconds": 10,
+                        "entries": [{"key": "Water sports|", "pick": "moment", "moment": "big jumps",
+                                     "shots": [{"path": path, "t": 8.5}]}]}]}
+    trip.set_storyline(order=themes.STORY, story=story, finale=False)
+    pool = trip.auto_edit_pool()
+    assert pool[0]["keep_offset"] == 7.0 and pool[0]["duration"] == 3.0
+    trip.auto_edit_steady(autoedit.Limits(max_video=3, max_photo=2, min_shot=1), 3.0, 0.0, "Fade")
+    row = next(r for r in trip.items() if r["path"] == path)
+    assert 7.0 <= row["trim_start"] and row["trim_end"] <= 10.01

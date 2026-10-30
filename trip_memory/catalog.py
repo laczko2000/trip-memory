@@ -28,7 +28,7 @@ from PIL import Image, ImageOps
 
 from .faces import FaceFinder, group_faces
 from .media import MediaItem, scan_folder
-from . import autoedit, director, motion, musicmood, stories, themes
+from . import autoedit, director, moments, motion, musicmood, stories, themes
 from .scenes import SceneTagger, mean_vector
 from .tags import TAG_GROUP, Tagger, group_name, look_alike_groups, people_tag, story_subject
 from .tools import ffmpeg_paths, probe
@@ -129,6 +129,12 @@ CREATE TABLE IF NOT EXISTS faces (
     person_id INTEGER REFERENCES people(id)
 );
 CREATE INDEX IF NOT EXISTS faces_path ON faces(path);
+CREATE TABLE IF NOT EXISTS frames (  -- a CLIP vector for a frame every second inside a video (moments)
+    path TEXT NOT NULL,
+    t REAL NOT NULL,
+    vec BLOB,
+    PRIMARY KEY (path, t)
+);
 CREATE INDEX IF NOT EXISTS faces_person ON faces(person_id);
 """
 
@@ -191,6 +197,8 @@ class Trip:
         (self.dir / "folder.txt").write_text(str(self.folder))
         self.progress = Progress()
         self._repeats: set[str] = set()  # the last pool's files that repeat another file
+        self._moment_starts: dict[str, float] = {}  # the last pool's clips used for a moment: where their part starts
+        self.frame_embedder = None  # pictures -> CLIP vectors (the picture model is loaded the first time)
         self._chapters: list[dict] | None = None  # the last pool's storyline, as chapters for Auto-edit
 
     # ---------- reading ----------
@@ -663,10 +671,17 @@ class Trip:
         chapters, where = themes.chapters_for(storyline, rows)
         self._chapters = chapters
         pool = []
+        self._moment_starts = {}
         for r, chapter in zip(rows, where):
             if chapter is None:
                 continue
-            if kept_part(r):  # a clip you cut: Auto-edit only sees the part you kept
+            if r.get("moment_at") is not None and r["kind"] == "video" and r["duration"]:
+                # a moment you picked (a big jump...): only the seconds around it, inside the part you kept
+                start, end = kept_part(r) or (0.0, r["duration"])
+                a, b = moments.window(r["moment_at"], r["duration"], start, end)
+                self._moment_starts[r["path"]] = a
+                r = r | {"duration": b - a, "keep_offset": a, "full_duration": r["duration"]}
+            elif kept_part(r):  # a clip you cut: Auto-edit only sees the part you kept
                 start, end = kept_part(r)
                 r = r | {"duration": end - start, "keep_offset": start, "full_duration": r["duration"]}
             pool.append(r | {"chapter": chapter, "pace_want": chapters[chapter].get("pace")})
@@ -777,6 +792,86 @@ class Trip:
                                        for p in story["parts"]]}
         self.set_storyline(blocks=blocks, split=split, **({"story": story} if story else {}))
         return True
+
+    # ---------- moments ----------
+
+    def frame_vectors(self, rows: list[dict], notify: Callable[[float], None] | None = None
+                      ) -> dict[str, tuple[list[float], np.ndarray]]:
+        """For each shot: the times looked at and a CLIP vector per frame (a frame every second inside a video,
+        made once and kept; a photo is its own picture)."""
+        out: dict[str, tuple[list[float], np.ndarray]] = {}
+        todo = []
+        for r in rows:
+            if r["kind"] != "video":
+                if r.get("clip") is not None:
+                    out[r["path"]] = ([0.0], np.frombuffer(r["clip"], dtype=np.float32)[None, :])
+                continue
+            saved = self.query("SELECT t, vec FROM frames WHERE path = ? ORDER BY t", (r["path"],))
+            if saved:
+                out[r["path"]] = ([f["t"] for f in saved],
+                                  np.array([np.frombuffer(f["vec"], dtype=np.float32) for f in saved]))
+            else:
+                todo.append(r)
+        if todo and self.frame_embedder is None:
+            tagger = SceneTagger(app_dir() / "models" / "clip")
+            self.frame_embedder = tagger.embed_each
+        for k, r in enumerate(todo):
+            times = moments.frame_times(r["duration"] or 0)
+            with tempfile.TemporaryDirectory() as tmp:
+                pictures = []
+                for n, t in enumerate(times):
+                    shot = Path(tmp) / f"f{n}.jpg"
+                    subprocess.run([ffmpeg_paths()[0], "-loglevel", "error", "-y", "-ss", f"{t:.2f}", "-i", r["path"],
+                                    "-frames:v", "1", "-vf", rotate_filter(r["rotation"] or 0) + "scale=336:-2",
+                                    "-q:v", "4", str(shot)], capture_output=True)
+                    if shot.exists():
+                        pictures.append((t, shot))
+                if not pictures:
+                    continue
+                vectors = np.asarray(self.frame_embedder([p for _, p in pictures]), np.float32)
+            with self._lock:
+                self.db.executemany("INSERT OR REPLACE INTO frames (path, t, vec) VALUES (?,?,?)",
+                                    [(r["path"], t, v.tobytes()) for (t, _), v in zip(pictures, vectors)])
+                self.db.commit()
+            out[r["path"]] = ([t for t, _ in pictures], vectors)
+            if notify:
+                notify((k + 1) / len(todo))
+        return out
+
+    def find_moment(self, key: str, words: np.ndarray | None, ticked: list[dict] | None = None,
+                    notify: Callable[[float], None] | None = None) -> list[dict]:
+        """The shots of one storyline block, best match for the moment first: {"path", "t", "score", "likely",
+        "thumb"}. ticked: [{"path", "t"}] you marked as right (the app looks for more like them)."""
+        line = self.storyline()
+        split = set(line["split"])
+        rows = [r for r in self.theme_rows() if r["included"] and themes.block_of(r, split) == key]
+        shots = self.frame_vectors(rows, notify)
+        examples = []
+        for tick in ticked or []:
+            times, vectors = shots.get(tick["path"], ([], None))
+            if times:
+                examples.append(vectors[int(np.argmin([abs(t - tick["t"]) for t in times]))])
+        found = moments.find(words, shots, examples)
+        good = moments.likely(found) | {t["path"] for t in ticked or []}
+        kinds = {r["path"]: r for r in rows}
+        out = []
+        for path, t, score in found:
+            r = kinds[path]
+            out.append({"path": path, "t": t, "score": round(score, 3), "likely": path in good,
+                        "thumb": self.moment_picture(r, t) if r["kind"] == "video" else r["thumb"],
+                        "kind": r["kind"], "duration": r["duration"]})
+        return out
+
+    def moment_picture(self, row: dict, t: float) -> str | None:
+        """A small picture of the clip at that second (kept in the trip folder)."""
+        folder = self.dir / "moments"
+        folder.mkdir(exist_ok=True)
+        out = folder / f"{hashlib.sha1(row['path'].encode()).hexdigest()[:12]}_{t:.1f}.jpg"
+        if not out.exists():
+            subprocess.run([ffmpeg_paths()[0], "-loglevel", "error", "-y", "-ss", f"{t:.2f}", "-i", row["path"],
+                            "-frames:v", "1", "-vf", rotate_filter(row.get("rotation") or 0) + "scale=320:-2",
+                            "-q:v", "4", str(out)], capture_output=True)
+        return str(out) if out.exists() else row.get("thumb")
 
     def remove_activity(self, name: str) -> None:
         """Take an activity away: its shots get a new suggestion (the ones you confirmed for it too)."""
@@ -946,6 +1041,7 @@ class Trip:
         self.checkpoint("the first cut")
         offsets = {r["path"]: r["keep_start"] for r in self.query(
             "SELECT path, keep_start FROM items WHERE keep_start IS NOT NULL AND keep_end IS NOT NULL")}
+        offsets |= self._moment_starts  # a moment's part (from the clip's start)
         with self._lock:
             # Parts of long clips: made afresh for each cut, as rows of their own copied from the clip.
             self.db.execute("DELETE FROM items WHERE part_of IS NOT NULL")

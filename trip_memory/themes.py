@@ -126,7 +126,8 @@ def by_tags(tags: list[str], scene: str | None) -> str:
 
 TIME, THEME, DAY, STORY = "time", "theme", "day", "story"
 ORDERS = {TIME: "As it happened", THEME: "By theme", DAY: "Day by day", STORY: "My story (AI) ✨"}
-PICKS = {"all": "all shots", "early": "first half", "late": "second half", "action": "most exciting half"}
+PICKS = {"all": "all shots", "early": "first half", "late": "second half", "action": "most exciting half",
+         "moment": "a moment… 🔍"}
 PACES = {"calm": 0.2, "medium": 0.55, "lively": 0.9}  # how lively the shots of a story part should be, 0..1
 
 
@@ -231,7 +232,14 @@ def _story_chapters(story: dict, rows: list[dict], split: set[str]) -> tuple[lis
                 want = set(whole[:half])
             elif pick == "late":
                 want = set(whole[len(whole) - half:])
-            elif pick == "action":
+            elif pick == "moment" and entry.get("shots"):
+                # the shots you ticked for the moment (a big jump...), each with its second
+                seconds = {s["path"]: s["t"] for s in entry["shots"]}
+                want = {i for i in whole if rows[i]["path"] in seconds}
+                for i in want:
+                    if where[i] is None:
+                        rows[i]["moment_at"] = seconds[rows[i]["path"]]
+            elif pick in ("action", "moment"):  # a moment not looked for yet: the most exciting half meanwhile
                 want = set(sorted(whole, key=lambda i: excitement(rows[i]), reverse=True)[:half])
             else:
                 want = set(whole)
@@ -320,8 +328,10 @@ def block_name(b: dict) -> str:
 def story_keys(story: dict, blocks: list[dict]) -> dict:
     """An AI answer (entries by block number) with each entry's block key, ready to save."""
     out = dict(story)
-    out["parts"] = [dict(p, entries=[{"key": blocks[e["block"]]["key"], "pick": e["pick"]} for e in p["entries"]
-                                     if 0 <= e["block"] < len(blocks)]) for p in story.get("parts") or []]
+    out["parts"] = [dict(p, entries=[{"key": blocks[e["block"]]["key"], "pick": e["pick"]}
+                                     | ({"moment": e["moment"]} if e.get("moment") else {})
+                                     for e in p["entries"] if 0 <= e["block"] < len(blocks)])
+                    for p in story.get("parts") or []]
     out["parts"] = [p for p in out["parts"] if p["entries"]]
     return out
 

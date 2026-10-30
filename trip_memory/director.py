@@ -241,6 +241,9 @@ Answer:
   - themes: the theme numbers in this part, in order. Each has a pick: "all" its shots, its "early" shots (first
     half by time), its "late" shots (second half) or its "action" shots (the most exciting half). A theme may come
     twice with different picks (e.g. "early" in one part, "action" in a later one).
+    If the person names a particular moment inside a theme (e.g. "the big jumps", "falling in the water", "the
+    sunset"), use pick "moment" and write what it looks like in "moment", in a few English words a photo caption
+    would use (e.g. "a kitesurfer jumping high in the air"). Otherwise "moment" is "".
 - finale: true only if the person wants to end on the most exciting shots of the whole trip.
 Answer in JSON."""
 
@@ -262,8 +265,10 @@ STORY_SCHEMA = {
                         "items": {
                             "type": "object",
                             "properties": {"theme": {"type": "integer"},
-                                           "pick": {"type": "string", "enum": ["all", "early", "late", "action"]}},
-                            "required": ["theme", "pick"],
+                                           "pick": {"type": "string",
+                                                    "enum": ["all", "early", "late", "action", "moment"]},
+                                           "moment": {"type": "string"}},
+                            "required": ["theme", "pick", "moment"],
                             "additionalProperties": False,
                         },
                     },
@@ -303,7 +308,11 @@ def clean_story(answer: dict, count: int) -> dict:
             if isinstance(n, int) and 1 <= n <= count and (n - 1, pick) not in [(e["block"], e["pick"]) for p in parts
                                                                                 for e in p["entries"]] + \
                     [(e["block"], e["pick"]) for e in entries]:
-                entries.append({"block": n - 1, "pick": pick if pick in ("all", "early", "late", "action") else "all"})
+                moment = " ".join(str(t.get("moment") or "").split())[:80] if isinstance(t, dict) else ""
+                pick = pick if pick in ("all", "early", "late", "action", "moment") else "all"
+                if pick == "moment" and not moment:
+                    pick = "action"
+                entries.append({"block": n - 1, "pick": pick} | ({"moment": moment} if pick == "moment" else {}))
         if entries:
             parts.append({"name": " ".join(str(part.get("name", "")).split())[:40] or f"Part {len(parts) + 1}",
                           "pace": part.get("pace") if part.get("pace") in ("calm", "medium", "lively") else "medium",
