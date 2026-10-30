@@ -212,26 +212,36 @@ WISH_SCHEMA = {
 }
 
 
-STORY_PROMPT = """You are the editor of a holiday memory video set to music. The person sorted every shot of the trip into
-themes (an activity, sometimes with the person in it). These are the themes, numbered:
+STORY_PROMPT = """You are the editor of a holiday memory video set to music. The video lasts {seconds} seconds (the
+length of the song). The person sorted every shot of the trip into themes: an activity, sometimes with the person in
+it. These are the themes, numbered, with how many shots each has:
 
 {blocks}
 
-The person describes the story they want the video to tell:
+The person describes the story they want the video to tell, in their own words (it may be dictated, so expect
+small mistakes):
 
 "{idea}"
 {variation}
-Arrange the themes into the parts of that story, in the order they should play:
+Turn exactly that description into the parts of the video, in the order it should play.
+Rules:
+- Follow the person's order strictly: what they name first comes first, what they say to end with comes last.
+- Match each thing they mention to the theme number that fits it best (by activity and person). Never use a theme
+  for something it is not; if nothing fits, leave it out.
+- Themes they don't mention are left out, unless they say "everything else" or "the rest": then those go there.
+- Give each part a length in seconds. All parts together must add up to {seconds} seconds. Give more time to what
+  the person cares about most and to themes with many shots; a part needs at least 4 seconds per 2 shots.
+Answer:
 - title: a short name for this story (2 to 5 words).
-- parts: 2 to 6 parts. Each has:
-  - name: a short name for the part (e.g. "Calm opening", "Building up", "Slow breather", "The best jumps").
+- parts: 2 to 7 parts. Each has:
+  - name: a short name for the part (e.g. "Arrival", "Kitesurfing build-up", "Slow breather", "Best jumps").
+  - why: one short sentence: which words of the person this part follows.
+  - seconds: how long this part lasts.
   - pace: "calm", "medium" or "lively": how this part should feel.
-  - themes: the theme numbers in this part, in order. Each theme number has a pick: "all" its shots, its "early"
-    shots (the first half, by time), its "late" shots (the second half) or its "action" shots (the most exciting
-    half). A theme may appear twice with different picks (e.g. "early" in one part, "action" in a later one).
-Use only the theme numbers above. Leave out themes the story doesn't want; if the story says "everything else" or
-"the rest", put the unmentioned themes there. Follow the order the person asks for.
-- finale: true if the story should end on the most exciting shots of the whole trip.
+  - themes: the theme numbers in this part, in order. Each has a pick: "all" its shots, its "early" shots (first
+    half by time), its "late" shots (second half) or its "action" shots (the most exciting half). A theme may come
+    twice with different picks (e.g. "early" in one part, "action" in a later one).
+- finale: true only if the person wants to end on the most exciting shots of the whole trip.
 Answer in JSON."""
 
 STORY_SCHEMA = {
@@ -244,6 +254,8 @@ STORY_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
+                    "why": {"type": "string"},
+                    "seconds": {"type": "integer"},
                     "pace": {"type": "string", "enum": ["calm", "medium", "lively"]},
                     "themes": {
                         "type": "array",
@@ -256,7 +268,7 @@ STORY_SCHEMA = {
                         },
                     },
                 },
-                "required": ["name", "pace", "themes"],
+                "required": ["name", "why", "seconds", "pace", "themes"],
                 "additionalProperties": False,
             },
         },
@@ -267,14 +279,15 @@ STORY_SCHEMA = {
 }
 
 
-def story_prompt(idea: str, blocks: list[dict], before: list[str] | None = None) -> str:
-    """blocks: {"name", "count", "days", "places"}. before: titles of stories already offered (for another idea)."""
+def story_prompt(idea: str, blocks: list[dict], before: list[str] | None = None, seconds: float = 180) -> str:
+    """blocks: {"name", "count", "days", "places"}. before: titles of stories already offered (for another idea).
+    seconds: how long the video is."""
     lines = [f"{n}. {b['name']} · {b['count']} shots" + (f" · {b['days']}" if b.get("days") else "")
              + (f" · {b['places']}" if b.get("places") else "") for n, b in enumerate(blocks, 1)]
     variation = (f"\nYou already offered: {'; '.join(before)}. Make a clearly different story this time.\n"
                  if before else "")
     return STORY_PROMPT.format(blocks="\n".join(lines), idea=" ".join(idea.split())[:2000] or SURPRISE,
-                               variation=variation)
+                               variation=variation, seconds=round(seconds))
 
 
 def clean_story(answer: dict, count: int) -> dict:
@@ -294,6 +307,9 @@ def clean_story(answer: dict, count: int) -> dict:
         if entries:
             parts.append({"name": " ".join(str(part.get("name", "")).split())[:40] or f"Part {len(parts) + 1}",
                           "pace": part.get("pace") if part.get("pace") in ("calm", "medium", "lively") else "medium",
+                          "seconds": part["seconds"] if isinstance(part.get("seconds"), (int, float))
+                          and part["seconds"] > 0 else None,
+                          "why": " ".join(str(part.get("why") or "").split())[:160],
                           "entries": entries})
     return {"title": " ".join(str(answer.get("title", "")).split())[:60], "parts": parts[:8],
             "finale": bool(answer.get("finale", False))}

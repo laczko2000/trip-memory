@@ -241,6 +241,7 @@ class Page:
     def build(self) -> None:
         ui.colors(primary="#2563eb")
         ui.on("tm_dictation", self.dictation)
+        ui.on("tm_story_drop", self.story_drop)
         ui.add_css(".thumb { height: 150px; object-fit: cover; }")
         with ui.column().classes("w-full max-w-6xl mx-auto p-4 gap-3"):
             with ui.row().classes("items-baseline gap-2"):
@@ -2089,36 +2090,82 @@ class Page:
             ui.label("No story yet: until you make one, the video runs as it happened.").classes("text-sm text-gray-500")
             return
         parts = story["parts"]
+        total = self.video_seconds()
+        room = themes.part_room(total, line["finale"])
+        times = themes.fit_times(parts, room)
+        counts = {b["key"]: b["count"] for b in blocks}
         with ui.row().classes("items-center gap-2"):
             ui.label(f"✨ {story.get('title') or 'Your story'}").classes("text-base font-semibold")
+            ui.label(f"· {fmt_length(total)} in all").classes("text-sm text-gray-600")
             if story.get("by") == "words":
                 ui.label("(made from your words; start Ollama for a smarter story)").classes("text-xs text-gray-500")
+        # The whole song, shared between the parts (and the finale).
+        colours = {"calm": "#5b8def", "medium": "#9b8afb", "lively": "#f08a24"}
+        with ui.element("div").classes("w-full flex rounded overflow-hidden text-white text-xs font-semibold") \
+                .style("height:26px"):
+            for n, (part, t) in enumerate(zip(parts, times)):
+                with ui.element("div").classes("flex items-center px-1 overflow-hidden whitespace-nowrap") \
+                        .style(f"flex:{t};background:{colours.get(part['pace'], '#9b8afb')};"
+                               f"border-right:2px solid white"):
+                    ui.label(f"{n + 1}. {part['name']} {fmt_length(t)}").tooltip(f"{part['name']}: {fmt_length(t)}")
+            if line["finale"]:
+                with ui.element("div").classes("flex items-center px-1 overflow-hidden whitespace-nowrap") \
+                        .style(f"flex:{total - room};background:#e0662f"):
+                    ui.label(f"Finale {fmt_length(total - room)}")
+        drag = ("this.style.opacity=0.5;event.dataTransfer.setData('text/plain','{src}');event.stopPropagation()")
+        over = "event.preventDefault();this.style.outline='2px dashed #2563eb'"
+        leave = "this.style.outline=''"
+        drop = ("event.preventDefault();event.stopPropagation();this.style.outline='';"
+                "emitEvent('tm_story_drop',{{src:event.dataTransfer.getData('text/plain'),dst:'{dst}'}})")
         for n, part in enumerate(parts):
-            with ui.card().classes("w-full p-2 gap-1 bg-white"):
+            card = ui.element("div").classes("w-full p-2 rounded border bg-white flex flex-col gap-1")
+            card._props.update({"draggable": "true", "ondragstart": drag.format(src=f"p:{n}"),
+                                "ondragend": "this.style.opacity=1", "ondragover": over, "ondragleave": leave,
+                                "ondrop": drop.format(dst=f"p:{n}")})
+            with card:
                 with ui.row().classes("w-full items-center no-wrap gap-2"):
+                    ui.icon("drag_indicator").classes("text-gray-400 cursor-grab").tooltip("Drag to move this part")
                     ui.label(f"{n + 1}.").classes("font-semibold")
                     title = ui.input(value=part["name"]).props("dense borderless").classes("font-medium flex-grow")
                     title.on("blur", lambda e, n=n, f=title: self.edit_part(n, name=f.value))
                     ui.select(self.PACE_NAMES, value=part["pace"],
                               on_change=lambda e, n=n: self.edit_part(n, pace=e.value)).props("dense outlined") \
                         .classes("w-32").tooltip("How lively this part feels")
-                    ui.button(icon="arrow_upward", on_click=lambda n=n: self.move_part(n, -1)) \
-                        .props("flat dense round size=sm").set_enabled(n > 0)
-                    ui.button(icon="arrow_downward", on_click=lambda n=n: self.move_part(n, 1)) \
-                        .props("flat dense round size=sm").set_enabled(n < len(parts) - 1)
+                    ui.button(icon="remove", on_click=lambda n=n: self.part_time(n, -5)) \
+                        .props("outline dense round size=sm").tooltip("5 seconds shorter (the other parts get them)")
+                    ui.label(fmt_length(times[n])).classes("font-semibold w-12 text-center")
+                    ui.button(icon="add", on_click=lambda n=n: self.part_time(n, 5)) \
+                        .props("outline dense round size=sm").tooltip("5 seconds longer (taken from the other parts)")
                     ui.button(icon="delete_outline", on_click=lambda n=n: self.remove_part(n)) \
                         .props("flat dense round size=sm").tooltip("Leave this part out")
                 with ui.row().classes("w-full items-center gap-2"):
                     for m, entry in enumerate(part["entries"]):
                         if entry["key"] not in names:
                             continue
-                        with ui.row().classes("items-center no-wrap gap-1 px-2 rounded-full bg-blue-50 border"):
+                        chip = ui.element("div").classes("flex items-center no-wrap gap-1 px-2 rounded-full bg-blue-50 "
+                                                         "border cursor-grab")
+                        chip._props.update({"draggable": "true", "ondragstart": drag.format(src=f"e:{n}:{m}"),
+                                            "ondragend": "this.style.opacity=1", "ondragover": over,
+                                            "ondragleave": leave, "ondrop": drop.format(dst=f"e:{n}:{m}")})
+                        with chip:
+                            ui.icon("drag_indicator").classes("text-gray-400 text-sm")
                             ui.label(names[entry["key"]]).classes("text-sm")
                             ui.select(themes.PICKS, value=entry["pick"],
                                       on_change=lambda e, n=n, m=m: self.edit_entry(n, m, pick=e.value)) \
                                 .props("dense borderless options-dense").classes("text-xs w-36")
                             ui.button(icon="close", on_click=lambda n=n, m=m: self.remove_entry(n, m)) \
                                 .props("flat dense round size=xs")
+                    ui.button("Add theme", icon="add", on_click=lambda n=n: self.add_theme_dialog(n, blocks, names)) \
+                        .props("flat dense no-caps size=sm")
+                if part.get("why"):
+                    ui.label(f"AI: {part['why']}").classes("text-xs text-gray-500 italic")
+                warning = self._part_warning(part, times[n], counts)
+                if warning:
+                    ui.label(f"⚠️ {warning}").classes("text-xs text-orange-700")
+        with ui.row().classes("w-full items-center gap-2"):
+            ui.button("New part", icon="add", on_click=self.new_part).props("flat dense no-caps size=sm")
+            ui.label("Drag parts and themes (⠿) to reorder them or move a theme to another part. − / + takes the "
+                     "time from the other parts, so the total stays the song's length.").classes("text-xs text-gray-500")
         missing = themes.left_out(story, blocks)
         if missing:
             with ui.row().classes("w-full items-center gap-2"):
@@ -2126,6 +2173,26 @@ class Page:
                 for b in missing:
                     ui.button(f"+ {names[b['key']]} ({b['count']})", on_click=lambda k=b["key"]: self.add_entry(k)) \
                         .props("flat dense no-caps size=sm").tooltip("Add to the last part")
+
+    def video_seconds(self) -> float:
+        target = self.length_now()
+        if target == "song":
+            return self.track_seconds(self.music_path()) or 180.0
+        return float(target)
+
+    def _part_warning(self, part: dict, seconds: float, counts: dict) -> str:
+        """Too little time for a part, or too few shots for its time."""
+        shots = sum(counts.get(e["key"], 0) * (1 if e["pick"] == "all" else 0.5) for e in part["entries"])
+        if not part["entries"]:
+            return "No themes yet: drag one here or press Add theme."
+        limits = self.limits_now()
+        if seconds < 6:
+            return f"Only {seconds:.0f} s: about {max(1, round(seconds / 2))} shots. Make it longer or remove it?"
+        longest = max(limits.max_video, limits.max_photo)
+        if shots * longest < seconds * 0.9:
+            return (f"Not enough shots for {fmt_length(seconds)}: {shots:.0f} shots fill about "
+                    f"{fmt_length(shots * longest)}. Make it shorter or add a theme.")
+        return ""
 
     def _story_blocks_info(self, blocks: list[dict]) -> list[dict]:
         """What the AI hears about each theme: its name, how many shots, which days and where."""
@@ -2176,7 +2243,9 @@ class Page:
                 self.story_stop.set_visibility(True)
             print(f"My story: asking the AI ({type(ai).__name__})…", flush=True)
             try:
-                prompt = director.story_prompt(idea, self._story_blocks_info(blocks), before[-4:] or None)
+                prompt = director.story_prompt(idea, self._story_blocks_info(blocks), before[-4:] or None,
+                                               themes.part_room(self.video_seconds(),
+                                                                self.trip.storyline()["finale"]))
                 answer = await self.stoppable(ai.story, prompt)
                 print(f"My story: the AI answered after {time.time() - started:.0f} s." if answer is not None else
                       "My story: stopped.", flush=True)
@@ -2211,19 +2280,84 @@ class Page:
         else:
             ui.notify(f"Your story is ready: {story['title'] or 'have a look'}. Change anything below, then Make the "
                       "first cut.", type="positive", multi_line=True)
+        counts = {b["key"]: b["count"] for b in blocks}
+        for p in story["parts"]:  # without the AI's times: by how many shots each part has
+            if not p.get("seconds"):
+                p["seconds"] = sum(counts.get(e["key"], 0) for e in p["entries"]) ** 0.5 or 1
+        finale = bool(story.get("finale"))
+        for p, t in zip(story["parts"], themes.fit_times(story["parts"],
+                                                         themes.part_room(self.video_seconds(), finale))):
+            p["seconds"] = t
         self.trip.checkpoint("story")
-        self.trip.set_storyline(story=story | {"idea": idea, "before": before}, finale=bool(story.get("finale")))
+        self.trip.set_storyline(story=story | {"idea": idea, "before": before}, finale=finale)
         self.storyboard_view.refresh()
 
     def _edit_story(self, change) -> None:
-        story = dict(self.trip.storyline().get("story") or {})
+        line = self.trip.storyline()
+        story = dict(line.get("story") or {})
         parts = [dict(p, entries=[dict(e) for e in p["entries"]]) for p in story.get("parts") or []]
         change(parts)
-        story["parts"] = [p for p in parts if p["entries"]]
+        # Every part keeps its time; the total always stays the song's length (less the finale).
+        for p, t in zip(parts, themes.fit_times(parts, themes.part_room(self.video_seconds(), line["finale"]))):
+            p["seconds"] = t
+        story["parts"] = parts
         if self.wish_box is not None:
             story["idea"] = (self.wish_box.value or "").strip()
         self.trip.set_storyline(story=story)
         self.storyboard_view.refresh()
+
+    def part_time(self, n: int, step: float) -> None:
+        line = self.trip.storyline()
+
+        def change(parts):
+            times = themes.fit_times(parts, themes.part_room(self.video_seconds(), line["finale"]))
+            for p, t in zip(parts, themes.change_time(times, n, times[n] + step)):
+                p["seconds"] = t
+        self._edit_story(change)
+
+    def new_part(self) -> None:
+        self._edit_story(lambda parts: parts.append({"name": f"Part {len(parts) + 1}", "pace": "medium",
+                                                     "seconds": None, "entries": []}))
+
+    def story_drop(self, e) -> None:
+        """A part or a theme dropped somewhere in My story: p:N is a part, e:N:M a theme (M in part N)."""
+        args = e.args if isinstance(e.args, dict) else {}
+        src, dst = str(args.get("src", "")).split(":"), str(args.get("dst", "")).split(":")
+        if len(src) < 2 or len(dst) < 2 or not self.trip:
+            return
+        try:
+            src_n, dst_n = int(src[1]), int(dst[1])
+            src_m = int(src[2]) if src[0] == "e" else None
+            dst_m = int(dst[2]) if dst[0] == "e" else None
+        except (ValueError, IndexError):
+            return
+
+        def change(parts):
+            if not (0 <= src_n < len(parts) and 0 <= dst_n < len(parts)):
+                return
+            if src_m is None:  # a part: it goes where it was dropped
+                if src_n != dst_n:
+                    parts.insert(dst_n, parts.pop(src_n))
+                return
+            if not 0 <= src_m < len(parts[src_n]["entries"]):
+                return
+            entry = parts[src_n]["entries"].pop(src_m)
+            at = len(parts[dst_n]["entries"]) if dst_m is None else dst_m
+            if src_n == dst_n and dst_m is not None and src_m < dst_m:
+                at -= 1
+            parts[dst_n]["entries"].insert(max(0, at), entry)
+        self._edit_story(change)
+
+    def add_theme_dialog(self, n: int, blocks: list[dict], names: dict) -> None:
+        with ui.dialog() as dialog, ui.card().classes("w-[720px] max-w-[95vw] gap-3"):
+            ui.label("Which theme goes in this part?").classes("text-lg font-semibold")
+            with ui.element("div").classes("w-full grid gap-2").style("grid-template-columns:repeat(3,minmax(0,1fr))"):
+                for b in blocks:
+                    ui.button(f"{names[b['key']]} ({b['count']})",
+                              on_click=lambda k=b["key"]: (dialog.close(), self.add_entry(k, n))) \
+                        .props("outline no-caps").classes("h-12 text-base w-full")
+            ui.button("Cancel", on_click=dialog.close).props("flat no-caps")
+        dialog.open()
 
     def edit_part(self, n: int, **values) -> None:
         story = self.trip.storyline().get("story") or {}
@@ -2246,11 +2380,11 @@ class Page:
     def remove_entry(self, n: int, m: int) -> None:
         self._edit_story(lambda parts: parts[n]["entries"].pop(m))
 
-    def add_entry(self, key: str) -> None:
+    def add_entry(self, key: str, n: int = -1) -> None:
         def change(parts):
             if not parts:
                 parts.append({"name": "Part 1", "pace": "medium", "entries": []})
-            parts[-1]["entries"].append({"key": key, "pick": "all"})
+            parts[n]["entries"].append({"key": key, "pick": "all"})
         self._edit_story(change)
 
     def _saved_blocks(self) -> list[dict]:
@@ -2262,6 +2396,8 @@ class Page:
 
     def set_finale(self, on: bool) -> None:
         self.trip.set_storyline(finale=on)
+        if self.trip.storyline()["order"] == themes.STORY:
+            self.storyboard_view.refresh()  # the finale takes its time from the parts
 
     def move_block(self, n: int, steps: int) -> None:
         blocks = self._saved_blocks()

@@ -309,7 +309,9 @@ def by_chapters(rows: list[dict], chapters: list[dict]) -> list[dict]:
         if groups[finale]:
             groups[finale][-1]["must"] = True
     order = [j for j in range(len(chapters)) if groups.get(j)]
-    weights = {j: (np.sqrt(len(groups[j])) * (REST_WEIGHT if chapters[j]["kind"] == "rest" else 1.0))
+    # Your time per part when you set one (My story), else bigger chapters get more time.
+    weights = {j: chapters[j]["weight"] if chapters[j].get("weight") else
+               (np.sqrt(len(groups[j])) * (REST_WEIGHT if chapters[j]["kind"] == "rest" else 1.0))
                for j in order if j != finale}
     room = 1.0 - (FINALE_SHARE if finale in order and weights else 0.0)
     total = sum(weights.values()) or 1.0

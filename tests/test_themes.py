@@ -108,13 +108,35 @@ def test_an_ai_story_is_cleaned_and_keyed():
 
     blocks = [{"key": "Boat|"}, {"key": "Food & drink|"}]
     answer = {"title": " Sea  days ", "finale": True, "parts": [
-        {"name": "Open", "pace": "fast", "themes": [{"theme": 1, "pick": "all"}, {"theme": 9, "pick": "all"}]},
+        {"name": "Open", "pace": "fast", "seconds": 20, "why": "You said boat first.",
+         "themes": [{"theme": 1, "pick": "all"}, {"theme": 9, "pick": "all"}]},
         {"name": "", "pace": "calm", "themes": [{"theme": 2, "pick": "late"}, {"theme": 1, "pick": "all"}]},
         {"name": "Empty", "pace": "calm", "themes": []}]}
     story = themes.story_keys(director.clean_story(answer, 2), blocks)
     assert story["title"] == "Sea days" and story["finale"]
     assert story["parts"] == [
-        {"name": "Open", "pace": "medium", "entries": [{"key": "Boat|", "pick": "all"}]},
-        {"name": "Part 2", "pace": "calm", "entries": [{"key": "Food & drink|", "pick": "late"}]}]
-    assert "1. Boat" in director.story_prompt("boat first", [{"name": "Boat", "count": 4}])
+        {"name": "Open", "pace": "medium", "seconds": 20, "why": "You said boat first.",
+         "entries": [{"key": "Boat|", "pick": "all"}]},
+        {"name": "Part 2", "pace": "calm", "seconds": None, "why": "", "entries": [{"key": "Food & drink|", "pick": "late"}]}]
+    prompt = director.story_prompt("boat first", [{"name": "Boat", "count": 4}], seconds=95.4)
+    assert "1. Boat" in prompt and "add up to 95 seconds" in prompt
+
+
+def test_each_part_gets_its_time_and_the_total_stays():
+    assert themes.fit_times([{"seconds": 20}, {"seconds": 30}, {"seconds": 50}], 50) == [10, 15, 25]
+    times = themes.fit_times([{"seconds": 40}, {"seconds": 59}, {"seconds": 1}], 100)
+    assert times[2] == themes.SHORTEST_PART and abs(sum(times) - 100) < 0.2
+    assert themes.fit_times([{"seconds": 30}, {}], 60)[1] > 0  # a new part gets a share
+    longer = themes.change_time([20, 30, 50], 0, 40)
+    assert longer[0] == 40 and abs(sum(longer) - 100) < 0.2 and longer[2] > longer[1]
+    assert themes.change_time([20, 30, 50], 0, 99)[0] == 100 - 2 * themes.SHORTEST_PART
+    # Auto-edit gets each part's time, shared by its themes.
+    rows = [_row(n, "Boat") for n in range(4)] + [_row(10 + n, "Food & drink") for n in range(4)]
+    for r in rows:
+        r["kind"] = "photo"
+    story = {"parts": [{"name": "A", "pace": "calm", "seconds": 30, "entries": [{"key": "Boat|", "pick": "all"}]},
+                       {"name": "B", "pace": "lively", "seconds": 10,
+                        "entries": [{"key": "Food & drink|", "pick": "all"}]}]}
+    chapters, _ = themes.chapters_for({"order": themes.STORY, "story": story, "finale": False}, rows)
+    assert [c["weight"] for c in chapters] == [30, 10]
 

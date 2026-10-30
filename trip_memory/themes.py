@@ -218,7 +218,7 @@ def _story_chapters(story: dict, rows: list[dict], split: set[str]) -> tuple[lis
         members[k].sort(key=lambda i: rows[i]["taken_at"])
     where: list[int | None] = [None] * len(rows)
     chapters: list[dict] = []
-    for part in story.get("parts") or []:
+    for n_part, part in enumerate(story.get("parts") or []):
         for entry in part.get("entries") or []:
             free = [i for i in members.get(entry["key"], []) if where[i] is None]
             if not free:
@@ -241,7 +241,14 @@ def _story_chapters(story: dict, rows: list[dict], split: set[str]) -> tuple[lis
             for i in take:
                 where[i] = len(chapters)
             chapters.append({"kind": "theme", "what": f"{part.get('name', '')}: {entry['key']}",
-                             "pace": PACES.get(part.get("pace"), None)})
+                             "pace": PACES.get(part.get("pace"), None), "part": n_part, "count": len(take)})
+    # Your time per part: shared by its themes (bigger ones get more), so Auto-edit gives each exactly that time.
+    for n_part, part in enumerate(story.get("parts") or []):
+        mine = [c for c in chapters if c["part"] == n_part]
+        if part.get("seconds") and mine:
+            total = sum(c["count"] ** 0.5 for c in mine)
+            for c in mine:
+                c["weight"] = part["seconds"] * c["count"] ** 0.5 / total
     return chapters, where
 
 
@@ -323,3 +330,52 @@ def left_out(story: dict, blocks: list[dict]) -> list[dict]:
     """The blocks (that are on) your story doesn't use."""
     used = {e["key"] for p in story.get("parts") or [] for e in p.get("entries") or []}
     return [b for b in blocks if b.get("on", True) and b["key"] not in used]
+
+
+# ---------- time per part ----------
+
+FINALE_SHARE = 0.12  # the finale's share of the video (as in Auto-edit)
+SHORTEST_PART = 3.0  # seconds
+
+
+def part_room(total: float, finale: bool) -> float:
+    """The seconds the story's parts share: the whole video, less the finale."""
+    return total * (1 - FINALE_SHARE) if finale else total
+
+
+def fit_times(parts: list[dict], room: float) -> list[float]:
+    """Each part's seconds, adding up to room: your (or the AI's) times scaled to fit, or, where a part has none, a
+    share by how many shots it has."""
+    if not parts:
+        return []
+    raw = [float(p.get("seconds") or 0) for p in parts]
+    sizes = [max(1, len(p.get("entries") or [])) for p in parts]
+    if not all(raw):
+        known = sum(raw) / max(1, sum(1 for r in raw if r))  # the average of the ones set
+        raw = [r or (known or room / len(parts)) * sizes[k] ** 0.5 / (sum(sizes) / len(sizes)) ** 0.5
+               for k, r in enumerate(raw)]
+    scale = room / sum(raw)
+    times = [max(SHORTEST_PART, r * scale) for r in raw]
+    over = sum(times) - room
+    if over > 0.01:  # the shortest parts were lifted: the others give that time back
+        flexible = [k for k, t in enumerate(times) if t > SHORTEST_PART]
+        spare = sum(times[k] - SHORTEST_PART for k in flexible) or 1
+        times = [t - over * (t - SHORTEST_PART) / spare if k in flexible else t for k, t in enumerate(times)]
+    return [round(t, 1) for t in times]
+
+
+def change_time(times: list[float], n: int, seconds: float) -> list[float]:
+    """Part n gets this many seconds; the others give or take the difference (in proportion), so the total stays."""
+    room = sum(times)
+    others = [k for k in range(len(times)) if k != n]
+    if not others:
+        return times
+    seconds = min(max(SHORTEST_PART, seconds), room - SHORTEST_PART * len(others))
+    extra = room - seconds - SHORTEST_PART * len(others)  # what the others have above their shortest
+    above = {k: max(0.0, times[k] - SHORTEST_PART) for k in others}
+    have = sum(above.values())
+    out = list(times)
+    out[n] = seconds
+    for k in others:
+        out[k] = SHORTEST_PART + extra * (above[k] / have if have else 1 / len(others))
+    return [round(t, 1) for t in out]
