@@ -30,6 +30,7 @@ from . import musicmood
 from . import pinfill
 from . import themes
 from . import moments
+from . import timeshift
 from . import taps as song_taps
 from .beats import song_length
 from .autoedit import CUT_ON, shot_value
@@ -488,6 +489,107 @@ class Page:
                         .props("color=negative dense")
         self.update_sort_counts()
 
+    def camera_clocks_card(self) -> None:
+        """Each camera in the trip, and its clock: a GoPro set to the wrong time puts its shots in the wrong place,
+        so its whole clock can be moved at once (or the app finds by how much from shots of the same moment)."""
+        cams = self.trip.cameras()
+        if len(cams) < 2 and not any(c["shift"] for c in cams):
+            return
+        moved = [c for c in cams if c["shift"]]
+        caption = ", ".join(f"{c['camera']} {timeshift.fmt_shift(c['shift'])}" for c in moved) if moved \
+            else "Is a camera's time wrong (a GoPro often is)? Put it right here"
+        with ui.expansion(f"Camera clocks · {len(cams)} cameras", caption=caption, icon="schedule") \
+                .classes("w-full mt-2 bg-sky-50 rounded"):
+            ui.label("Each camera's shots go into the trip by the time its clock gave them. If a camera's clock was "
+                     "wrong, its shots land in the wrong story: move its clock and all its files move together. "
+                     "Your files are not changed, only where they sit in the trip.").classes("text-sm text-gray-700")
+            for c in cams:
+                self.camera_row(c)
+
+    def camera_row(self, c: dict) -> None:
+        first, last = (datetime.fromisoformat(c[k]).astimezone() if c[k] else None for k in ("first", "last"))
+        what = ", ".join(x for x in (f"{c['videos']} videos" if c["videos"] else "",
+                                     f"{c['photos']} photos" if c["photos"] else "") if x)
+        span = ""
+        if first and last:
+            until = f"{last:%H:%M}" if first.date() == last.date() else f"{last:%a %d %b %H:%M}"
+            span = f" · its clock says {first:%a %d %b %H:%M} – {until}"
+        with ui.row().classes("w-full items-center gap-2 mt-1"):
+            ui.label(f"📷 {c['camera']}").classes("font-semibold min-w-40")
+            ui.label(what + span).classes("text-sm text-gray-600")
+            ui.space()
+            box = ui.input("Move its clock by", value=timeshift.fmt_shift(c["shift"]) if c["shift"] else "",
+                           placeholder="e.g. +2:00 or -30 min").props("dense clearable").classes("w-44") \
+                .tooltip("+2:00 = its shots happened 2 hours later than it says; -0:30 = half an hour earlier")
+            ui.button("Apply", icon="check", on_click=lambda b=box, cam=c["camera"]: self.apply_shift(cam, b.value)) \
+                .props("dense unelevated")
+            ui.button("Find it for me", icon="travel_explore",
+                      on_click=lambda cam=c["camera"]: self.suggest_shift(cam)).props("dense outline") \
+                .tooltip("Look for this camera's shots that show the same moment as another camera's shots, "
+                         "and work out how far apart their clocks are")
+            if c["shift"]:
+                ui.label(timeshift.shift_words(c["shift"])).classes("text-xs text-sky-800")
+                ui.button("Undo shift", on_click=lambda cam=c["camera"]: self.apply_shift(cam, "0")).props("flat dense size=sm")
+
+    async def apply_shift(self, camera: str, text: str | float | None) -> None:
+        seconds = float(text) if isinstance(text, (int, float)) else timeshift.parse_shift(text or "0")
+        if seconds is None:
+            ui.notify("Type how much to move the clock, like +2:00, -1:30 or 45 min.", type="warning")
+            return
+        note = ui.notification(f"Moving the {camera} shots…", spinner=True, timeout=None)
+        try:
+            n = await run.io_bound(self.trip.set_time_shift, camera, seconds)
+        finally:
+            note.dismiss()
+        if n:
+            ui.notify(f"{n} {camera} files now sit {timeshift.shift_words(seconds)} than its clock said."
+                      if seconds else f"{camera} files are back at the time its clock gave them.", type="positive")
+        self.refresh_all()
+
+    async def suggest_shift(self, camera: str) -> None:
+        note = ui.notification(f"Looking for {camera} shots of the same moments as the other cameras…",
+                               spinner=True, timeout=None)
+        try:
+            found = await run.io_bound(self.trip.suggest_time_shift, camera)
+        finally:
+            note.dismiss()
+        if not found:
+            ui.notify(f"No {camera} shots clearly match another camera's shots, so the app can't tell. Type the "
+                      "shift yourself (for example from a shot where you know the time). After Analyse, matching "
+                      "works better.", type="warning", multi_line=True, timeout=10000)
+            return
+        current = next((c["shift"] for c in self.trip.cameras() if c["camera"] == camera), 0.0)
+        thumbs = {it["path"]: it["thumb"] for it in self.all_items}
+        with ui.dialog() as dialog, ui.card().classes("w-[44rem] max-w-full"):
+            if abs(found["seconds"] - current) < 60:
+                ui.label(f"The {camera} clock {'is already right' if current else 'looks right'}") \
+                    .classes("text-lg font-semibold")
+            else:
+                ui.label(f"Move the {camera} clock {timeshift.fmt_shift(found['seconds'])}?").classes("text-lg font-semibold")
+            ui.label(f"{found['shots']} of its {found['of']} shots look like another camera's shots taken "
+                     f"{timeshift.shift_words(found['seconds'])} by that camera's clock"
+                     + (" (matched by the AI's picture understanding)." if found["how"] == "ai"
+                        else " (matched by colours and layout; after Analyse the app can match better).")) \
+                .classes("text-sm")
+            ui.label("Same moment? Left: this camera · right: the other camera").classes("text-xs text-gray-500 mt-1")
+            for mine, other in found["examples"][:4]:
+                with ui.row().classes("gap-2 items-center"):
+                    for path in (mine, other):
+                        if thumbs.get(path):
+                            ui.image(data_url(thumbs[path])).props("fit=contain") \
+                                .style("width:200px;height:120px").classes("rounded bg-gray-800")
+                        else:
+                            ui.label(Path(path).name).classes("text-xs w-48")
+            with ui.row().classes("justify-end w-full"):
+                ui.button("Not right", on_click=dialog.close).props("flat")
+
+                async def use() -> None:
+                    dialog.close()
+                    await self.apply_shift(camera, found["seconds"])
+
+                ui.button(f"Use {timeshift.fmt_shift(found['seconds'])}", icon="check", on_click=use).props("unelevated")
+        dialog.open()
+
     def update_sort_counts(self) -> None:
         """The counts in Step 1 and the floating Remove bar, after ticking or unticking."""
         total = len(self.all_items)
@@ -559,6 +661,7 @@ class Page:
         shown = self.choose_shown()
         chosen = len(self.items)
         self.sort_out_card()
+        self.camera_clocks_card()
         with ui.row().classes("w-full items-center gap-3"):
             ui.label("Step 2:").classes("text-lg font-semibold")
             ui.button(

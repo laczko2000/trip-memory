@@ -640,3 +640,29 @@ def test_a_locked_moment_is_always_in_the_cut_exactly(tmp_path, monkeypatch):
         assert b <= 12.0 + 1e-6 or a >= 15.0 - 1e-6 or (abs(a - 12.0) < 0.15 and abs(b - 15.0) < 0.15)
     trip.change_lock(path, 0)
     assert trip.locks(path) == []
+
+
+def test_shifting_a_cameras_clock_moves_all_its_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    for name, when, make, model in [("IMG_1.jpg", "2025:07:03 10:00:00", "Apple", "iPhone 15 Pro"),
+                                    ("IMG_2.jpg", "2025:07:03 12:00:00", "Apple", "iPhone 15 Pro"),
+                                    ("GOPR0001.jpg", "2025:07:03 09:00:00", "GoPro", "HERO11 Black")]:
+        exif = Image.Exif()
+        exif[306], exif[271], exif[272] = when, make, model
+        Image.new("RGB", (400, 300), "red").save(trip_dir / name, exif=exif)
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    cams = {c["camera"]: c["count"] for c in trip.cameras()}
+    assert cams == {"iPhone 15 Pro": 2, "GoPro": 1}
+    order = lambda: [Path(i["path"]).name for i in trip.items()]
+    assert order()[0] == "GOPR0001.jpg"
+    assert trip.set_time_shift("GoPro", 2 * 3600 + 30 * 60) == 1
+    assert order() == ["IMG_1.jpg", "GOPR0001.jpg", "IMG_2.jpg"]
+    trip.prepare()  # opening the trip again keeps the shift, from the file's own time
+    gopro = next(i for i in trip.items() if i["path"].endswith("GOPR0001.jpg"))
+    assert gopro["taken_at"].startswith("2025-07-03T11:30") and gopro["taken_orig"].startswith("2025-07-03T09:00")
+    trip.set_time_shift("GoPro", 0)
+    assert order()[0] == "GOPR0001.jpg"

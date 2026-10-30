@@ -29,7 +29,7 @@ from PIL import Image, ImageOps
 
 from .faces import FaceFinder, group_faces
 from .media import MediaItem, scan_folder
-from . import autoedit, director, moments, motion, musicmood, stories, themes
+from . import autoedit, director, moments, motion, musicmood, stories, themes, timeshift
 from .scenes import SceneTagger, mean_vector
 from .tags import TAG_GROUP, Tagger, group_name, look_alike_groups, people_tag, story_subject
 from .tools import ffmpeg_paths, probe
@@ -182,7 +182,7 @@ class Trip:
             "effects TEXT", "effects_why TEXT", "ai_caption TEXT", "ai_score INTEGER", "removed INTEGER DEFAULT 0", "features BLOB",
             "plan_role TEXT", "plan_pos REAL", "title_text TEXT", "title_sub TEXT", "title_style TEXT", "title_where TEXT",
             "focus_x REAL", "keep_start REAL", "keep_end REAL", "part_of TEXT",
-            "theme TEXT", "theme_auto TEXT", "theme_sure REAL", "locks TEXT",
+            "theme TEXT", "theme_auto TEXT", "theme_sure REAL", "locks TEXT", "camera TEXT", "taken_orig TEXT",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
@@ -1329,6 +1329,8 @@ class Trip:
         found, problems = scan_folder(self.folder)
         p.notes.extend(problems)
         self._store_found(found)
+        self._fill_cameras(found)
+        self._apply_time_shifts()
 
         p.message = "Finding place names…"
         notify()
@@ -2013,6 +2015,96 @@ class Trip:
     def set_song(self, path: str | None) -> None:
         self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('song', ?)", (path or "",))
 
+    # ---------- Camera clocks ----------
+
+    def _fill_cameras(self, found: list[MediaItem]) -> None:
+        """Files stored by an older version don't know their camera or their own time yet: the scan just read both."""
+        with self._lock:
+            self.db.executemany("UPDATE items SET camera = ? WHERE path = ? AND camera IS NULL",
+                                [(it.camera or timeshift.OTHER, str(it.path)) for it in found])
+            # Before any shift, the time stored is the file's own: keep it, so a shift can always be undone.
+            self.db.execute("UPDATE items SET taken_orig = taken_at WHERE taken_orig IS NULL")
+            self.db.execute("UPDATE items SET camera = (SELECT p.camera FROM items p WHERE p.path = items.part_of) "
+                            "WHERE camera IS NULL AND part_of IS NOT NULL")
+            self.db.commit()
+
+    def time_shifts(self) -> dict[str, float]:
+        """{camera: seconds its clock is moved} (later is positive)."""
+        rows = self.query("SELECT value FROM meta WHERE key = 'time_shifts'")
+        try:
+            return {k: float(v) for k, v in json.loads(rows[0]["value"]).items()} if rows else {}
+        except (ValueError, AttributeError):
+            return {}
+
+    def _apply_time_shifts(self) -> None:
+        shifts = self.time_shifts()
+        changes = []
+        for r in self.query("SELECT path, camera, taken_at, taken_orig FROM items WHERE taken_orig IS NOT NULL"):
+            when = datetime.fromisoformat(r["taken_orig"]) + timedelta(seconds=shifts.get(r["camera"] or timeshift.OTHER, 0))
+            if when.isoformat() != r["taken_at"]:
+                changes.append((when.isoformat(), r["path"]))
+        if changes:
+            with self._lock:
+                self.db.executemany("UPDATE items SET taken_at = ? WHERE path = ?", changes)
+                self.db.commit()
+
+    def cameras(self) -> list[dict]:
+        """Each camera in the trip: {camera, count, videos, photos, first, last (its own clock), shift}."""
+        shifts = self.time_shifts()
+        out = []
+        for r in self.query("SELECT COALESCE(camera, ?) AS camera, COUNT(*) AS count, SUM(kind = 'video') AS videos, "
+                            "MIN(taken_orig) AS first, MAX(taken_orig) AS last FROM items "
+                            "WHERE part_of IS NULL AND removed = 0 GROUP BY COALESCE(camera, ?) ORDER BY count DESC",
+                            (timeshift.OTHER, timeshift.OTHER)):
+            out.append({**dict(r), "photos": r["count"] - (r["videos"] or 0), "shift": shifts.get(r["camera"], 0.0)})
+        return out
+
+    def set_time_shift(self, camera: str, seconds: float) -> int:
+        """Move every file of this camera by seconds (replacing an earlier shift), then group the stories again.
+        Returns how many files moved."""
+        shifts = self.time_shifts()
+        if abs(shifts.get(camera, 0.0) - seconds) < 0.5:
+            return 0
+        self.checkpoint(f"changing the {camera} clock")
+        if seconds:
+            shifts[camera] = float(seconds)
+        else:
+            shifts.pop(camera, None)
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('time_shifts', ?)", (json.dumps(shifts),))
+        self._apply_time_shifts()
+        self._group_stories()
+        return self.query("SELECT COUNT(*) AS n FROM items WHERE part_of IS NULL AND COALESCE(camera, ?) = ?",
+                          (timeshift.OTHER, camera))[0]["n"]
+
+    def suggest_time_shift(self, camera: str) -> dict | None:
+        """What this camera's clock is probably off by, from its shots that look like other cameras' shots of the
+        same moment (timeshift.suggest). Uses the AI's picture understanding (CLIP, after Analyse) where both shots
+        have it, else their colours and layout. Adds "how": "ai" or "colours". None if nothing agrees."""
+        rows = [dict(r) for r in self.query(
+            "SELECT path, camera, taken_orig, clip, features FROM items WHERE part_of IS NULL AND removed = 0 "
+            "AND taken_orig IS NOT NULL")]
+        shifts = self.time_shifts()
+
+        def when(r):  # other cameras at their (already corrected) time, this one on its own clock
+            t = datetime.fromisoformat(r["taken_orig"]).timestamp()
+            return t if (r["camera"] or timeshift.OTHER) == camera else t + shifts.get(r["camera"] or timeshift.OTHER, 0)
+
+        mine = [r for r in rows if (r["camera"] or timeshift.OTHER) == camera]
+        others = [r for r in rows if (r["camera"] or timeshift.OTHER) != camera]
+        how = "ai"
+        a = [(r, np.frombuffer(r["clip"], dtype=np.float32)) for r in mine if r["clip"] is not None]
+        b = [(r, np.frombuffer(r["clip"], dtype=np.float32)) for r in others if r["clip"] is not None]
+        if len(a) < 2 or len(b) < 2:
+            how = "colours"
+            a = [(r, v) for r in mine if (v := _look_vector(r["features"])) is not None]
+            b = [(r, v) for r in others if (v := _look_vector(r["features"])) is not None]
+        found = timeshift.suggest([(when(r), v) for r, v in a], [(when(r), v) for r, v in b],
+                                  least=0.75 if how == "ai" else 0.0)
+        if found:
+            found["how"] = how
+            found["examples"] = [(a[i][0]["path"], b[j][0]["path"]) for i, j, _ in found["pairs"]]
+        return found
+
     def own_length(self) -> float | None:
         """The length you typed on the Storyboard ("Use a different length"), or None: as long as your track."""
         rows = self.query("SELECT value FROM meta WHERE key = 'own_length'")
@@ -2189,8 +2281,10 @@ class Trip:
                     self.db.execute("DELETE FROM faces WHERE path = ?", (path,))
                     self.db.execute("DELETE FROM items WHERE path = ?", (path,))
                 self.db.execute(
-                    "INSERT INTO items (path, kind, taken_at, duration, has_audio, hdr, mtime, lat, lon) VALUES (?,?,?,?,?,?,?,?,?)",
-                    (path, item.kind, item.taken_at.isoformat(), item.duration, int(item.has_audio), int(item.hdr), mtime, item.lat, item.lon),
+                    "INSERT INTO items (path, kind, taken_at, taken_orig, duration, has_audio, hdr, mtime, lat, lon, camera) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (path, item.kind, item.taken_at.isoformat(), item.taken_at.isoformat(), item.duration, int(item.has_audio),
+                     int(item.hdr), mtime, item.lat, item.lon, item.camera or timeshift.OTHER),
                 )
             for path in set(known) - present:
                 self.db.execute("DELETE FROM faces WHERE path = ?", (path,))
@@ -2314,6 +2408,23 @@ class Trip:
                     group = created[group]
                 self.db.execute("UPDATE faces SET person_id = ? WHERE id = ?", (group, row["id"]))
             self.db.commit()
+
+
+def _look_vector(blob: bytes | None) -> np.ndarray | None:
+    """A shot's colours and layout as one vector (for a video: its middle frame), for timeshift.suggest
+    when the AI has not looked at the shots yet."""
+    if blob is None:
+        return None
+    try:
+        look = stories._unpack(blob)
+    except (OSError, ValueError, KeyError):
+        return None
+    if "frames" in look:
+        if not look["frames"]:
+            return None
+        look = look["frames"][len(look["frames"]) // 2]
+    colours, layout = np.sqrt(np.maximum(look["colours"], 0)), look["layout"]
+    return np.concatenate([colours / (np.linalg.norm(colours) + 1e-9), layout / (np.linalg.norm(layout) + 1e-9)])
 
 
 def _guess_places(rows: list[dict]) -> None:

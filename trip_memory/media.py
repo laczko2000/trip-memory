@@ -10,6 +10,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from . import timeshift
 from .tools import FFmpegError, probe
 
 try:
@@ -26,6 +27,8 @@ EXIF_IFD = 0x8769
 DATETIME_ORIGINAL = 36867
 OFFSET_TIME_ORIGINAL = 36881
 DATETIME = 306
+MAKE = 271
+MODEL = 272
 GPS_IFD = 0x8825
 ISO6709 = re.compile(r"([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)")
 
@@ -56,6 +59,7 @@ class MediaItem:
     title: str | None = None  # for kind "title": the chapter card text, two lines split by "\n"
     overlay: dict | None = None  # text over the shot: {"text", "sub", "style", "where"} (see titles.py)
     focus: float | None = None  # where the people are, across the picture (0 left .. 1 right), for a phone video
+    camera: str | None = None  # which camera took it, e.g. "iPhone 15 Pro" or "GoPro" (see timeshift.py)
 
     @property
     def name(self) -> str:
@@ -94,9 +98,11 @@ def _gps_degrees(value, ref) -> float | None:
 def read_photo(path: Path) -> MediaItem:
     taken = None
     lat = lon = None
+    make = model = None
     try:
         with Image.open(path) as img:
             exif = img.getexif()
+            make, model = exif.get(MAKE), exif.get(MODEL)
             sub = exif.get_ifd(EXIF_IFD)
             raw = sub.get(DATETIME_ORIGINAL) or exif.get(DATETIME)
             if raw:
@@ -112,7 +118,8 @@ def read_photo(path: Path) -> MediaItem:
         pass
     if lat == 0 and lon == 0:  # cameras without a GPS fix sometimes write 0,0
         lat = lon = None
-    return MediaItem(path=path, kind="photo", taken_at=taken or _file_time(path), lat=lat, lon=lon)
+    return MediaItem(path=path, kind="photo", taken_at=taken or _file_time(path), lat=lat, lon=lon,
+                     camera=timeshift.camera_from_exif(str(make) if make else None, str(model) if model else None, path))
 
 
 def photo_taken_at(path: Path) -> datetime:
@@ -150,6 +157,7 @@ def read_video(path: Path) -> MediaItem:
         hdr=video.get("color_transfer") in ("arib-std-b67", "smpte2084"),
         lat=lat,
         lon=lon,
+        camera=timeshift.camera_from_probe(info, path),
     )
 
 
