@@ -140,6 +140,7 @@ class Page:
         self.media_route: str | None = None
         self.auto_length: object = None
         self.auto_limits = AutoLimits(**load_settings().get("limits", {}))
+        self.library_columns = load_settings().get("library_columns", 3)  # pictures in a row in the Library
         self.look_previews: dict[tuple[str, str], str] = {}  # (picture, look) -> a small preview
         self.song_maps: dict = {}
         self.track_lengths: dict = {}
@@ -919,14 +920,24 @@ class Page:
             return
         shown = self.shown()
         in_video = sum(it["included"] for it in self.items)
-        ui.label(f"Showing {len(shown)} of {len(self.items)} · {in_video} in the video").classes("text-sm text-gray-500")
+        with ui.row().classes("w-full items-center"):
+            ui.label(f"Showing {len(shown)} of {len(self.items)} · {in_video} in the video").classes("text-sm text-gray-500")
+            ui.space()
+            ui.label("In a row:").classes("text-sm text-gray-600")
+            ui.toggle({2: "2", 3: "3", 4: "4"}, value=self.library_columns,
+                      on_change=lambda e: self.set_library_columns(e.value)).props("dense no-caps")
         pages = max(1, -(-len(shown) // PAGE_SIZE))
         self.page = min(self.page, pages)
-        with ui.grid().classes("w-full gap-3 grid-cols-2 sm:grid-cols-3 md:grid-cols-4"):
+        with ui.grid().classes("w-full gap-3").style(f"grid-template-columns:repeat({self.library_columns},minmax(0,1fr))"):
             for it in shown[(self.page - 1) * PAGE_SIZE : self.page * PAGE_SIZE]:
                 self.card(it)
         if pages > 1:
             ui.pagination(1, pages, direction_links=True, value=self.page, on_change=lambda e: self.go_to_page(e.value))
+
+    def set_library_columns(self, columns: int) -> None:
+        self.library_columns = columns
+        save_settings(library_columns=columns)
+        self.gallery.refresh()
 
     def go_to_page(self, page: int) -> None:
         self.page = page
@@ -935,7 +946,8 @@ class Page:
     def card(self, it: dict) -> None:
         with ui.card().tight().classes("w-full" + ("" if it["included"] else " opacity-50")) as card:
             if it["thumb"]:
-                self.preview(it, "width:100%;height:150px", start=self.hover_start(it))
+                height = {2: 320, 3: 220}.get(self.library_columns, 150)  # fewer in a row: bigger pictures
+                self.preview(it, f"width:100%;height:{height}px", start=self.hover_start(it))
             else:
                 ui.label("Analysing…").classes("w-full thumb flex items-center justify-center bg-gray-100 text-gray-400")
             with ui.column().classes("p-2 gap-1 w-full"):
