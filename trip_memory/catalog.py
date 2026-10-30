@@ -1426,13 +1426,14 @@ class Trip:
         if self._stopped(mine):
             raise director.Stopped("Stopped: nothing was changed.")
         self.checkpoint("the AI's answer to your wish")
-        # The length: as the app read it from your words (the AI is not trusted with numbers), else the AI's.
+        # The length: only as the app read it from your words (the AI is not trusted with numbers). Nothing said:
+        # the video lasts as long as your track (trim the song in Music & audio to choose it).
         said = length or lengths.read_length(wish)
         if said and "ask" not in said:
             answer["length"] = said
             answer["length_seconds"] = round(said["seconds"]) if "seconds" in said else 0
         else:
-            answer["length"] = {"seconds": answer["length_seconds"]} if answer["length_seconds"] else None
+            answer["length"], answer["length_seconds"] = None, 0
         saved = {"wish": " ".join(wish.split()), **answer, "used": 0,
                  "names": {stories[n - 1]["key"]: name for n, name in answer["names"].items()},
                  "versions": [{**v, "stories": [stories[n - 1]["key"] for n in v["stories"]],

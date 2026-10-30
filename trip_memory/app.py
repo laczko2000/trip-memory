@@ -142,6 +142,7 @@ class Page:
         self.auto_limits = AutoLimits(**load_settings().get("limits", {}))
         self.look_previews: dict[tuple[str, str], str] = {}  # (picture, look) -> a small preview
         self.song_maps: dict = {}
+        self.track_lengths: dict = {}
         self.dirty = False
         self.last_refresh = 0.0
         self.filters = {"day": ALL, "place": ALL, "scene": ALL, "tag": ALL, "look": ALL, "person": ALL, "show": ALL}
@@ -1131,6 +1132,7 @@ class Page:
         ui.button("Snap to the music", icon="center_focus_strong", on_click=self.snap_taps).props("outline")
         self.saved_pins = saved["taps"]
         self.pin_summary(music, saved["taps"])
+        self.video_length_line(music)
         self.music_reading(music)
         ui.timer(0.2, lambda: ui.run_javascript(f"tmTapInit({json.dumps(saved['taps'])}, 0, {json.dumps(can_trim)}); "
                                                 f"tm.tap.song = {json.dumps(music)}"), once=True)
@@ -1996,16 +1998,49 @@ class Page:
         except Exception:
             return "song"
 
+    def track_seconds(self, music: str | None) -> float | None:
+        """How long the track is (the part you trimmed, if you did): the video's length unless you name another."""
+        if not music:
+            return None
+        song = self.song_maps.get(music)
+        if song:
+            return song.duration
+        if music not in self.track_lengths:
+            try:
+                self.track_lengths[music] = song_length(music)
+            except Exception:
+                return None
+        return self.track_lengths[music]
+
+    def track_words(self, music: str) -> str:
+        seconds = self.track_seconds(music)
+        what = "your trimmed track" if song_taps.trimmed_from(music, app_dir() / "music-taps") else "the whole song"
+        return f"{fmt_length(seconds)}, {what}" if seconds else what
+
     def length_words(self) -> str:
         target = self.length_now()
         if target == "song":
-            return "as long as the song"
+            music = self.music_path()
+            return f"{self.track_words(music)}" if music else "as long as the song"
         wish = self.trip.wish() if self.trip else None
         length = wish.get("length") if wish else self.auto_length
         share = ""
         if isinstance(length, dict) and "song" in length:
             share = f" ({as_words(length)})" if self.music_path() else f" (for now: {as_words(length)} once you choose one)"
+        elif not length:  # no song yet
+            share = " for now (choose a song in Music & audio: the video then lasts as long as its track)"
+        elif self.music_path():
+            share = f" (your words; the track is {fmt_length(self.track_seconds(self.music_path()) or 0)})"
         return f"{fmt_length(float(target))}{share}"
+
+    def video_length_line(self, music: str) -> None:
+        """In Music & audio: the track sets how long the video is, unless your wish or Auto-edit names a length."""
+        own = self.trip.wish().get("length") if self.trip and self.trip.wish() else self.auto_length
+        text = f"🎬 Video length: {self.length_words()}"
+        if not own:
+            text += ". Trim the song above to make the video shorter or longer." if not song_taps.trimmed_from(
+                music, app_dir() / "music-taps") else ". Trim again to change it."
+        ui.label(text).classes("font-medium text-green-800 mt-2")
 
     def length_field(self, on_set) -> None:
         """Type any length: 1:20, 90 s, 2 and a half minutes, the whole song, half the song."""

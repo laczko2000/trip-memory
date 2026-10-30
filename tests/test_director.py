@@ -229,7 +229,7 @@ def test_type_the_video_you_want(trip):
     assert '"a lively minute, beach only"' in ai.prompts[0] and "Anna" in ai.prompts[0] and "1.6 minutes" in ai.prompts[0]
     assert [Path(k).name for k in wish["stories"]] == ["c.jpg", "a.jpg"] and wish["name"] == "Beach only"
     assert wish["people"] == ["Anna"] and wish["focus"] == ["beaches"] and len(wish["versions"]) == 2
-    assert wish["length_seconds"] == 60 and wish["pace"] == "lively" and not wish["slow_motion"]
+    assert wish["length_seconds"] == 0 and wish["pace"] == "lively"  # no length the app can read: as long as the track and not wish["slow_motion"]
     assert trip.title_settings()["trip_title"] == "Sun and sand" and trip.look() == "summer"
     assert trip.video_size() == "phone"  # "Instagram" means an upright video
     stories = trip.stories()
@@ -344,5 +344,5 @@ def test_the_length_you_wrote_wins_over_the_ais(trip):
     assert trip.wish()["length_seconds"] == 72
     trip.set_wish_length({"seconds": 95})
     assert trip.wish()["length"] == {"seconds": 95}
-    trip.make_wish(FakeWisher(), "beach only", 200.0)  # nothing said: the AI's length
-    assert trip.wish()["length"] == {"seconds": 60}
+    trip.make_wish(FakeWisher(), "beach only", 200.0)  # nothing said: as long as your track, whatever the AI says
+    assert trip.wish()["length"] is None and trip.wish()["length_seconds"] == 0

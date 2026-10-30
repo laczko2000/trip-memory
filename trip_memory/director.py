@@ -503,7 +503,8 @@ def wish_prompt(wish: str, stories: list[dict], people: list[str], song_seconds:
         lines.append(f"Story {n}: \"{s['name']}\" · {s['when']}" + (f" · {s['place']}" if s.get("place") else "")
                      + f" · {s['count']} clips" + (f" · with {', '.join(s['people'])}" if s.get("people") else ""))
         lines.extend(f"  - {c}" for c in [c for c in s["captions"] if c][:6])
-    song = (f"The chosen song lasts {song_seconds / 60:.1f} minutes.\n" if song_seconds
+    song = (f"The chosen song lasts {song_seconds / 60:.1f} minutes; unless the wish names a length, the video lasts as "
+            f"long as the song.\n" if song_seconds
             else "No song is chosen yet.\n")
     if music:
         song += f"{music}\nUnless the wish says otherwise, let the pace of your versions suit the music.\n"
