@@ -747,7 +747,8 @@ class Page:
     def close_cut(self, cut: dict) -> None:
         cut["open"] = False
         if cut.get("box"):  # the Library picture plays silently again when you hover over it
-            ui.run_javascript(f"const v = document.querySelector('#{cut['box']} video'); if (v) {{ v.muted = true; v.pause(); }}")
+            ui.run_javascript(f"const b = document.getElementById('{cut['box']}'); if (b) {{ delete b.dataset.scrub; "
+                              f"const v = b.querySelector('video'); if (v) {{ v.muted = true; v.pause(); }} }}")
         cut["area"].clear()
         if cut.get("wide"):
             cut["tile"].classes(remove="w-96", add="w-36")
@@ -763,10 +764,18 @@ class Page:
         box = cut.get("box") or self.preview(it, "width:100%;height:210px", start, end, view="cut", sound=True)
         # The clip as a row of pictures (made while you look); the parts you cut off are greyed out.
         shade = "position:absolute;top:0;bottom:0;background:rgba(15,23,42,.65)"
-        ui.html(f'<div style="position:relative;height:40px;margin:4px 10px 0;border-radius:4px;overflow:hidden;'
-                f'background:#e2e8f0"><img id="{box}-strip" style="width:100%;height:100%;object-fit:fill;display:none">'
-                f'<div id="{box}-l" style="{shade};left:0;width:0"></div><div id="{box}-r" style="{shade};right:0;width:0"></div>'
-                f'</div>', sanitize=False).classes("w-full")
+        # Move the mouse along it and the video follows; click to play from there.
+        ui.html(f'<div data-scrub-for="{box}" style="position:relative;height:40px;margin:4px 10px 0;border-radius:4px;'
+                f'overflow:hidden;background:#e2e8f0;cursor:col-resize">'
+                f'<img id="{box}-strip" style="width:100%;height:100%;object-fit:fill;display:none;pointer-events:none">'
+                f'<div id="{box}-l" style="{shade};left:0;width:0;pointer-events:none"></div>'
+                f'<div id="{box}-r" style="{shade};right:0;width:0;pointer-events:none"></div>'
+                f'<div id="{box}-head" style="position:absolute;top:0;bottom:0;width:2px;background:#facc15;display:none;'
+                f'pointer-events:none"></div></div>', sanitize=False).classes("w-full")
+        # While you cut, the picture above follows the mouse too (instead of playing by itself).
+        ui.timer(0.1, lambda: ui.run_javascript(
+            f"const b = document.getElementById('{box}'); if (b) {{ b.dataset.scrub = '1'; "
+            f"b.dataset.full0 = {start}; b.dataset.full1 = {end}; }}"), once=True)
         ui.range(min=start, max=end, step=0.1, value=dict(part),
                  on_change=lambda e: moved(e.value["min"], e.value["max"])).props("color=green dense").classes("w-full px-2")
         label = ui.label().classes("text-xs font-medium text-green-800 px-2")
@@ -3003,16 +3012,47 @@ function tmPlayPart(id, start, end, from, sound) {
   if (sound) tmVideo(box).muted = false;  // cutting a clip: hear it
   tmPlayFrom(box, from);
 }
+// Cutting a clip: the mouse along the picture strip (or across the picture) moves the video to that moment.
+function tmScrubAt(box, frac, play) {
+  const a = parseFloat(box.dataset.full0), b = parseFloat(box.dataset.full1);
+  const t = a + Math.min(1, Math.max(0, frac)) * (b - a);
+  const head = document.getElementById(box.id + '-head');
+  if (head) { head.style.display = 'block'; head.style.left = (100 * Math.min(1, Math.max(0, frac))) + '%'; }
+  if (play) { tmPlayPart(box.id, t, b, t, true); return; }
+  if (tmPlaying && tmPlaying !== box) tmStop(tmPlaying);
+  tmPlaying = box;
+  const v = tmVideo(box);
+  v.pause();
+  if (v.readyState >= 1) v.currentTime = t; else v.addEventListener('loadedmetadata', () => { v.currentTime = t; }, {once: true});
+}
+function tmScrubTarget(e) {
+  const strip = e.target.closest && e.target.closest('[data-scrub-for]');
+  if (strip) return [document.getElementById(strip.dataset.scrubFor), strip];
+  const box = e.target.closest && e.target.closest('.tm-hover');
+  return box && box.dataset.scrub === '1' ? [box, box] : [null, null];
+}
+document.addEventListener('mousemove', (e) => {
+  const [box, over] = tmScrubTarget(e);
+  if (!box) return;
+  const r = over.getBoundingClientRect();
+  tmScrubAt(box, (e.clientX - r.left) / r.width, false);
+});
+document.addEventListener('click', (e) => {
+  const [box, over] = tmScrubTarget(e);
+  if (!box) return;
+  const r = over.getBoundingClientRect();
+  tmScrubAt(box, (e.clientX - r.left) / r.width, true);
+});
 document.addEventListener('mouseenter', (e) => {
   const box = e.target.closest && e.target.closest('.tm-hover');
-  if (!box || e.target !== box) return;
+  if (!box || e.target !== box || box.dataset.scrub === '1') return;
   if (tmPlaying && tmPlaying !== box) tmStop(tmPlaying);
   tmPlaying = box;
   tmPlayFrom(box, parseFloat(box.dataset.start));
 }, true);
 document.addEventListener('mouseleave', (e) => {
   const box = e.target.closest && e.target.closest('.tm-hover');
-  if (!box || e.target !== box) return;
+  if (!box || e.target !== box || box.dataset.scrub === '1') return;
   tmStop(box);
 }, true);
 // Choose files is one long list: when you scroll near its bottom, press "Loading more" for you.
