@@ -709,6 +709,7 @@ def fill_slots(slots: list[Slot], candidates: list[dict], limits: Limits) -> lis
     if not n_slots or not n:
         return []
     paces = [pace_of(c)[0] for c in candidates]
+    wants = [c.get("pace_want") for c in candidates]
     values = [shot_value(c) + (4.0 if c.get("must") else 0.0) + 0.3 * min(3.0, c.get("chapter_fit") or 0.0)
               for c in candidates]
     # Chapters: a shot outside the part of the video its chapter should fill costs points, the further the more.
@@ -739,6 +740,8 @@ def fill_slots(slots: list[Slot], candidates: list[dict], limits: Limits) -> lis
             elif slot.seconds > limits.max_photo * 1.03 + 0.05:
                 continue
             fit = 1.0 - abs(slot.energy - paces[i])
+            if wants[i] is not None:  # a story part that should feel calm or lively: shots of that pace fit better
+                fit = 0.5 * fit + 0.5 * (1.0 - abs(wants[i] - paces[i]))
             score[j, i] = best_prev + 3.0 + 0.5 * values[i] + 2.0 * fit - off[i]
             back[j, i] = best_idx
     filled = [j for j in range(n_slots) if score[j].max() > neg / 2]  # always the first few slots

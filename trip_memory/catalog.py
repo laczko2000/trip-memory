@@ -669,7 +669,7 @@ class Trip:
             if kept_part(r):  # a clip you cut: Auto-edit only sees the part you kept
                 start, end = kept_part(r)
                 r = r | {"duration": end - start, "keep_offset": start, "full_duration": r["duration"]}
-            pool.append(r | {"chapter": chapter})
+            pool.append(r | {"chapter": chapter, "pace_want": chapters[chapter].get("pace")})
         return pool
 
     # ---------- themes ----------

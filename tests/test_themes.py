@@ -63,3 +63,57 @@ def test_a_first_guess_from_tags():
     assert themes.by_tags(["Eating & drinking"], None) == "Food & drink"
     assert themes.by_tags([], "Sea & boats") == "Boat"
     assert themes.by_tags(["Daylight"], None) == themes.OTHER
+
+
+def test_my_story_puts_the_themes_in_its_parts():
+    rows = [_row(n, "Water sports", people=["Laszlo"]) for n in range(6)] + \
+        [_row(10 + n, "Boat") for n in range(4)] + [_row(20 + n, "Food & drink") for n in range(2)]
+    for n, r in enumerate(rows[:6]):
+        r |= {"kind": "video", "motion_action": 0.9 if n in (1, 4, 5) else 0.1}
+    for r in rows[6:]:
+        r["kind"] = "photo"
+    story = {"parts": [{"name": "Calm start", "pace": "calm", "entries": [{"key": "Boat|", "pick": "all"}]},
+                       {"name": "Warm up", "pace": "medium",
+                        "entries": [{"key": "Water sports|", "pick": "early"}]},
+                       {"name": "Big jumps", "pace": "lively",
+                        "entries": [{"key": "Water sports|", "pick": "action"}]}]}
+    chapters, where = themes.chapters_for({"order": themes.STORY, "story": story, "finale": False}, rows)
+    assert [c["pace"] for c in chapters] == [0.2, 0.55, 0.9]
+    assert where[6:10] == [0] * 4  # the boat opens
+    assert where[10:] == [None, None]  # food isn't in the story
+    assert [where[i] for i in range(6)] == [1, 1, 1, None, 2, 2]  # first half, then the exciting rest
+    # No story made yet: as it happened.
+    chapters, where = themes.chapters_for({"order": themes.STORY, "finale": False}, rows)
+    assert len(chapters) == 1 and set(where) == {0}
+
+
+def test_without_an_ai_the_story_follows_the_themes_you_name():
+    blocks = [{"key": "Water sports|Laszlo", "activity": "Water sports", "person": "Laszlo"},
+              {"key": "Water sports|Anna", "activity": "Water sports", "person": "Anna"},
+              {"key": "Boat|", "activity": "Boat", "person": None},
+              {"key": "Food & drink|", "activity": "Food & drink", "person": None},
+              {"key": "Beach & sea|", "activity": "Beach & sea", "person": None}]
+    story = themes.story_from_words("Start with the boat, then everything else, and finish with Laszlo kitesurfing",
+                                    blocks)
+    keys = [[e["key"] for e in p["entries"]] for p in story["parts"]]
+    assert keys == [["Boat|"], ["Water sports|Anna", "Food & drink|", "Beach & sea|"], ["Water sports|Laszlo"]]
+    assert story["parts"][0]["pace"] == "calm" and story["parts"][-1]["pace"] == "lively"
+    assert not story["finale"]
+    assert themes.left_out(themes.story_from_words("food then the boat", blocks), blocks)[0]["key"] == \
+        "Water sports|Laszlo"
+
+
+def test_an_ai_story_is_cleaned_and_keyed():
+    from trip_memory import director
+
+    blocks = [{"key": "Boat|"}, {"key": "Food & drink|"}]
+    answer = {"title": " Sea  days ", "finale": True, "parts": [
+        {"name": "Open", "pace": "fast", "themes": [{"theme": 1, "pick": "all"}, {"theme": 9, "pick": "all"}]},
+        {"name": "", "pace": "calm", "themes": [{"theme": 2, "pick": "late"}, {"theme": 1, "pick": "all"}]},
+        {"name": "Empty", "pace": "calm", "themes": []}]}
+    story = themes.story_keys(director.clean_story(answer, 2), blocks)
+    assert story["title"] == "Sea days" and story["finale"]
+    assert story["parts"] == [
+        {"name": "Open", "pace": "medium", "entries": [{"key": "Boat|", "pick": "all"}]},
+        {"name": "Part 2", "pace": "calm", "entries": [{"key": "Food & drink|", "pick": "late"}]}]
+    assert "1. Boat" in director.story_prompt("boat first", [{"name": "Boat", "count": 4}])

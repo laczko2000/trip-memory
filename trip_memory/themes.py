@@ -124,8 +124,10 @@ def by_tags(tags: list[str], scene: str | None) -> str:
 
 # ---------- the storyline: blocks of themes in your order ----------
 
-TIME, THEME, DAY = "time", "theme", "day"
-ORDERS = {TIME: "As it happened", THEME: "By theme", DAY: "Day by day"}
+TIME, THEME, DAY, STORY = "time", "theme", "day", "story"
+ORDERS = {TIME: "As it happened", THEME: "By theme", DAY: "Day by day", STORY: "My story (AI) ✨"}
+PICKS = {"all": "all shots", "early": "first half", "late": "second half", "action": "most exciting half"}
+PACES = {"calm": 0.2, "medium": 0.55, "lively": 0.9}  # how lively the shots of a story part should be, 0..1
 
 
 def block_key(activity: str, person: str | None) -> str:
@@ -174,6 +176,14 @@ def chapters_for(storyline: dict, rows: list[dict]) -> tuple[list[dict], list[in
     on = [b["key"] for b in blocks if b["on"]]
     chapters: list[dict] = []
     where: list[int | None] = []
+    story = storyline.get("story") or {}
+    if order == STORY and not story.get("parts"):
+        order = TIME  # no story made yet: as it happened
+    if order == STORY:
+        chapters, where = _story_chapters(story, rows, split)
+        if storyline.get("finale", True):
+            chapters.append({"kind": "finale", "what": "Finale"})
+        return chapters, where
     if order == TIME:
         chapters.append({"kind": "theme", "what": "The whole trip"})
         where = [0 if block_of(r, split) in on else None for r in rows]
@@ -193,3 +203,123 @@ def chapters_for(storyline: dict, rows: list[dict]) -> tuple[list[dict], list[in
     if storyline.get("finale", True):
         chapters.append({"kind": "finale", "what": "Finale"})
     return chapters, where
+
+
+def _story_chapters(story: dict, rows: list[dict], split: set[str]) -> tuple[list[dict], list[int | None]]:
+    """My story: every theme of every part is a chapter, in the story's order. A theme's shots go to its first
+    entry that wants them ("early": the first half by time, "late": the second, "action": the most exciting half);
+    a theme can come back later in the story with the shots not used yet."""
+    from .autoedit import excitement
+
+    members: dict[str, list[int]] = {}
+    for i, r in enumerate(rows):
+        members.setdefault(block_of(r, split), []).append(i)
+    for k in members:
+        members[k].sort(key=lambda i: rows[i]["taken_at"])
+    where: list[int | None] = [None] * len(rows)
+    chapters: list[dict] = []
+    for part in story.get("parts") or []:
+        for entry in part.get("entries") or []:
+            free = [i for i in members.get(entry["key"], []) if where[i] is None]
+            if not free:
+                continue
+            pick = entry.get("pick", "all")
+            # the half of the whole theme (claimed or not), so "early" and "late" split it fairly
+            whole = members[entry["key"]]
+            half = max(1, (len(whole) + 1) // 2)
+            if pick == "early":
+                want = set(whole[:half])
+            elif pick == "late":
+                want = set(whole[len(whole) - half:])
+            elif pick == "action":
+                want = set(sorted(whole, key=lambda i: excitement(rows[i]), reverse=True)[:half])
+            else:
+                want = set(whole)
+            take = [i for i in free if i in want]
+            if not take:
+                continue
+            for i in take:
+                where[i] = len(chapters)
+            chapters.append({"kind": "theme", "what": f"{part.get('name', '')}: {entry['key']}",
+                             "pace": PACES.get(part.get("pace"), None)})
+    return chapters, where
+
+
+FINALE_WORDS = ("finale", "highlights", "best bits", "best moments", "best shots", "most exciting")
+REST_WORDS = ("everything else", "the rest", "all the rest", "anything else", "other things")
+
+
+def story_from_words(idea: str, blocks: list[dict]) -> dict:
+    """Without an AI: the themes your words name, in the order you name them (one part each), then "the rest" where
+    you say it. blocks: {"key", "activity", "person"}. Same shape as an AI story (entries carry the block's key)."""
+    text = " " + " ".join(idea.lower().split()) + " "
+
+    def spots(b: dict) -> list[int]:
+        words = {b["activity"].lower()} | {w for w in b["activity"].lower().replace("&", " ").split() if len(w) > 3}
+        for line in b.get("describe") or DEFAULTS.get(b["activity"], ("", []))[1]:
+            words |= {w.strip(",.") for w in line.lower().split() if len(w) > 4 and w not in COMMON}
+        found = [m for w in words for m in [_find_word(text, w)] if m >= 0]
+        person = b.get("person")
+        if person and person != "everyone else":
+            near = _find_word(text, person.lower())
+            if near < 0:
+                return []  # a block of one person: only when you name them
+            found = [near] + found
+        return found
+
+    named = []
+    for b in blocks:
+        at = spots(b)
+        if at:
+            named.append((min(at), b))
+    named.sort(key=lambda t: t[0])
+    rest_at = min([text.find(w) for w in REST_WORDS if text.find(w) >= 0] or [-1])
+    parts = []
+    used = {b["key"] for _, b in named}
+    rest = [b for b in blocks if b["key"] not in used]
+    placed_rest = False
+    for at, b in named:
+        if rest_at >= 0 and not placed_rest and rest_at < at and rest:
+            parts.append({"name": "Everything else", "pace": "medium",
+                          "entries": [{"key": r["key"], "pick": "all"} for r in rest]})
+            placed_rest = True
+        parts.append({"name": block_name(b), "pace": "medium", "entries": [{"key": b["key"], "pick": "all"}]})
+    if rest_at >= 0 and not placed_rest and rest:
+        parts.append({"name": "Everything else", "pace": "medium",
+                      "entries": [{"key": r["key"], "pick": "all"} for r in rest]})
+    if parts:
+        parts[0]["pace"] = "calm"
+        if len(parts) > 2:
+            parts[-1]["pace"] = "lively"
+    return {"title": "Your story", "parts": parts, "finale": any(w in text for w in FINALE_WORDS)}
+
+
+COMMON = {"people", "person", "with", "relaxing", "photo", "close-up", "group", "friends", "busy", "narrow", "famous",
+          "trip", "view", "views", "riding", "small"}
+
+
+def _find_word(text: str, word: str) -> int:
+    """Where a word (or the start of one: "kite" finds "kitesurfing") is in the text, -1 if it isn't."""
+    import re
+
+    m = re.search(r"\b" + re.escape(word), text)
+    return m.start() if m else -1
+
+
+def block_name(b: dict) -> str:
+    return b["activity"] + (f" · {b['person']}" if b.get("person") else "")
+
+
+def story_keys(story: dict, blocks: list[dict]) -> dict:
+    """An AI answer (entries by block number) with each entry's block key, ready to save."""
+    out = dict(story)
+    out["parts"] = [dict(p, entries=[{"key": blocks[e["block"]]["key"], "pick": e["pick"]} for e in p["entries"]
+                                     if 0 <= e["block"] < len(blocks)]) for p in story.get("parts") or []]
+    out["parts"] = [p for p in out["parts"] if p["entries"]]
+    return out
+
+
+def left_out(story: dict, blocks: list[dict]) -> list[dict]:
+    """The blocks (that are on) your story doesn't use."""
+    used = {e["key"] for p in story.get("parts") or [] for e in p.get("entries") or []}
+    return [b for b in blocks if b.get("on", True) and b["key"] not in used]

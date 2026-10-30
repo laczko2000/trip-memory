@@ -1962,7 +1962,10 @@ class Page:
         themes.TIME: "The whole trip in the order it happened.",
         themes.THEME: "Your themes in the order you set; inside each one, the shots run in time order.",
         themes.DAY: "Day after day; inside each day, its themes in the order you set.",
+        themes.STORY: "Describe (or say) the story you want: the AI arranges your themes into parts, each with its own "
+                      "pace. Free with Ollama; without it, the app follows the order you name the themes in.",
     }
+    PACE_NAMES = {"calm": "🌙 Calm", "medium": "🚶 Medium", "lively": "⚡ Lively"}
 
     def storyline_card(self) -> None:
         """The one card at the top of the Storyboard: how the video is told, and the button that cuts it."""
@@ -1989,7 +1992,9 @@ class Page:
                 .props("no-caps unelevated toggle-color=primary color=white text-color=primary") \
                 .classes("border border-blue-600 rounded")
             ui.label(self.ORDER_WORDS[line["order"]]).classes("text-sm text-gray-600")
-            if line["order"] != themes.TIME:
+            if line["order"] == themes.STORY:
+                self.my_story_view(line)
+            elif line["order"] != themes.TIME:
                 self.storyline_blocks_view(line)
             with ui.row().classes("items-center gap-3"):
                 ui.switch("Finale: end with the most exciting shots", value=line["finale"],
@@ -2039,6 +2044,168 @@ class Page:
                             .props("flat dense no-caps size=sm").tooltip("One block for all the people again")
                     ui.switch(value=b["on"], on_change=lambda e, k=b["key"]: self.block_on(k, e.value)).props("dense") \
                         .tooltip("Off: these shots stay out of the video")
+
+    def my_story_view(self, line: dict) -> None:
+        blocks = [b for b in self.trip.storyline_blocks() if b["on"]]
+        if not blocks:
+            ui.label("No themes yet: open the Themes tab first.").classes("text-sm text-orange-700")
+            return
+        story = line.get("story") or {}
+        emoji = {a["name"]: a["emoji"] for a in self.trip.activities()}
+        names = {b["key"]: f"{emoji.get(b['activity'], '⭐')} {themes.block_name(b)}" for b in blocks}
+        self.wish_box = ui.textarea(
+            placeholder="e.g. Start calm with the boat trip, then the beach and food, build up to Laszlo's best "
+                        "kitesurfing jumps at the end", value=story.get("idea", "")) \
+            .props("outlined autogrow").classes("w-full")
+        with ui.row().classes("items-center gap-2"):
+            self.talk_button = ui.button("Speak your idea", icon="mic", on_click=lambda: self.toggle_voice(self.talk_button)) \
+                .props("outline no-caps")
+            ui.button("Make my story", icon="auto_awesome", on_click=lambda: self.make_story(False)).props("no-caps")
+            if story.get("parts"):
+                ui.button("Try another idea", icon="refresh", on_click=lambda: self.make_story(True)) \
+                    .props("flat no-caps")
+        if not story.get("parts"):
+            ui.label("No story yet: until you make one, the video runs as it happened.").classes("text-sm text-gray-500")
+            return
+        parts = story["parts"]
+        with ui.row().classes("items-center gap-2"):
+            ui.label(f"✨ {story.get('title') or 'Your story'}").classes("text-base font-semibold")
+            if story.get("by") == "words":
+                ui.label("(made from your words; start Ollama for a smarter story)").classes("text-xs text-gray-500")
+        for n, part in enumerate(parts):
+            with ui.card().classes("w-full p-2 gap-1 bg-white"):
+                with ui.row().classes("w-full items-center no-wrap gap-2"):
+                    ui.label(f"{n + 1}.").classes("font-semibold")
+                    title = ui.input(value=part["name"]).props("dense borderless").classes("font-medium flex-grow")
+                    title.on("blur", lambda e, n=n, f=title: self.edit_part(n, name=f.value))
+                    ui.select(self.PACE_NAMES, value=part["pace"],
+                              on_change=lambda e, n=n: self.edit_part(n, pace=e.value)).props("dense outlined") \
+                        .classes("w-32").tooltip("How lively this part feels")
+                    ui.button(icon="arrow_upward", on_click=lambda n=n: self.move_part(n, -1)) \
+                        .props("flat dense round size=sm").set_enabled(n > 0)
+                    ui.button(icon="arrow_downward", on_click=lambda n=n: self.move_part(n, 1)) \
+                        .props("flat dense round size=sm").set_enabled(n < len(parts) - 1)
+                    ui.button(icon="delete_outline", on_click=lambda n=n: self.remove_part(n)) \
+                        .props("flat dense round size=sm").tooltip("Leave this part out")
+                with ui.row().classes("w-full items-center gap-2"):
+                    for m, entry in enumerate(part["entries"]):
+                        if entry["key"] not in names:
+                            continue
+                        with ui.row().classes("items-center no-wrap gap-1 px-2 rounded-full bg-blue-50 border"):
+                            ui.label(names[entry["key"]]).classes("text-sm")
+                            ui.select(themes.PICKS, value=entry["pick"],
+                                      on_change=lambda e, n=n, m=m: self.edit_entry(n, m, pick=e.value)) \
+                                .props("dense borderless options-dense").classes("text-xs w-36")
+                            ui.button(icon="close", on_click=lambda n=n, m=m: self.remove_entry(n, m)) \
+                                .props("flat dense round size=xs")
+        missing = themes.left_out(story, blocks)
+        if missing:
+            with ui.row().classes("w-full items-center gap-2"):
+                ui.label("Not in the story:").classes("text-sm text-gray-600")
+                for b in missing:
+                    ui.button(f"+ {names[b['key']]} ({b['count']})", on_click=lambda k=b["key"]: self.add_entry(k)) \
+                        .props("flat dense no-caps size=sm").tooltip("Add to the last part")
+
+    def _story_blocks_info(self, blocks: list[dict]) -> list[dict]:
+        """What the AI hears about each theme: its name, how many shots, which days and where."""
+        line = self.trip.storyline()
+        rows = self.trip.theme_rows()
+        out = []
+        for b in blocks:
+            mine = [r for r in rows if themes.block_of(r, set(line["split"])) == b["key"]]
+            days = sorted({r["taken_at"][:10] for r in mine})
+            places = sorted({r["place"] for r in mine if r.get("place")})
+            out.append({"name": themes.block_name(b), "count": b["count"],
+                        "days": ", ".join(datetime.fromisoformat(d).strftime("%-d %b") for d in days[:4]),
+                        "places": ", ".join(places[:3])})
+        return out
+
+    async def make_story(self, again: bool) -> None:
+        if self.busy():
+            return
+        idea = (self.wish_box.value or "").strip() if self.wish_box is not None else ""
+        blocks = [b for b in self.trip.storyline_blocks() if b["on"]]
+        if not blocks:
+            return
+        old = self.trip.storyline().get("story") or {}
+        before = (old.get("before") or []) + ([old["title"]] if again and old.get("title") else []) if again else []
+        story = None
+        try:
+            ai = director.make(load_settings().get("ai", {}))
+        except director.DirectorError:
+            ai = None
+        if ai is not None:
+            self.ai_busy = True
+            self.ai_bar.set_visibility(True)
+            self.ai_label.text = "The AI is arranging your themes into a story…"
+            try:
+                prompt = director.story_prompt(idea, self._story_blocks_info(blocks), before[-4:] or None)
+                answer = await self.stoppable(ai.story, prompt)
+                if answer is None:
+                    return  # stopped: nothing changes
+                story = themes.story_keys(director.clean_story(answer, len(blocks)), blocks)
+                story["by"] = "ai"
+            except Exception as exc:  # Ollama not running, a bad answer...: your words still work
+                print(f"The AI couldn't make a story ({exc}); following your words instead.")
+            finally:
+                self.ai_busy = False
+                self.ai_bar.set_visibility(False)
+        if not story or not story.get("parts"):
+            if not idea:
+                ui.notify("Write or say your idea first (without the AI, the app follows the themes you name).",
+                          type="warning", multi_line=True)
+                return
+            story = themes.story_from_words(idea, blocks) | {"by": "words"}
+            if not story["parts"]:
+                ui.notify("None of your themes were named. Use their names, e.g. \"boat first, then food\".",
+                          type="warning", multi_line=True)
+                return
+            ui.notify("The AI isn't running (start Ollama for a smarter story), so the app followed the order you "
+                      "named your themes in.", type="info", multi_line=True)
+        else:
+            ui.notify(f"Your story is ready: {story['title'] or 'have a look'}. Change anything below, then Make the "
+                      "first cut.", type="positive", multi_line=True)
+        self.trip.checkpoint("story")
+        self.trip.set_storyline(story=story | {"idea": idea, "before": before}, finale=bool(story.get("finale")))
+        self.storyboard_view.refresh()
+
+    def _edit_story(self, change) -> None:
+        story = dict(self.trip.storyline().get("story") or {})
+        parts = [dict(p, entries=[dict(e) for e in p["entries"]]) for p in story.get("parts") or []]
+        change(parts)
+        story["parts"] = [p for p in parts if p["entries"]]
+        if self.wish_box is not None:
+            story["idea"] = (self.wish_box.value or "").strip()
+        self.trip.set_storyline(story=story)
+        self.storyboard_view.refresh()
+
+    def edit_part(self, n: int, **values) -> None:
+        story = self.trip.storyline().get("story") or {}
+        if all(story["parts"][n].get(k) == v for k, v in values.items()):
+            return
+        self._edit_story(lambda parts: parts[n].update(values))
+
+    def move_part(self, n: int, steps: int) -> None:
+        def change(parts):
+            if 0 <= n + steps < len(parts):
+                parts.insert(n + steps, parts.pop(n))
+        self._edit_story(change)
+
+    def remove_part(self, n: int) -> None:
+        self._edit_story(lambda parts: parts.pop(n))
+
+    def edit_entry(self, n: int, m: int, **values) -> None:
+        self._edit_story(lambda parts: parts[n]["entries"][m].update(values))
+
+    def remove_entry(self, n: int, m: int) -> None:
+        self._edit_story(lambda parts: parts[n]["entries"].pop(m))
+
+    def add_entry(self, key: str) -> None:
+        def change(parts):
+            if not parts:
+                parts.append({"name": "Part 1", "pace": "medium", "entries": []})
+            parts[-1]["entries"].append({"key": key, "pick": "all"})
+        self._edit_story(change)
 
     def _saved_blocks(self) -> list[dict]:
         return [{k: b[k] for k in ("key", "activity", "person", "on")} for b in self.trip.storyline_blocks()]

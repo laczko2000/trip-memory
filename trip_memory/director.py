@@ -212,6 +212,93 @@ WISH_SCHEMA = {
 }
 
 
+STORY_PROMPT = """You are the editor of a holiday memory video set to music. The person sorted every shot of the trip into
+themes (an activity, sometimes with the person in it). These are the themes, numbered:
+
+{blocks}
+
+The person describes the story they want the video to tell:
+
+"{idea}"
+{variation}
+Arrange the themes into the parts of that story, in the order they should play:
+- title: a short name for this story (2 to 5 words).
+- parts: 2 to 6 parts. Each has:
+  - name: a short name for the part (e.g. "Calm opening", "Building up", "Slow breather", "The best jumps").
+  - pace: "calm", "medium" or "lively": how this part should feel.
+  - themes: the theme numbers in this part, in order. Each theme number has a pick: "all" its shots, its "early"
+    shots (the first half, by time), its "late" shots (the second half) or its "action" shots (the most exciting
+    half). A theme may appear twice with different picks (e.g. "early" in one part, "action" in a later one).
+Use only the theme numbers above. Leave out themes the story doesn't want; if the story says "everything else" or
+"the rest", put the unmentioned themes there. Follow the order the person asks for.
+- finale: true if the story should end on the most exciting shots of the whole trip.
+Answer in JSON."""
+
+STORY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string"},
+        "parts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "pace": {"type": "string", "enum": ["calm", "medium", "lively"]},
+                    "themes": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {"theme": {"type": "integer"},
+                                           "pick": {"type": "string", "enum": ["all", "early", "late", "action"]}},
+                            "required": ["theme", "pick"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["name", "pace", "themes"],
+                "additionalProperties": False,
+            },
+        },
+        "finale": {"type": "boolean"},
+    },
+    "required": ["title", "parts", "finale"],
+    "additionalProperties": False,
+}
+
+
+def story_prompt(idea: str, blocks: list[dict], before: list[str] | None = None) -> str:
+    """blocks: {"name", "count", "days", "places"}. before: titles of stories already offered (for another idea)."""
+    lines = [f"{n}. {b['name']} · {b['count']} shots" + (f" · {b['days']}" if b.get("days") else "")
+             + (f" · {b['places']}" if b.get("places") else "") for n, b in enumerate(blocks, 1)]
+    variation = (f"\nYou already offered: {'; '.join(before)}. Make a clearly different story this time.\n"
+                 if before else "")
+    return STORY_PROMPT.format(blocks="\n".join(lines), idea=" ".join(idea.split())[:2000] or SURPRISE,
+                               variation=variation)
+
+
+def clean_story(answer: dict, count: int) -> dict:
+    """Keep valid theme numbers (1-based in the answer, 0-based here) and sensible parts."""
+    parts = []
+    for part in answer.get("parts") or []:
+        if not isinstance(part, dict):
+            continue
+        entries = []
+        for t in part.get("themes") or []:
+            n = t.get("theme") if isinstance(t, dict) else t
+            pick = t.get("pick", "all") if isinstance(t, dict) else "all"
+            if isinstance(n, int) and 1 <= n <= count and (n - 1, pick) not in [(e["block"], e["pick"]) for p in parts
+                                                                                for e in p["entries"]] + \
+                    [(e["block"], e["pick"]) for e in entries]:
+                entries.append({"block": n - 1, "pick": pick if pick in ("all", "early", "late", "action") else "all"})
+        if entries:
+            parts.append({"name": " ".join(str(part.get("name", "")).split())[:40] or f"Part {len(parts) + 1}",
+                          "pace": part.get("pace") if part.get("pace") in ("calm", "medium", "lively") else "medium",
+                          "entries": entries})
+    return {"title": " ".join(str(answer.get("title", "")).split())[:60], "parts": parts[:8],
+            "finale": bool(answer.get("finale", False))}
+
+
 class DirectorError(Exception):
     """Something the person can fix (no key, Ollama not running...), with a plain explanation."""
 
@@ -293,6 +380,9 @@ class Ollama:
     def wish(self, prompt: str) -> dict:
         return self._ask(prompt, WISH_SCHEMA)
 
+    def story(self, prompt: str) -> dict:
+        return self._ask(prompt, STORY_SCHEMA)
+
 
 # ---------- Claude ----------
 
@@ -367,6 +457,9 @@ class Claude:
 
     def wish(self, prompt: str) -> dict:
         return self._ask([{"type": "text", "text": prompt}], WISH_SCHEMA, self.story_model)
+
+    def story(self, prompt: str) -> dict:
+        return self._ask([{"type": "text", "text": prompt}], STORY_SCHEMA, self.story_model)
 
 
 def make(settings: dict):
