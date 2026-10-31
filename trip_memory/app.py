@@ -16,7 +16,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import numpy as np
-from nicegui import app, run, ui
+from nicegui import app, background_tasks, run, ui
 
 from .catalog import Trip, app_dir, kept_part
 from .media import MediaItem
@@ -270,6 +270,7 @@ class Page:
         ui.on("tm_draft_drop", self.draft_drop)
         ui.on("tm_title_move", self.title_move)
         ui.on("tm_title_click", self.title_click)
+        ui.on("tm_postit", self.postit_key)
         ui.add_css(".thumb { height: 150px; object-fit: cover; }")
         with ui.column().classes("w-full max-w-6xl mx-auto p-4 gap-3"):
             with ui.row().classes("items-baseline gap-2"):
@@ -519,6 +520,137 @@ class Page:
             for c in cams:
                 self.camera_row(c)
 
+    # ---------- post-its: mark the best bits of each video ----------
+
+    def postit_card(self) -> None:
+        videos = [it for it in self.all_items if it["kind"] == "video" and it["chosen"]]
+        if not videos:
+            return
+        marked = sum(1 for it in videos if it.get("postits"))
+        with ui.card().classes("w-full mt-2 bg-yellow-50"):
+            with ui.row().classes("w-full items-center gap-3"):
+                ui.label("Step 1b: mark the best bits").classes("text-lg font-semibold")
+                ui.label(f"{marked} of {len(videos)} videos marked").classes("text-sm text-gray-600")
+                ui.space()
+                ui.button("Mark the best bits", icon="sticky_note_2",
+                          on_click=lambda: self.postit_dialog(0)).props("unelevated color=amber-8 no-caps")
+            ui.label("Watch each video and tap the Shift key at every exciting bit (a jump, a splash, a laugh) to stick "
+                     "a post-it there. Your first post-it becomes the video's picture everywhere, which makes sorting "
+                     "themes much quicker, and the first cut uses the seconds around it. Optional: skip any video.") \
+                .classes("text-sm text-gray-700")
+
+    def postit_dialog(self, k: int) -> None:
+        videos = [it for it in self.all_items if it["kind"] == "video" and it["chosen"]]
+        if not videos:
+            return
+        state = {"k": max(0, min(k, len(videos) - 1))}
+        with ui.dialog().props("persistent") as dialog, ui.card().classes("w-[64rem] max-w-full gap-2"):
+            self.postit_dialog_open = dialog
+
+            @ui.refreshable
+            def body() -> None:
+                it = videos[state["k"]]
+                self.postit_video = it
+                src = f"{self.media_route}/{quote(str(Path(it['path']).relative_to(self.trip.folder)))}"
+                start, end = kept_part(it) or (0.0, float(it["duration"] or 0))
+                with ui.row().classes("w-full items-center gap-2"):
+                    ui.label(f"Video {state['k'] + 1} of {len(videos)} · {Path(it['path']).name}") \
+                        .classes("text-lg font-semibold")
+                    ui.label(fmt_time(it["taken_at"])).classes("text-sm text-gray-500")
+                rot = it.get("rotation") or 0
+                turn = f"transform:rotate({rot}deg);" if rot else ""
+                ui.html(f'<video id="tm-pi" src="{src}#t={start:.2f}" controls autoplay muted playsinline '
+                        f'data-start="{start:.2f}" data-end="{end:.2f}" '
+                        f'style="width:100%;height:min(52vh,480px);background:#000;border-radius:6px;{turn}"></video>',
+                        sanitize=False).classes("w-full")
+                notes(it, start, end)
+                with ui.row().classes("w-full items-center"):
+                    ui.button("Previous", icon="chevron_left", on_click=lambda: go(-1)) \
+                        .props("flat no-caps" + (" disable" if state["k"] == 0 else ""))
+                    ui.button("Next video", icon="chevron_right", on_click=lambda: go(1)) \
+                        .props("unelevated no-caps" + (" disable" if state["k"] == len(videos) - 1 else ""))
+                    ui.space()
+                    ui.button("Done", icon="check", on_click=done).props("color=green no-caps")
+
+            @ui.refreshable
+            def notes(it: dict, start: float, end: float) -> None:
+                """The strip with its post-its and the post-its themselves (redrawn without stopping the video)."""
+                found = self.trip.postits(it["path"])
+                strip = ui.html(self.postit_strip_html(it, found, start, end, state.get("strip", {}).get(it["path"])),
+                                sanitize=False).classes("w-full")
+
+                async def fill_strip() -> None:
+                    picture = await run.io_bound(self.trip.filmstrip, it["path"])
+                    state.setdefault("strip", {})[it["path"]] = picture
+                    if picture and not strip.is_deleted:
+                        strip.set_content(self.postit_strip_html(it, found, start, end, picture))
+
+                if it["path"] not in state.get("strip", {}):
+                    background_tasks.create(fill_strip())  # (a timer made inside a redrawn part would never fire)
+                ui.label("Play it, or move the mouse along the strip to look through it. Tap Shift at a great moment: "
+                         "a post-it sticks there. Click a post-it to jump to it.").classes("text-xs text-gray-500")
+                with ui.row().classes("w-full gap-2"):
+                    for n, p in enumerate(found):
+                        with ui.card().classes("p-1 gap-1 w-44 bg-yellow-100"):
+                            ui.image(data_url(p["thumb"])).classes("w-full rounded cursor-pointer") \
+                                .style("aspect-ratio:16/10").props("fit=cover no-spinner") \
+                                .on("click", lambda p=p: ui.run_javascript(
+                                    f"const v = document.getElementById('tm-pi'); v.currentTime = {max(0, p['t'] - 1):.2f}; v.play()"))
+                            ui.label(f"📌 {fmt_length(p['t'])}").classes("text-xs font-semibold")
+                            name = ui.input(value=p["name"], placeholder="name, e.g. jump").props("dense") \
+                                .classes("text-xs")
+                            name.on("blur", lambda e, n=n, f=name: self.trip.change_postit(it["path"], n, name=f.value))
+                            with ui.row().classes("gap-0"):
+                                ui.button(icon="lock", on_click=lambda p=p: self.lock_postit(it, p)) \
+                                    .props("flat dense round size=sm color=amber-9").tooltip("Lock 3 s around it")
+                                ui.button(icon="delete", on_click=lambda n=n: (
+                                    self.trip.change_postit(it["path"], n, remove=True), notes.refresh())) \
+                                    .props("flat dense round size=sm").tooltip("Take this post-it off")
+
+            def go(step: int) -> None:
+                state["k"] = max(0, min(len(videos) - 1, state["k"] + step))
+                body.refresh()
+
+            def done() -> None:
+                dialog.close()
+                self.postit_dialog_open = None
+                self.reload()
+                self.refresh_all()
+
+            self.postit_body = notes
+            body()
+        dialog.open()
+
+    def postit_strip_html(self, it: dict, found: list[dict], start: float, end: float, picture) -> str:
+        span = max(0.1, end - start)
+        flags = "".join(f'<div title="{fmt_length(p["t"])}" style="position:absolute;top:0;bottom:0;left:'
+                        f'{100 * (p["t"] - start) / span:.2f}%;width:3px;background:#f59e0b;box-shadow:0 0 3px #000">'
+                        f'<span style="position:absolute;top:-2px;left:-6px;font-size:14px">📌</span></div>'
+                        for p in found if start <= p["t"] <= end)
+        back = f"url('{data_url(str(picture))}') center/100% 100%" if picture else "#e2e8f0"
+        return (f'<div style="position:relative;height:60px;border-radius:4px;background:{back};cursor:col-resize" '
+                f'onmousemove="tmPostitScrub(event, this, {start:.2f}, {end:.2f})">{flags}</div>')
+
+    def postit_key(self, e) -> None:
+        """Shift in the post-it window: a post-it at the video's current second."""
+        if not getattr(self, "postit_dialog_open", None) or not getattr(self, "postit_video", None):
+            return
+        try:
+            t = float((e.args or {}).get("t"))
+        except (TypeError, ValueError, AttributeError):
+            return
+        it = self.postit_video
+        self.trip.add_postit(it["path"], t)
+        ui.notify(f"📌 Post-it at {fmt_length(t)}", timeout=1200)
+        self.postit_body.refresh()
+
+    def lock_postit(self, it: dict, p: dict) -> None:
+        start, end = kept_part(it) or (0.0, float(it["duration"] or 0))
+        a, b = max(start, p["t"] - 1.5), min(end, p["t"] + 1.5)
+        self.trip.add_lock(it["path"], a, b)
+        self._locks_changed(it["path"])
+        ui.notify(f"🔒 Locked {fmt_length(a)}–{fmt_length(b)}: every cut uses exactly these seconds.", type="positive")
+
     def camera_row(self, c: dict) -> None:
         first, last = (datetime.fromisoformat(c[k]).astimezone() if c[k] else None for k in ("first", "last"))
         what = ", ".join(x for x in (f"{c['videos']} videos" if c["videos"] else "",
@@ -675,6 +807,7 @@ class Page:
         chosen = len(self.items)
         self.sort_out_card()
         self.camera_clocks_card()
+        self.postit_card()
         with ui.row().classes("w-full items-center gap-3"):
             ui.label("Step 2:").classes("text-lg font-semibold")
             ui.button(
@@ -893,6 +1026,8 @@ class Page:
     @staticmethod
     def hover_start(it: dict) -> float:
         start, end = kept_part(it) or (0.0, it["duration"] or 0)
+        if it.get("postits"):  # from just before your first post-it
+            return min(max(start, it["postits"][0]["t"] - 1.0), max(start, end - 0.5))
         return start + (end - start) * 0.3
 
     def cut_button(self, it: dict, cut: dict) -> None:
@@ -5096,6 +5231,19 @@ function tmTitleDown(e, el) {
     emitEvent('tm_title_move', {id: el.dataset.id, start: total * el.offsetLeft / W, length: total * el.offsetWidth / W});
   };
   el.addEventListener('pointermove', move); el.addEventListener('pointerup', up);
+}
+// The post-it window: Shift sticks a post-it at the video's current second; the strip scrubs through it.
+document.addEventListener('keydown', (e) => {
+  const v = document.getElementById('tm-pi');
+  if (!v || e.key !== 'Shift' || e.repeat || ['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
+  emitEvent('tm_postit', {t: v.currentTime});
+});
+function tmPostitScrub(e, strip, a, b) {
+  const v = document.getElementById('tm-pi');
+  if (!v) return;
+  const r = strip.getBoundingClientRect();
+  v.pause();
+  v.currentTime = a + (b - a) * Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
 }
 // The draft under the editor: the clip playing now is outlined on the strip.
 function tmDraftNow(t) {

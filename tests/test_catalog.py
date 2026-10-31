@@ -726,3 +726,23 @@ def test_editing_under_the_video_keeps_the_cuts_where_they_are(tmp_path, monkeyp
     assert board() == [("p2.jpg", 3.0), ("p0.jpg", 3.0), ("p3.jpg", 4.0)]
     trip.replace_shot(paths[0], paths[1])
     assert board() == [("p2.jpg", 3.0), ("p1.jpg", 3.0), ("p3.jpg", 4.0)]
+
+
+def test_post_its_mark_the_best_bits_and_become_the_videos_picture(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    subprocess.run([ffmpeg_paths()[0], "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=6",
+                    "-c:v", "libx264", str(trip_dir / "kite.mp4")], check=True)
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    path = trip.items()[0]["path"]
+    trip.add_postit(path, 4.0, "jump")
+    trip.add_postit(path, 1.5)
+    trip.add_postit(path, 1.6)  # the same moment again
+    found = trip.postits(path)
+    assert [(p["t"], p["name"]) for p in found] == [(1.5, ""), (4.0, "jump")]
+    assert trip.items()[0]["thumb"] == found[0]["thumb"] and Path(found[0]["thumb"]).exists()
+    trip.change_postit(path, 0, remove=True)
+    assert [p["name"] for p in trip.postits(path)] == ["jump"]

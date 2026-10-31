@@ -183,7 +183,7 @@ class Trip:
             "effects TEXT", "effects_why TEXT", "ai_caption TEXT", "ai_score INTEGER", "removed INTEGER DEFAULT 0", "features BLOB",
             "plan_role TEXT", "plan_pos REAL", "title_text TEXT", "title_sub TEXT", "title_style TEXT", "title_where TEXT",
             "focus_x REAL", "keep_start REAL", "keep_end REAL", "part_of TEXT",
-            "theme TEXT", "theme_auto TEXT", "theme_sure REAL", "locks TEXT", "camera TEXT", "taken_orig TEXT",
+            "theme TEXT", "theme_auto TEXT", "theme_sure REAL", "locks TEXT", "camera TEXT", "taken_orig TEXT", "postits TEXT",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
@@ -243,6 +243,9 @@ class Trip:
             row["place_guessed"] = False
             row.pop("clip", None)
             row.pop("colours", None)
+            row["postits"] = json.loads(row["postits"]) if row.get("postits") else []
+            if row["postits"] and row["postits"][0].get("thumb") and Path(row["postits"][0]["thumb"]).exists():
+                row["thumb"] = row["postits"][0]["thumb"]  # your first post-it is the video's picture everywhere
         _guess_places(rows)
         groups: dict[int, list[dict]] = {}
         for row in rows:
@@ -823,6 +826,38 @@ class Trip:
         return sum(len(json.loads(r["locks"])) for r in self.query(
             "SELECT locks FROM items WHERE locks IS NOT NULL AND chosen = 1 AND removed = 0 AND part_of IS NULL"))
 
+    # ---------- post-its: the best bits of a video, marked while you watch ----------
+
+    def postits(self, path: str) -> list[dict]:
+        """[{"t" (seconds into the file), "name", "thumb"}], in time order."""
+        rows = self.query("SELECT postits FROM items WHERE path = ?", (path,))
+        return json.loads(rows[0]["postits"]) if rows and rows[0]["postits"] else []
+
+    def set_postits(self, path: str, found: list[dict]) -> None:
+        rows = self.query("SELECT path, rotation, thumb FROM items WHERE path = ?", (path,))
+        if not rows:
+            return
+        clean = []
+        for p in sorted(found, key=lambda p: p["t"]):
+            if clean and abs(p["t"] - clean[-1]["t"]) < 0.3:
+                continue  # the same moment twice
+            thumb = p.get("thumb") if p.get("thumb") and Path(p["thumb"]).exists() else None
+            clean.append({"t": round(float(p["t"]), 2), "name": (p.get("name") or "").strip(),
+                          "thumb": thumb or self.moment_picture(dict(rows[0]), float(p["t"]))})
+        self.execute("UPDATE items SET postits = ? WHERE path = ?", (json.dumps(clean) if clean else None, path))
+
+    def add_postit(self, path: str, t: float, name: str = "") -> None:
+        self.set_postits(path, self.postits(path) + [{"t": t, "name": name}])
+
+    def change_postit(self, path: str, k: int, name: str | None = None, remove: bool = False) -> None:
+        found = self.postits(path)
+        if 0 <= k < len(found):
+            if remove:
+                found.pop(k)
+            elif name is not None:
+                found[k]["name"] = name.strip()
+        self.set_postits(path, found)
+
     def add_lock(self, path: str, start: float, end: float) -> None:
         self.set_locks(path, self.locks(path) + [[start, end]])
 
@@ -863,6 +898,8 @@ class Trip:
         for r, chapter in zip(rows, where):
             if chapter is None:
                 continue
+            if r.get("moment_at") is None and r.get("postits") and r["kind"] == "video":
+                r = r | {"moment_at": r["postits"][0]["t"]}  # the best bit you marked with a post-it
             if r.get("moment_at") is not None and r["kind"] == "video" and r["duration"] and not r.get("locks"):
                 # a moment you picked (a big jump...): only the seconds around it, inside the part you kept
                 start, end = kept_part(r) or (0.0, r["duration"])
