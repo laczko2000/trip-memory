@@ -8202,6 +8202,10 @@ document.addEventListener('keydown', (e) => {
     if (v.paused) {  // from the red line
       const r = parseFloat(box.dataset.red);
       if (!isNaN(r) && Math.abs(v.currentTime - r) > 0.1) v.currentTime = r;
+      const at = isNaN(r) ? v.currentTime : r, f1 = parseFloat(box.dataset.full1);
+      if (!isNaN(f1) && (at < parseFloat(box.dataset.start) - 0.05 || at >= parseFloat(box.dataset.end) - 0.1)) {
+        box.dataset.start = at; box.dataset.end = f1;  // outside the green part: it plays on from where you are
+      }
       v.play().catch(() => {});
     } else v.pause();
   } else if (e.key === 'Shift' && holder) {
@@ -8275,10 +8279,28 @@ document.addEventListener('pointerdown', (e) => {
   const up = () => { document.removeEventListener('pointermove', move); document.removeEventListener('pointerup', up); };
   document.addEventListener('pointermove', move); document.addEventListener('pointerup', up);
 }, true);
+// Just moving the mouse along the strip (no press) shows the video at that frame, the red line with it; Space
+// then plays from there and stops again.
+document.addEventListener('mousemove', (e) => {
+  if (e.buttons) return;
+  const strip = e.target.closest && e.target.closest('[data-scrub-for][data-press]');
+  const box = strip && document.getElementById(strip.dataset.scrubFor);
+  if (!box) return;
+  if (tmPlaying && tmPlaying !== box) tmStop(tmPlaying);
+  tmPlaying = box;
+  const v = tmVideo(box);
+  const r = strip.getBoundingClientRect(), a = parseFloat(box.dataset.full0), b = parseFloat(box.dataset.full1);
+  if (isNaN(a) || isNaN(b)) return;
+  const t = a + Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * (b - a);
+  v.pause();
+  tmRedSet(box, t);
+  if (v.readyState >= 1) tmSeekSoft(v, t); else v.addEventListener('loadedmetadata', () => { v.currentTime = t; }, {once: true});
+});
 function tmPlayRed(id, start, end) {
   const box = document.getElementById(id);
   if (!box) return;
-  const r = parseFloat(box.dataset.red);
+  const r = parseFloat(box.dataset.red), f1 = parseFloat(box.dataset.full1);
+  if (!isNaN(r) && !isNaN(f1) && (r < start || r >= end - 0.1)) { tmPlayPart(id, r, f1, r); return; }
   tmPlayPart(id, start, end, (r >= start && r < end - 0.1) ? r : start);
 }
 // Cutting a clip: the mouse along the picture strip (or across the picture) moves the video to that moment.
