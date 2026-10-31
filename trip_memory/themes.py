@@ -93,6 +93,56 @@ def suggest(vectors: np.ndarray, activities: list[dict], confirmed: list[tuple[i
     return out
 
 
+CHECK_MARGIN = 0.04  # a shot must look this much more like another theme's shots to be questioned
+CHECK_WORDS = 0.45  # without examples: the words must favour another theme by this much
+
+
+def second_check(vectors: np.ndarray, activities: list[dict], now: list[str], mine: list[bool],
+                 skip: set[int] = frozenset()) -> list[dict]:
+    """A second look at every shot's theme, learning from the ones you confirmed: the shots that look more like
+    another theme's confirmed shots than like their own theme's (each compared without itself). Without examples
+    for a theme, its words decide. Returns [{"row", "now", "better", "how" (0..1), "why"}], most likely first."""
+    names = [a["name"] for a in activities]
+    n = len(vectors)
+    if not n or len(names) < 2:
+        return []
+    groups: dict[int, list[int]] = {}
+    for i, (name, ok) in enumerate(zip(now, mine)):
+        if ok and name in names:
+            groups.setdefault(names.index(name), []).append(i)
+    sims = vectors @ vectors.T
+    np.fill_diagonal(sims, -1.0)  # never your own example
+    near = np.full((n, len(names)), -np.inf)
+    for j, members in groups.items():
+        part = np.sort(sims[:, members], axis=1)[:, ::-1][:, :3]
+        part = np.where(part > -1.0, part, np.nan)
+        with np.errstate(all="ignore"):
+            near[:, j] = np.nan_to_num(np.nanmean(part, axis=1), nan=-np.inf)
+    words = np.full((n, len(names)), -np.inf)
+    for j, a in enumerate(activities):
+        if a.get("vector") is not None:
+            words[:, j] = 100 * (vectors @ np.asarray(a["vector"], np.float32))
+    p = _softmax(words) if np.isfinite(words).any() else None
+    out = []
+    for i in range(n):
+        if i in skip or now[i] not in names:
+            continue
+        cur = names.index(now[i])
+        best = int(np.argmax(near[i]))
+        if np.isfinite(near[i, best]) and best != cur and near[i, best] >= LOOKS_LIKE:
+            gap = near[i, best] - near[i, cur] if np.isfinite(near[i, cur]) else near[i, best] - LOOKS_LIKE
+            if gap >= CHECK_MARGIN:
+                out.append({"row": i, "now": now[i], "better": names[best], "how": float(min(1.0, gap / 0.15)),
+                            "why": f"looks more like your {names[best]} shots than your {now[i]} shots"})
+                continue
+        if p is not None and not np.isfinite(near[i, cur]) and names[cur] != OTHER:
+            alt = int(np.argmax(p[i]))
+            if alt != cur and names[alt] != OTHER and p[i, alt] - p[i, cur] >= CHECK_WORDS:
+                out.append({"row": i, "now": now[i], "better": names[alt], "how": float(p[i, alt] - p[i, cur]),
+                            "why": f"the picture fits {names[alt]} better"})
+    return sorted(out, key=lambda x: -x["how"])
+
+
 OTHER_BAR = 1.0  # how far above an average fit a picture must be to get an activity rather than "Other"
 LOOKS_LIKE, SAME = 0.72, 0.9  # picture-to-picture likeness: from "a bit like" your example to "the same kind of shot"
 

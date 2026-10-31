@@ -208,3 +208,26 @@ def test_a_new_trip_gets_its_own_themes_named_from_its_pictures():
     assert "Ramen nights" in {p["name"] for p in themefinder.propose(np.array(shots, np.float32), sentences, earlier, k=3)}
     renamed = themefinder.apply_names(found, {"themes": [{"id": 0, "name": "Shrines", "subs": [{"id": 0, "name": "Gates"}]}]})
     assert renamed[0]["name"] == "Shrines"
+
+
+def test_second_check_questions_shots_that_look_like_another_themes_confirmed_shots():
+    import numpy as np
+
+    from trip_memory import themes
+
+    rng = np.random.default_rng(1)
+    boat, kite = rng.normal(size=16), rng.normal(size=16)
+
+    def near(base):
+        v = base + 0.25 * rng.normal(size=16)
+        return v / np.linalg.norm(v)
+
+    vectors = np.array([near(boat) for _ in range(4)] + [near(kite) for _ in range(4)] + [near(boat), near(kite)])
+    activities = [{"name": "Boat", "vector": None}, {"name": "Kitesurfing", "vector": None}, {"name": themes.OTHER, "vector": None}]
+    now = ["Boat"] * 4 + ["Kitesurfing"] * 4 + ["Kitesurfing", "Kitesurfing"]
+    mine = [True] * 8 + [False, False]
+    found = themes.second_check(vectors, activities, now, mine)
+    assert [(f["row"], f["better"]) for f in found] == [(8, "Boat")]  # the boat shot sorted as kitesurfing
+    assert themes.second_check(vectors, activities, now, mine, skip={8}) == []  # "keep mine": not asked again
+    now[2] = "Kitesurfing"  # a confirmed shot that looks like the boat shots is questioned too
+    assert any(f["row"] == 2 and f["better"] == "Boat" for f in themes.second_check(vectors, activities, now, mine))

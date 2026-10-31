@@ -1316,6 +1316,23 @@ class Trip:
     def drop_theme_proposals(self) -> None:
         self._set_meta_json("theme_proposals", [])
 
+    def move_in_proposals(self, path: str, to: int) -> None:
+        """You moved a shot into another proposed theme (before using them): it is confirmed there."""
+        proposals = self.theme_proposals()
+        if not 0 <= to < len(proposals):
+            return
+        for p in proposals:
+            for key in ("paths", "sample", "moved_in"):
+                if key in p:
+                    p[key] = [q for q in p[key] if q != path]
+            for sub in p.get("subs") or []:
+                sub["paths"] = [q for q in sub["paths"] if q != path]
+        target = proposals[to]
+        target["paths"] = [path, *target["paths"]]
+        target["sample"] = [path, *target.get("sample", [])]
+        target["moved_in"] = [path, *target.get("moved_in", [])]
+        self._set_meta_json("theme_proposals", proposals)
+
     CORE_SHARE = 0.5  # the shots of a proposed theme most like the rest of it count as confirmed
 
     def use_theme_proposals(self, chosen: list[dict]) -> None:
@@ -1338,6 +1355,8 @@ class Trip:
             centre = x.mean(axis=0)
             order = np.argsort(-(x @ centre))
             sure += [(p["name"], have[i]) for i in order[:max(1, int(round(len(have) * self.CORE_SHARE)))]]
+        for p in chosen:  # the shots you moved yourself are confirmed where you put them
+            sure += [(p["name"], q) for q in p.get("moved_in") or []]
         with self._lock:
             self.db.execute("UPDATE items SET theme = NULL WHERE theme IS NOT NULL AND theme NOT IN (%s)"
                             % ",".join("?" * len(names)), tuple(names))
@@ -1401,6 +1420,45 @@ class Trip:
         with self._lock:
             self.db.executemany("UPDATE items SET theme_auto = ?, theme_sure = ? WHERE path = ?", updates)
             self.db.commit()
+
+    def theme_check(self) -> dict:
+        """The second check, run now: {"agree" (0..1), "shots": [{"path", "now", "better", "why", "yours"}],
+        "total"}. The shots you answered "keep mine" for are not asked again."""
+        rows = [r for r in self.theme_rows() if not r.get("part_of") and not r.get("removed")]
+        clips = {r["path"]: r["clip"] for r in self.query("SELECT path, clip FROM items WHERE clip IS NOT NULL")}
+        seen = [r | {"clip": clips[r["path"]]} for r in rows if r["path"] in clips]
+        keep = set(self._meta_json("theme_check_keep", []))
+        if not seen:
+            result = {"agree": None, "shots": [], "total": len(rows)}
+        else:
+            vectors = np.array([np.frombuffer(r["clip"], dtype=np.float32) for r in seen])
+            found = themes.second_check(vectors, self.activities(), [r["theme"] for r in seen],
+                                        [bool(r["theme_ok"]) for r in seen],
+                                        {i for i, r in enumerate(seen) if r["path"] in keep})
+            shots = [{"path": seen[f["row"]]["path"], "now": f["now"], "better": f["better"], "why": f["why"],
+                      "yours": bool(seen[f["row"]]["theme_ok"])} for f in found]
+            result = {"agree": round(1 - len(shots) / len(seen), 3), "shots": shots, "total": len(seen)}
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('theme_check', ?)", (json.dumps(result),))
+        return result
+
+    def last_theme_check(self) -> dict | None:
+        return self._meta_json("theme_check", None)
+
+    def answer_theme_check(self, path: str, move: bool) -> None:
+        """Move it (to the theme the check suggests: confirmed) or keep mine (confirmed as it is, not asked again)."""
+        check = self.last_theme_check() or {"shots": []}
+        shot = next((x for x in check["shots"] if x["path"] == path), None)
+        if not shot:
+            return
+        check["shots"] = [x for x in check["shots"] if x["path"] != path]
+        if move:
+            check["agree"] = round(min(1.0, (check.get("agree") or 0) + 1 / max(1, check.get("total") or 1)), 3)
+        else:
+            keep = self._meta_json("theme_check_keep", [])
+            self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('theme_check_keep', ?)",
+                         (json.dumps(sorted({*keep, path})),))
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('theme_check', ?)", (json.dumps(check),))
+        self.set_theme([path], shot["better"] if move else shot["now"])
 
     def set_theme(self, paths: list[str], activity: str | None) -> None:
         """Confirm these shots' activity (activity None: the one suggested now), then suggest the rest again."""

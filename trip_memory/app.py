@@ -4202,6 +4202,7 @@ class Page:
             self.theme_review(proposals)
             return
         self.new_themes_bar()
+        self.theme_check_card()
         activities = self.trip.activities()
         names = [a["name"] for a in activities]
         if self.theme_shown not in names:
@@ -4247,6 +4248,71 @@ class Page:
                     ui.button(icon="add", on_click=lambda: self.add_activity(new.value)).props("flat dense round")
             with ui.column().classes("flex-grow gap-2 min-w-0"):
                 self.theme_grid(rows, activities)
+
+    def theme_check_card(self) -> None:
+        """Second check: the app sorts every shot again, learning from the ones you confirmed, and shows only the
+        shots where it now thinks another theme fits better."""
+        check = self.trip.last_theme_check()
+        with ui.column().classes("w-full gap-2 p-2 rounded bg-teal-50"):
+            with ui.row().classes("w-full items-center gap-3"):
+                ui.button("Second check", icon="fact_check", on_click=self.run_theme_check) \
+                    .props("unelevated no-caps color=teal") \
+                    .tooltip("The app looks at every shot again, comparing it with the shots you confirmed, and "
+                             "lists the ones that look like they belong to another theme. Nothing changes until you "
+                             "answer.")
+                if check is None:
+                    ui.label("Done confirming? Run a second check to catch shots in the wrong theme.") \
+                        .classes("text-sm text-teal-900 flex-1")
+                elif check.get("agree") is None:
+                    ui.label("The second check needs the pictures analysed first (Analyse in Choose files).") \
+                        .classes("text-sm text-orange-700 flex-1")
+                else:
+                    left = len(check["shots"])
+                    ui.label(f"{round(100 * check['agree'])}% agree"
+                             + (f" · {left} shot{'s' if left > 1 else ''} to look at" if left else
+                                " · nothing left to look at. Run it again after more changes.")) \
+                        .classes("text-sm font-medium text-teal-900 flex-1")
+            if check and check.get("shots"):
+                items = {it["path"]: it for it in self.items}
+                with ui.element("div").classes("w-full grid gap-2").style(
+                        "grid-template-columns:repeat(auto-fill,minmax(190px,1fr))"):
+                    for shot in check["shots"][:60]:
+                        it = items.get(shot["path"])
+                        if not it:
+                            continue
+                        with ui.column().classes("gap-1 p-1 rounded bg-white"):
+                            box = ui.element("div").classes("w-full")
+                            with box:
+                                self.preview(it, "width:100%;aspect-ratio:16/10", start=self.hover_start(it), view="theme")
+                            box.on("dblclick", lambda p=shot["path"]: self.shot_window(p, "Themes"))
+                            ui.label(f"{shot['now']} → {shot['better']}").classes("text-sm font-semibold")
+                            ui.label(("You set " + shot["now"] + "; it " if shot["yours"] else "It ") + shot["why"] + ".") \
+                                .classes("text-xs text-gray-600")
+                            with ui.row().classes("gap-1"):
+                                ui.button(f"Move it", icon="east",
+                                          on_click=lambda p=shot["path"]: self.answer_theme_check(p, True)) \
+                                    .props("dense unelevated no-caps size=sm color=teal")
+                                ui.button("Keep mine", on_click=lambda p=shot["path"]: self.answer_theme_check(p, False)) \
+                                    .props("dense outline no-caps size=sm color=grey-8")
+                if len(check["shots"]) > 60:
+                    ui.label(f"…and {len(check['shots']) - 60} more after these.").classes("text-xs text-gray-600")
+
+    async def run_theme_check(self) -> None:
+        note = ui.notification("Second check: looking at every shot again…", spinner=True, timeout=None)
+        try:
+            check = await run.io_bound(self.trip.theme_check)
+        finally:
+            note.dismiss()
+        left = len(check["shots"])
+        ui.notify(f"{round(100 * check['agree'])}% agree with your themes." + (
+            f" {left} shot{'s' if left > 1 else ''} to look at." if left else " Nothing to change.")
+                  if check.get("agree") is not None else "Analyse the pictures first.", type="positive")
+        self.themes_view.refresh()
+
+    def answer_theme_check(self, path: str, move: bool) -> None:
+        self.trip.answer_theme_check(path, move)
+        self.reload()
+        self.themes_view.refresh()
 
     def new_themes_bar(self) -> None:
         """A new trip: the app proposes its own themes from the shots (not the last trip's)."""
@@ -4310,6 +4376,8 @@ class Page:
         sub-theme. Use these themes makes them this trip's themes."""
         edits = getattr(self, "theme_edits", None) or {}
         self.theme_edits = edits
+        if not hasattr(self, "theme_review_all"):
+            self.theme_review_all = set()
         for n, p in enumerate(proposals):
             edits.setdefault(n, {"keep": True, "name": p["name"], "emoji": p["emoji"], "into": None,
                                  "subs": [True] * len(p["subs"])})
@@ -4337,12 +4405,32 @@ class Page:
                     ui.select({None: "—", **others}, value=e["into"], label="Merge into",
                               on_change=lambda ev, e=e: (e.update(into=ev.value), self.themes_view.refresh())) \
                         .props("dense outlined").classes("w-56")
-                with ui.row().classes("w-full gap-1 no-wrap overflow-hidden"):
-                    for path in p["sample"][:8]:
+                every = n in self.theme_review_all
+                shown = list(dict.fromkeys([*p["sample"], *p["paths"]])) if every else p["sample"][:8]
+                with ui.row().classes("w-full gap-1 " + ("" if every else "no-wrap overflow-hidden")):
+                    for path in shown:
                         it = rows.get(path)
                         if it:
-                            with ui.element("div").classes("flex-none").style("width:120px"):
+                            with ui.element("div").classes("flex-none relative").style("width:120px") as tile:
                                 self.preview(it, "width:120px;height:76px", start=self.hover_start(it), view="prop")
+                                with ui.element("div").classes("absolute top-1 right-1").on("click.stop", lambda: None):
+                                    with ui.button(icon="swap_horiz").props(
+                                            "round dense size=xs color=white text-color=primary").classes("shadow") \
+                                            .tooltip("Move to another theme"):
+                                        with ui.menu():
+                                            for m, q in enumerate(proposals):
+                                                if m != n:
+                                                    ui.menu_item(f"{edits[m]['emoji']} {edits[m]['name']}",
+                                                                 on_click=lambda path=path, m=m: self.move_proposed(path, m))
+                                if path in (p.get("moved_in") or []):
+                                    ui.label("moved here").classes("absolute bottom-0 left-0 text-[10px] px-1 "
+                                                                   "bg-green-600 text-white rounded")
+                            tile.on("dblclick", lambda path=path: self.shot_window(path, "Themes"))
+                if len(p["paths"]) > 8:
+                    ui.button(f"Show all {len(p['paths'])} shots" if not every else "Show fewer",
+                              on_click=lambda n=n: (self.theme_review_all.symmetric_difference_update({n}),
+                                                    self.themes_view.refresh())) \
+                        .props("flat dense no-caps size=sm")
                 if p["subs"]:
                     with ui.row().classes("w-full items-center gap-1"):
                         ui.label("Sub-themes:").classes("text-xs text-gray-600")
@@ -4362,6 +4450,11 @@ class Page:
             ui.button("Cancel (keep the old themes)", on_click=self.cancel_trip_themes).props("flat no-caps")
             ui.label("Shots of themes you untick get a suggestion from the kept ones (or Other).") \
                 .classes("text-xs text-gray-500")
+
+    def move_proposed(self, path: str, to: int) -> None:
+        self.trip.move_in_proposals(path, to)
+        ui.notify(f"Moved to {self.theme_edits.get(to, {}).get('name', 'that theme')}.", type="positive")
+        self.themes_view.refresh()
 
     def cancel_trip_themes(self) -> None:
         self.trip.drop_theme_proposals()
@@ -4386,8 +4479,9 @@ class Page:
             name = " ".join((te["name"] or "").split())[:30] or proposals[target]["name"]
             into = chosen.setdefault(target, {"name": name, "emoji": (te["emoji"] or "⭐").strip()[:4],
                                               "describe": list(proposals[target]["describe"]), "paths": [],
-                                              "subs": []})
+                                              "subs": [], "moved_in": []})
             into["paths"] += p["paths"]
+            into["moved_in"] += p.get("moved_in") or []
             into["subs"] += [s for k, s in enumerate(p["subs"]) if k < len(e["subs"]) and e["subs"][k]]
         if not chosen:
             ui.notify("Keep at least one theme.", type="warning")
