@@ -445,6 +445,32 @@ def test_keep_marked_sorts_out_a_set_for_good(tmp_path, monkeypatch):
     assert names()["take1.mp4"]["similar_set"] == names()["take2.mp4"]["similar_set"]
 
 
+def test_good_parts_of_a_video_become_shots_of_their_own(tmp_path, monkeypatch):
+    from tests.test_render import make_clip
+
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    make_clip(trip_dir / "kite.mp4", "640x360", 6, "2025-07-03T10:00:00Z")
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    video = str(trip_dir / "kite.mp4")
+    trip.set_locks(video, [[1.0, 2.0], [4.5, 5.5]])
+    one = trip.make_shot(video, 0.5, 2.5)
+    two = trip.make_shot(video, 4.0, 5.8)
+    trip.prepare()  # looking through the folder again keeps them
+    by = {i["path"]: i for i in trip.items()}
+    assert by[one]["shot_of"] == video and by[one]["chosen"] and abs(by[one]["duration"] - 2.0) < 0.2
+    assert by[one]["thumb"] and Path(one).exists() and Path(one).parent == trip.shots_dir
+    assert json.loads(by[one]["locks"]) == [[0.5, 1.5]] and json.loads(by[two]["locks"]) == [[0.5, 1.5]]
+    assert by[one]["taken_at"] > by[video]["taken_at"]
+    assert len({by[p]["similar_set"] for p in (video, one, two)}) == 3  # never doubles of each other
+    assert [round(s["start"], 1) for s in trip.shots_from(video)] == [0.5, 4.0]
+    trip.drop_shot(one)
+    assert not Path(one).exists() and [s["path"] for s in trip.shots_from(video)] == [two]
+
+
 def test_the_look_is_kept_per_trip(tmp_path, monkeypatch):
     monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
     (tmp_path / "app").mkdir()

@@ -280,6 +280,8 @@ class Page:
         ui.on("tm_title_click", self.title_click)
         ui.on("tm_postit", self.postit_key)
         ui.timer(1.0, self.auto_update_tick)  # (here, outside every redrawn part, so it keeps running)
+        self.window_box = ui.element("div")  # the shot window lives here: redrawing a tab never closes it
+        self.window_timers = ui.element("div")
         ui.add_css(".thumb { height: 150px; object-fit: cover; }")
         with ui.column().classes("w-full max-w-6xl mx-auto p-4 gap-3"):
             with ui.row().classes("items-baseline gap-2"):
@@ -564,7 +566,7 @@ class Page:
             def body() -> None:
                 it = videos[state["k"]]
                 self.postit_video = it
-                src = f"{self.media_route}/{quote(str(Path(it['path']).relative_to(self.trip.folder)))}"
+                src = self.video_src(Path(it["path"]))
                 start, end = kept_part(it) or (0.0, float(it["duration"] or 0))
                 with ui.row().classes("w-full items-center gap-2"):
                     ui.label(f"Video {state['k'] + 1} of {len(videos)} · {Path(it['path']).name}") \
@@ -992,9 +994,9 @@ class Page:
         with ui.column().classes("w-36 gap-0" + ("" if it["chosen"] else " opacity-40")) as tile:
             if it["path"] == self.choose_focus_path:
                 self.choose_focus_card = tile
-            with ui.element("div").tooltip("Double-click: open it in the Library") as wrap:
+            with ui.element("div").tooltip("Double-click: open it big (cut, split into shots, lock, theme)") as wrap:
                 self.preview(it, "width:144px;height:96px", start=self.hover_start(it))
-            self.click_or_double(wrap, None, lambda p=it["path"]: self.open_in_library(p, "Choose files"))
+            self.click_or_double(wrap, None, lambda p=it["path"]: self.shot_window(p, "Choose files"))
             with ui.row().classes("items-center gap-0 no-wrap"):
                 box = ui.checkbox(
                     value=bool(it["chosen"]),
@@ -1020,7 +1022,7 @@ class Page:
                 ui.image(thumb).props("fit=contain").style(size).classes("rounded bg-gray-800")
             return box
         file = Path(it.get("part_of") or it["path"])  # a part of a long clip plays from the clip itself
-        src = f"{self.media_route}/{quote(str(file.relative_to(self.trip.folder)))}"
+        src = self.video_src(file)
         end = (it["duration"] or 0) if end is None else end
         kept = kept_part(it)
         if kept:  # a clip you cut: only the part you kept plays
@@ -1038,6 +1040,13 @@ class Page:
             sanitize=False,
         ).style("width:100%" if "100%" in size else "")  # else a tall picture squeezes a full-width frame
         return box
+
+    def video_src(self, file: Path) -> str:
+        """Where the page streams a video from: the trip folder, or the app's folder for shots you made."""
+        try:
+            return f"{self.media_route}/{quote(str(file.relative_to(self.trip.folder)))}"
+        except ValueError:
+            return f"{self.media_route}-shots/{quote(str(file.relative_to(self.trip.shots_dir)))}"
 
     @staticmethod
     def hover_start(it: dict) -> float:
@@ -1284,7 +1293,8 @@ class Page:
                          taken=self.trip.used_parts(self.clip_of(it), but=it["path"]))
 
     def part_dialog(self, it: dict, a: float, b: float, title: str, actions: list[tuple],
-                    taken: list[tuple[float, float, int]] | None = None) -> None:
+                    taken: list[tuple[float, float, int]] | None = None,
+                    made: list[tuple[float, float, str]] | None = None, extra=None, on_hide=None) -> None:
         """A big window to choose a part of a video: it plays that part (silently, again and again), the strip below
         shows the whole clip (move the mouse along it to look), and the green handles set the part.
         actions: (label, icon, callback(start, end), props) buttons; a callback returning True closes the window."""
@@ -1308,6 +1318,12 @@ class Page:
                               f'border-left:2px solid #dc2626;border-right:2px solid #dc2626;pointer-events:none">'
                               f'<span style="color:white;font:600 11px sans-serif;padding:2px">shot {n}</span></div>'
                               for x, y, n in taken or [])
+                    + "".join(f'<div title="{label}" style="position:absolute;top:0;bottom:0;'
+                              f'left:{100 * (x - full0) / ((full1 - full0) or 1):.2f}%;'
+                              f'width:{100 * (y - x) / ((full1 - full0) or 1):.2f}%;background:rgba(22,163,74,.45);'
+                              f'border-left:2px solid #16a34a;border-right:2px solid #16a34a;pointer-events:none">'
+                              f'<span style="color:white;font:600 11px sans-serif;padding:2px;text-shadow:0 0 3px #000">'
+                              f'{label}</span></div>' for x, y, label in made or [])
                     + '</div>', sanitize=False).classes("w-full")
             if taken:
                 ui.label("Red: parts other shots in your video already use (never shown twice).") \
@@ -1368,8 +1384,16 @@ class Page:
                 ui.button("Close", on_click=dialog.close).props("flat no-caps")
                 for text, icon, callback, props in actions:
                     ui.button(text, icon=icon, on_click=lambda c=callback: act(c)).props(props)
+            if extra is not None:
+                extra(dialog)
             ui.timer(0.3, start, once=True)
-        dialog.on("hide", lambda: ui.run_javascript(f"const b = document.getElementById('{box}'); if (b) tmStop(b);"))
+
+        def hidden() -> None:
+            ui.run_javascript(f"const b = document.getElementById('{box}'); if (b) tmStop(b);")
+            if on_hide is not None:
+                on_hide()
+
+        dialog.on("hide", hidden)
         dialog.open()
 
     def show_cut(self, path: str) -> None:
@@ -1544,6 +1568,150 @@ class Page:
             element.on("click", clicked)
         element.on("dblclick", doubled)
 
+    def shot_window(self, path: str, name: str = "", changed: dict | None = None) -> None:
+        """Double-click on a shot anywhere: it opens big, right where you are. Watch it, cut it, make good parts of
+        a video shots of their own (and drop the rest), lock a part, tick it, give it a theme."""
+        it = next((x for x in self.trip.items(parts=True) if x["path"] == path), None)
+        if it is None:
+            return
+        if it.get("part_of"):  # a part Auto-edit made: its video
+            it = next((x for x in self.trip.items() if x["path"] == it["part_of"]), it)
+        path = it["path"]
+        changed = changed if changed is not None else {"any": False}
+        changed["again"] = False
+        for old in list(self.window_box):  # windows closed before
+            if isinstance(old, ui.dialog) and not old.value:
+                old.delete()
+
+        def after() -> None:  # when the window closes: the page behind shows what changed
+            if changed["any"] and not changed["again"]:
+                self.stale = True
+                self.refresh_all()
+
+        def mark() -> None:
+            changed["any"] = True
+
+        def controls(dialog) -> None:
+            shots = self.trip.shots_from(path) if it["kind"] == "video" else []
+            with ui.row().classes("w-full items-center gap-3 px-2"):
+                ui.checkbox("In the video", value=bool(it["chosen"]),
+                            on_change=lambda e: (self.trip.set_chosen([path], e.value), mark())).props("dense")
+                names = [a["name"] for a in self.trip.activities()]
+                now = self.theme_of(it)
+
+                async def theme(value: str) -> None:
+                    await run.io_bound(self.trip.set_theme, [path], value)
+                    mark()
+                    ui.notify(f"Theme: {value}", timeout=1500)
+
+                ui.select(sorted(set(names) | {now}), value=now, label="Theme",
+                          on_change=lambda e: theme(e.value)).props("dense options-dense").classes("w-56")
+                ui.label(f"🕒 {fmt_time(it['taken_at'])} · 📍 {it['place'] or it['country'] or 'Unknown place'}") \
+                    .classes("text-xs text-gray-600")
+                ui.space()
+                async def to_library() -> None:
+                    dialog.close()
+                    await self.open_in_library(path, name or "here")
+
+                ui.button("Open in the Library", icon="photo_library", on_click=to_library) \
+                    .props("flat dense no-caps size=sm")
+            if it.get("shot_of"):
+                ui.label("✂ A shot you made from " + Path(it["shot_of"]).name).classes("text-xs text-green-800 px-2")
+            if shots:
+                with ui.column().classes("w-full gap-1 px-2"):
+                    ui.label(f"Shots you made from this video ({len(shots)}): each is its own shot now, with its own "
+                             "tick and theme.").classes("text-sm font-medium text-green-800")
+                    with ui.row().classes("gap-2 items-center"):
+                        for k, shot in enumerate(shots, 1):
+                            with ui.row().classes("items-center gap-0 bg-green-50 border border-green-300 rounded px-2"):
+                                ui.label(f"✂ Shot {k}: {fmt_length(shot['start'])}–{fmt_length(shot['end'])}") \
+                                    .classes("text-xs")
+                                ui.button(icon="close", on_click=lambda p=shot["path"]: take_back(p, dialog)) \
+                                    .props("flat dense round size=xs").tooltip("Take this shot out again")
+                        if it["chosen"]:
+                            ui.button("Drop the rest of the video", icon="delete_sweep",
+                                      on_click=lambda: drop_rest(dialog)).props("outline dense no-caps color=negative") \
+                                .tooltip("Untick the whole video: only your shots go in. It leaves the trip when you "
+                                         "remove the unticked files.")
+                        else:
+                            ui.label("The rest of the video is dropped (unticked).").classes("text-xs text-gray-500")
+
+        def again() -> None:  # the same window, drawn again with what changed
+            changed["again"] = True
+            with self.window_timers:
+                ui.timer(0.2, lambda: self.shot_window(path, name, changed), once=True)
+
+        async def take_back(shot: str, dialog) -> None:
+            await run.io_bound(self.trip.drop_shot, shot)
+            mark()
+            again()
+            dialog.close()
+
+        def drop_rest(dialog) -> None:
+            self.trip.set_chosen([path], False)
+            mark()
+            ui.notify("Only the shots you made go in now.", type="positive")
+            again()
+            dialog.close()
+
+        if it["kind"] != "video":
+            with self.window_box, ui.dialog() as dialog, ui.card().classes("w-[60rem] max-w-full gap-2"):
+                ui.label(Path(path).name).classes("text-lg font-semibold")
+                ui.image(data_url(it["thumb"])).props("fit=contain").style("width:100%;height:min(60vh,520px)") \
+                    .classes("rounded bg-gray-800")
+                controls(dialog)
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("Close", on_click=dialog.close).props("flat no-caps")
+            dialog.on("hide", after)
+            dialog.open()
+            return
+
+        async def make(a: float, b: float) -> bool:
+            n = ui.notification("Making the shot…", spinner=True, timeout=None)
+            try:
+                await run.io_bound(self.trip.make_shot, path, a, b)
+            except Exception as exc:
+                traceback.print_exc()
+                n.dismiss()
+                ui.notify(f"Could not make the shot: {exc}", type="negative", multi_line=True)
+                return False
+            n.dismiss()
+            mark()
+            ui.notify(f"New shot: {fmt_length(a)}–{fmt_length(b)}. Mark another good part, or close.",
+                      type="positive")
+            return True
+
+        async def make_and_reopen(a: float, b: float) -> bool:
+            if await make(a, b):
+                again()
+                return True
+            return False
+
+        async def keep(a: float, b: float) -> bool:
+            await run.io_bound(self.trip.set_keep, path, a, b)
+            mark()
+            ui.notify(f"Cut: only {fmt_length(a)}–{fmt_length(b)} is used.", type="positive")
+            return True
+
+        def lock(a: float, b: float) -> bool:
+            self.trip.add_lock(path, a, b)
+            mark()
+            ui.notify(f"Locked {fmt_length(a)}–{fmt_length(b)}: the video always uses it whole.", type="positive")
+            return True
+
+        shots = self.trip.shots_from(path)
+        length = it["duration"] or 0
+        a, b = (shots[-1]["end"], min(length, shots[-1]["end"] + 4)) if shots and shots[-1]["end"] < length - 1 \
+            else (length * 0.3, min(length, length * 0.3 + 4))
+        with self.window_box:
+            self.part_dialog(
+            it, a, b, f"{Path(path).name} · mark a good part",
+            [("Lock this part", "lock", lock, "outline no-caps"),
+             ("Cut: keep only this part", "content_cut", keep, "outline no-caps"),
+             ("Make this a shot", "add_box", make_and_reopen, "color=green no-caps")],
+            made=[(x["start"], x["end"], f"shot {k}") for k, x in enumerate(shots, 1)],
+            extra=controls, on_hide=after)
+
     async def open_in_library(self, path: str, name: str) -> None:
         """Double-click on a shot anywhere: show just that shot in the Library, with a button back here."""
         try:
@@ -1627,7 +1795,7 @@ class Page:
                     height = 420
                     card.classes("ring-4 ring-green-500")
                 with ui.element("div").classes("w-full").on("dblclick", self.library_back if self.library_focus else
-                                                            lambda it=it: None):
+                                                            lambda it=it: self.shot_window(it["path"], "the Library")):
                     cut = {"box": self.preview(it, f"width:100%;height:{height}px", start=self.hover_start(it))}
                 cut["area"] = ui.column().classes("w-full gap-1")  # the cutting handles, when you press ✂
             else:
@@ -3425,7 +3593,7 @@ class Page:
                                        ("border-blue-600 bg-blue-50" if picked else "border-transparent bg-gray-50")) \
                 as tile:
             self.click_or_double(tile, lambda p=r["path"]: self.pick_theme_shot(p),
-                                 lambda p=r["path"]: self.open_in_library(p, "Themes"))
+                                 lambda p=r["path"]: self.shot_window(p, "Themes"))
             self.theme_tiles[r["path"]] = tile
             if r["kind"] == "video":  # hover plays it (silently) so you can see what happens in it
                 self.preview(r, "width:100%;aspect-ratio:16/10", start=self.hover_start(r), view="theme")
@@ -3747,7 +3915,7 @@ class Page:
                 self.moment_count.set_text(f"{len(saved['shots'])} marked")
 
             show()
-            self.click_or_double(tile, toggle, lambda: self.open_in_library(f["path"], f"the {name} moments"))
+            self.click_or_double(tile, toggle, lambda: self.shot_window(f["path"], f"the {name} moments"))
             with ui.row().classes("w-full items-center justify-between no-wrap"):
                 when = ui.label("🎬 at " + fmt_length(f["t"]) if f["kind"] == "video" else "📷 photo") \
                     .classes("text-xs text-gray-600 mt-1")
@@ -4181,9 +4349,9 @@ class Page:
                 box = None
                 if it["thumb"]:
                     start, end = self.kept_part(it) if it["kind"] == "video" else (0, None)
-                    with ui.element("div").style("flex:none").tooltip("Double-click: open it in the Library") as wrap:
+                    with ui.element("div").style("flex:none").tooltip("Double-click: open it big (cut, split into shots, lock, theme)") as wrap:
                         box = self.preview(it, "width:160px;height:100px;flex:none", start, end, view="story")
-                    self.click_or_double(wrap, None, lambda p=it["path"]: self.open_in_library(p, "the Storyboard"))
+                    self.click_or_double(wrap, None, lambda p=it["path"]: self.shot_window(p, "the Storyboard"))
                 with ui.column().classes("flex-grow gap-1"):
                     place = ", ".join(x for x in (it["place"], it["country"]) if x)
                     icon = "🎬" if it["kind"] == "video" else "📷"
@@ -5939,6 +6107,8 @@ def serve_trip_folder(trip: Trip) -> str:
     if key not in _served:
         _served[key] = f"/trip/{key}"
         app.add_media_files(_served[key], trip.folder)
+        trip.shots_dir.mkdir(parents=True, exist_ok=True)
+        app.add_media_files(_served[key] + "-shots", trip.shots_dir)  # good parts you made into shots of their own
     return _served[key]
 
 

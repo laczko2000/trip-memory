@@ -184,6 +184,7 @@ class Trip:
             "plan_role TEXT", "plan_pos REAL", "title_text TEXT", "title_sub TEXT", "title_style TEXT", "title_where TEXT",
             "focus_x REAL", "keep_start REAL", "keep_end REAL", "part_of TEXT",
             "theme TEXT", "theme_auto TEXT", "theme_sure REAL", "locks TEXT", "camera TEXT", "taken_orig TEXT", "postits TEXT",
+            "shot_of TEXT",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
@@ -1474,6 +1475,88 @@ class Trip:
         except Exception:
             traceback.print_exc()  # the old preview picture stays
 
+    @property
+    def shots_dir(self) -> Path:
+        return self.dir / "shots"
+
+    def make_shot(self, path: str, start: float, end: float) -> str:
+        """Make a part of a video a shot of its own: the part is saved as a new clip (in the app's folder; your file
+        is not changed) that gets its own tick, theme and place in the story, like any other file. It keeps the
+        video's time (plus where the part starts), place, camera, turn and theme. Returns the new shot's path."""
+        row = dict(self.query("SELECT * FROM items WHERE path = ?", (path,))[0])
+        if row["kind"] != "video":
+            raise ValueError("Only a video can be split into shots")
+        start, end = max(0.0, float(start)), min(float(end), row["duration"] or float(end))
+        if end - start < 0.5:
+            raise ValueError("A shot needs at least half a second")
+        self.checkpoint("making a shot from a video")
+        self.shots_dir.mkdir(parents=True, exist_ok=True)
+        stem = Path(path).stem
+        n = 1
+        while list(self.shots_dir.glob(f"{stem} shot {n} *")):
+            n += 1
+        out = self.shots_dir / f"{stem} shot {n} ({start:.1f}-{end:.1f}s).mp4"
+        when = datetime.fromisoformat(row["taken_at"]) + timedelta(seconds=start)
+        info = probe(Path(path))
+        video = next((x for x in info.get("streams", []) if x.get("codec_type") == "video"), {})
+        width, height = int(video.get("width") or 1920), int(video.get("height") or 1080)
+        from .render import _run_encode
+        audio = ["-map", "0:a:0?", "-c:a", "aac", "-b:a", "192k"] if row["has_audio"] else ["-an"]
+        tmp = out.with_suffix(".part.mp4")
+        _run_encode(lambda codec: ["-ss", f"{start:.3f}", "-i", path, "-t", f"{end - start:.3f}", "-map", "0:v:0",
+                                   *codec, "-pix_fmt", "yuv420p", *audio, "-map_metadata", "-1",
+                                   "-metadata", f"creation_time={when.astimezone().isoformat()}",
+                                   "-movflags", "+faststart", str(tmp)],
+                    width, height, False)
+        tmp.rename(out)
+
+        def inside(t: float) -> bool:
+            return start <= t <= end
+
+        locks = [[a - start, b - start] for a, b in json.loads(row["locks"] or "[]") if inside(a) and inside(b)]
+        postits = [p | {"t": p["t"] - start} for p in json.loads(row["postits"] or "[]") if inside(p["t"])]
+        orig = datetime.fromisoformat(row["taken_orig"] or row["taken_at"]) + timedelta(seconds=start)
+        new = {k: row[k] for k in ("kind", "has_audio", "hdr", "lat", "lon", "camera", "place", "country",
+                                   "place_guessed", "rotation", "rotation_checked", "theme", "theme_auto", "theme_sure",
+                                   "story", "scene", "scene_user", "tags", "tags_user", "people_tag", "included",
+                                   "clip_sound", "clip_volume") if k in row}
+        new |= {"path": str(out), "shot_of": path, "taken_at": when.isoformat(), "taken_orig": orig.isoformat(),
+                "duration": end - start, "mtime": out.stat().st_mtime, "chosen": 1, "best": 1,
+                "locks": json.dumps(locks) if locks else None, "postits": json.dumps(postits) if postits else None}
+        with self._lock:
+            self.db.execute(f"INSERT INTO items ({', '.join(new)}) VALUES ({', '.join('?' * len(new))})",
+                            tuple(new.values()))
+            self.db.commit()
+        made = dict(self.query("SELECT * FROM items WHERE path = ?", (str(out),))[0])
+        try:
+            self.execute("UPDATE items SET thumb = ? WHERE path = ?", (str(self._make_thumb(made)), str(out)))
+        except Exception:
+            traceback.print_exc()
+        self._group_stories()
+        return str(out)
+
+    def shots_from(self, path: str) -> list[dict]:
+        """The shots you made from a video, in order: [{path, start, end}] (seconds in the video)."""
+        rows = self.query("SELECT path, taken_at, duration FROM items WHERE shot_of = ? AND removed = 0", (path,))
+        base = self.query("SELECT taken_at FROM items WHERE path = ?", (path,))
+        if not base:
+            return []
+        t0 = datetime.fromisoformat(base[0]["taken_at"])
+        out = [{"path": r["path"], "start": (datetime.fromisoformat(r["taken_at"]) - t0).total_seconds(),
+                "end": (datetime.fromisoformat(r["taken_at"]) - t0).total_seconds() + (r["duration"] or 0)}
+               for r in rows]
+        return sorted(out, key=lambda x: x["start"])
+
+    def drop_shot(self, path: str) -> None:
+        """Take a shot you made back out (its file in the app's folder goes too)."""
+        self.checkpoint("removing a shot made from a video")
+        with self._lock:
+            self.db.execute("DELETE FROM faces WHERE path = ?", (path,))
+            self.db.execute("DELETE FROM items WHERE path = ? AND shot_of IS NOT NULL", (path,))
+            self.db.commit()
+        if Path(path).parent == self.shots_dir:
+            Path(path).unlink(missing_ok=True)
+
     def filmstrip(self, path: str, frames: int = 12) -> Path | None:
         """A row of small pictures from through a video (the part you kept, if you cut it), to show under the
         handles when you cut it. Each picture is a quick jump into the file, so even a long 4K clip takes a moment."""
@@ -1575,6 +1658,8 @@ class Trip:
         p.message = "Looking through the folder…"
         notify()
         found, problems = scan_folder(self.folder)
+        if self.shots_dir.exists():  # good parts you made into shots of their own
+            found += scan_folder(self.shots_dir)[0]
         p.notes.extend(problems)
         self._store_found(found)
         self._fill_cameras(found)
@@ -1640,6 +1725,8 @@ class Trip:
             "FROM items WHERE part_of IS NULL AND removed = 0")]
         groups = stories.group(rows, self.look_alike_level(), self.story_links())
         cleaned = self.cleaned_sets()
+        for r in self.query("SELECT path FROM items WHERE shot_of IS NOT NULL AND removed = 0"):
+            cleaned.setdefault(r["path"], 1)  # a shot made from a video is never a double of its video
         if cleaned:  # sets you sorted out with Keep marked: each of their shots stands alone now
             free = max((sim for _, sim, _ in groups.values() if sim is not None), default=-1) + 1
             for path in sorted(cleaned):
