@@ -79,3 +79,12 @@ def test_trim_with_the_fades_you_chose(tmp_path):
     assert level(0.5, 0.7) < 0.5 * level(8, 9)  # still quiet early in the 3 s fade in
     assert level(18.0, 18.2) < 0.6 * level(8, 9) and level(19.6, 19.8) < 0.2 * level(8, 9)  # fading out over 4 s
     assert taps.fades_of(str(song), folder) is None
+
+
+def test_halving_the_pins_keeps_the_ends_and_the_music_changes():
+    from trip_memory.taps import halve
+    pins = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    assert halve(pins, []) == [1, 3, 5, 7, 9]
+    assert halve(pins, [4.1]) == [1, 3, 4, 6, 8, 9]  # 4 is on a change: kept, and counting starts again
+    assert halve([1, 2], []) == [1, 2]
+    assert halve(halve(pins, []), []) == [1, 5, 9]

@@ -219,3 +219,23 @@ def snap_song(path: str, taps: list[float]) -> tuple[list[float], float]:
 def shot_lengths(taps: list[float], duration: float) -> list[float]:
     cuts = [0.0, *sorted(t for t in taps if 0 < t < duration), duration]
     return [b - a for a, b in zip(cuts, cuts[1:])]
+
+
+def halve(pins: list[float], changes: list[float], reach: float = 0.35) -> list[float]:
+    """Every second pin taken away, for longer shots. The first and last pins stay, and so does any pin where
+    the music changes (within reach seconds), so the video still cuts where the music turns; after such a pin
+    the counting starts again."""
+    pins = sorted(pins)
+    if len(pins) < 3:
+        return pins
+    kept, drop_next = [pins[0]], True
+    for p in pins[1:-1]:
+        if any(abs(p - c) <= reach for c in changes):
+            kept.append(p)
+            drop_next = True
+        elif drop_next:
+            drop_next = False
+        else:
+            kept.append(p)
+            drop_next = True
+    return kept + [pins[-1]]

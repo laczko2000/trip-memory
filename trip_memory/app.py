@@ -1651,12 +1651,17 @@ class Page:
             ui.button("Clear all", icon="clear_all", on_click=self.clear_taps).props("flat")
             ui.button("Finish my pins", icon="auto_fix_high", on_click=self.finish_pins).props("outline no-caps") \
                 .tooltip("Pin the start of the song by hand; the app suggests the rest the same way")
+            ui.button("Half the pins", icon="exposure_neg_1", on_click=self.halve_pins).props("outline no-caps") \
+                .tooltip("Take away every second pin, for longer shots. The first and last pins stay, and so do "
+                         "pins where the music changes. Press again to halve again")
         ui.html('<div id="tm-tl" style="position:relative;width:100%;height:150px;background:#f1f5f9;border-radius:8px;'
                 'touch-action:none;user-select:none;cursor:pointer;overflow:hidden"></div>', sanitize=False).classes("w-full")
         ui.html('<div id="tm-trim-info" style="font-size:14px;font-weight:600;color:#15803d"></div>', sanitize=False)
         ui.html('<div id="tm-tap-info" style="font-size:13px;color:#475569"></div>', sanitize=False)
         self.suggesting = False  # the line starts afresh with only your own pins
         self.finish_row()
+        self.pins_before_half = None
+        self.half_row()
         if can_trim:
             with ui.row().classes("items-center gap-2"):
                 ui.button("Hear the start", icon="play_arrow",
@@ -1894,6 +1899,43 @@ class Page:
         ui.run_javascript("tmTapClear()")
         self.suggesting = False
         self.finish_row.refresh()
+
+    async def halve_pins(self) -> None:
+        music = self.music_path()
+        if not music:
+            return
+        pins = [float(p) for p in await ui.run_javascript("tmTapGet()", timeout=5) or []]
+        if len(pins) < 3:
+            ui.notify("There are too few pins to halve.", type="info")
+            return
+        song = self.song_maps.get(music)
+        if song is None:
+            song = self.song_maps[music] = await run.io_bound(songmap.analyse, music, app_dir() / "music-maps")
+        halved = song_taps.halve(pins, [s.start for s in song.sections[1:]])
+        if len(halved) == len(pins):
+            ui.notify("Every pin sits on a change in the music, so none were taken away.", type="info")
+            return
+        if self.pins_before_half is None:  # Undo goes back to before the first halving
+            self.pins_before_half = pins
+        self.pins_halved = len(halved)
+        ui.run_javascript(f"tmTapSet({json.dumps(halved)})")  # saved with your pins within 2 seconds
+        self.half_row.refresh()
+
+    @ui.refreshable
+    def half_row(self) -> None:
+        before = getattr(self, "pins_before_half", None)
+        if not before:
+            return
+        with ui.row().classes("items-center gap-2 p-2 rounded bg-sky-50"):
+            ui.label(f"Halved: {len(before)} pins → {self.pins_halved} (the first, the last and those on music "
+                     "changes stayed), so shots are about twice as long.").classes("text-sm text-sky-900")
+            ui.button("Undo", icon="undo", on_click=self.unhalve_pins).props("flat dense no-caps")
+
+    def unhalve_pins(self) -> None:
+        ui.run_javascript(f"tmTapSet({json.dumps(self.pins_before_half)})")
+        ui.notify(f"Your {len(self.pins_before_half)} pins are back.", type="positive")
+        self.pins_before_half = None
+        self.half_row.refresh()  # last: this removes the button you pressed
 
     async def finish_pins(self) -> None:
         """Learn how you pinned the start of the song, and suggest pins for the rest in the same way."""
