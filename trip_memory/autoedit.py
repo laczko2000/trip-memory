@@ -516,7 +516,7 @@ def split_long(rows: list[dict], curves: dict, short: int) -> tuple[list[dict], 
         for k in range(n):
             path = r["path"] if k == 0 else f"{r['path']}#{k + 1}"
             begin = k * (each + PART_GAP)
-            piece = r | {"path": path, "duration": each, "part_of": r["path"] if k else None,
+            piece = r | {"path": path, "duration": each, "part_of": r["path"] if k else None, "part_begin": begin,
                          "bookmarks": [t - begin for t in r.get("bookmarks") or [] if begin <= t <= begin + each]}
             if curve is not None and len(curve):
                 curves[path] = curve[int(round(begin * STEPS_PER_SECOND)):int(round((begin + each) * STEPS_PER_SECOND))]
@@ -747,16 +747,19 @@ def _group_of(row: dict) -> tuple:
     return row.get("story"), row.get("chapter")
 
 
-def collages(shots: list[Shot], slots: list[Slot], rows: dict[str, dict], transition_seconds: float) -> list[Shot]:
+def collages(shots: list[Shot], slots: list[Slot], rows: dict[str, dict], transition_seconds: float,
+             everywhere: bool = False) -> list[Shot]:
     """In the lively parts, a quick run of 3 or 4 photos from one story becomes one collage: the photos pop in one
-    after another on the same beats where they would have been cut, and stay together on screen."""
+    after another on the same beats where they would have been cut, and stay together on screen. `everywhere`
+    (More moments, when no spare photos were left for a photo's cut): any run of 2 to 4 photos, in any music."""
     result: list[Shot] = []
     k, last_end, at = 0, -99.0, 0.0  # at: where shot k starts in the video (seconds)
 
     def fits(n: int, story) -> bool:
         shot = shots[n]
-        return (shot.kind == "photo" and not shot.effects and shot.seconds <= COLLAGE_SHOT and n < len(slots)
-                and slots[n].energy >= 0.62 and _group_of(rows.get(shot.path, {})) == story)
+        return (shot.kind == "photo" and not shot.effects and n < len(slots) and not slots[n].room
+                and (everywhere or (shot.seconds <= COLLAGE_SHOT and slots[n].energy >= 0.62))
+                and not rows.get(shot.path, {}).get("locked") and _group_of(rows.get(shot.path, {})) == story)
 
     while k < len(shots):
         story = _group_of(rows.get(shots[k].path, {}))
@@ -764,7 +767,7 @@ def collages(shots: list[Shot], slots: list[Slot], rows: dict[str, dict], transi
         while run < len(shots) and run - k < COLLAGE_MAX and fits(run, story) and (
                 run == k or shots[run - 1].transition in (None, HARD_CUT)):
             run += 1
-        if run - k >= 3 and at - last_end >= COLLAGE_GAP:
+        if run - k >= (2 if everywhere else 3) and (everywhere or at - last_end >= COLLAGE_GAP):
             group = shots[k:run]
             inside = [transitions.seconds_of(g.transition, transition_seconds) for g in group[:-1]]  # cut overlaps
             appear, t = [], 0.0
@@ -795,7 +798,7 @@ FREEZE_GAP = 20.0  # at most one freeze-frame in this many seconds
 PACK = {"normal": "Normal: one shot a cut", "more": "More moments: collages and videos side by side",
         "max": "As many as fit"}
 POP_GAP = 0.45  # at least this many seconds between two photos popping into a collage
-SIDE_FROM = 1.4  # upright videos go side by side on cuts at least this long
+SIDE_FROM = 0.5  # upright videos go side by side on cuts at least this long (in a landscape video: always)
 TRIPLE_FROM = 2.0  # ... and three of them on cuts at least this long
 
 
@@ -860,8 +863,9 @@ def pack(shots: list[Shot], candidates: list[dict], limits: Limits, curves: dict
 
     def video_ok(shot: Shot) -> bool:
         r = rows.get(shot.path, {})
-        return (limits.landscape and shot.kind == "video" and not shot.effects and abs(shot.speed - 1) < 1e-3
-                and r.get("upright") is True and not r.get("locked") and "#" not in shot.path and shot.seconds >= SIDE_FROM)
+        # (camera moves give way: an upright video alone with black sides looks worse than any zoom helps)
+        return (limits.landscape and shot.kind == "video" and not shot.effects.get("still") and abs(shot.speed - 1) < 1e-3
+                and r.get("upright") is True and not r.get("locked") and shot.seconds >= SIDE_FROM)
 
     # (cuts still to come in each group: the spare shots are shared fairly between them)
     ahead: dict[tuple, int] = {}
@@ -926,6 +930,13 @@ def pack(shots: list[Shot], candidates: list[dict], limits: Limits, curves: dict
                     if a is not None:
                         picked.append((g, a))
                         used.setdefault(_source(g["path"]), []).append((a, a + shot.seconds))
+            if not picked and own:
+                # A short clip with no other upright video in its part of the story: itself again, a moment later
+                # (the same clip in two timings rather than alone with black sides).
+                length = own.get("duration") or shot.seconds
+                lag = min(max(0.0, length - shot.seconds), max(0.4, shot.seconds * 0.5))
+                a = shot.start + lag if shot.start + lag + shot.seconds <= length + 1e-3 else max(0.0, shot.start - lag)
+                picked.append((own, round(a, 2)))
             group = [g for g, _ in picked]
             if group:
                 starts = []
@@ -938,9 +949,10 @@ def pack(shots: list[Shot], candidates: list[dict], limits: Limits, curves: dict
                                            g.get("bookmarks") or [])
                     else:
                         a = fixed
-                    starts.append(round(a + (g.get("keep_offset") or 0.0), 2))
+                    starts.append(round(a + (g.get("keep_offset") or 0.0) + (g.get("part_begin") or 0.0), 2))
                 extra = len(group)
-                shot = replace(shot, effects={"side": [g["path"] for g in group], "starts": starts},
+                shot = replace(shot, effects={"side": [_source(g["path"]) if "#" in g["path"] else g["path"] for g in group],
+                                              "starts": starts},
                                effects_why=f"{extra + 1} upright videos side by side: more moments on one cut")
         out.append(shot)
     return out
@@ -1112,20 +1124,22 @@ def plan_to_music(
         for longest in (None, limits.max_photo, max(limits.min_shot, limits.max_photo / 2)):
             slots = music_slots(song, limits, end, longest)
             slots = merge_slots(slots, len(candidates), longest or max(limits.max_video, limits.max_photo))
-            slots = reserve_room(slots, limits.open_room, limits.end_room)
+            # (a short video keeps less: each card at most a fifth of it)
+            slots = reserve_room(slots, min(limits.open_room, end * 0.2), min(limits.end_room, end * 0.2))
             picks = fill_slots(slots, candidates, limits)
-            if limits.end_room > 0 and 2 < len(picks) < len(slots):
+            end_room = min(limits.end_room, end * 0.2)
+            if end_room > 0 and 2 < len(picks) < len(slots):
                 # Ran out of shots before the music ends: the video ends earlier, still with room for the card
                 # (the last shot runs on into the music after it, so no shot is lost).
                 n = len(picks)
                 a, b = slots[n - 1], n
-                while b < len(slots) and slots[b].end - a.start < limits.end_room - 0.25:
+                while b < len(slots) and slots[b].end - a.start < end_room - 0.25:
                     b += 1
                 if b < len(slots):
                     last = Slot(a.start, slots[b].end, a.energy, a.soft_before, False, room=True)
                     short = slots[: n - 1] + [last]
                 else:
-                    short = reserve_room(slots[:n], 0, limits.end_room)
+                    short = reserve_room(slots[:n], 0, end_room)
                 again = fill_slots(short, candidates, limits)
                 if len(again) == len(short):
                     slots, picks = short + slots[len(picks):], again
@@ -1264,6 +1278,10 @@ def plan_to_music(
     if limits.camera_effects and limits.pack not in ("more", "max"):
         shots = collages(shots, slots, {r["path"]: r for r in candidates}, transition_seconds)
     shots = pack(shots, candidates, limits, curves)
+    if limits.pack in ("more", "max"):
+        # Photos still alone (every photo of their part already had a cut of its own): neighbouring ones share
+        # one cut instead, popping in where they would have been cut.
+        shots = collages(shots, slots, {r["path"]: r for r in candidates}, transition_seconds, everywhere=True)
     used = {s.path for s in shots} | {p for s in shots for key in ("collage", "side") for p in s.effects.get(key, [])}
     used |= {parts[p][0] for p in used if p in parts}
     length = begin / 30

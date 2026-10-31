@@ -266,7 +266,7 @@ def test_auto_edit_uses_only_your_selection_and_keeps_it(tmp_path, monkeypatch):
     paths = [r["path"] for r in trip.items()]
     trip.set_chosen(paths, True)
     trip.set_included(paths[4:], False)  # you selected only the first four
-    limits = autoedit.Limits(max_video=4, max_photo=2, min_shot=1)
+    limits = autoedit.Limits(max_video=4, max_photo=2, min_shot=1, pack="normal")
     trip.auto_edit_steady(limits, 4.0, 0.8, "Fade")  # room for two of them
     board = [r["path"] for r in trip.storyboard()]
     assert set(board) <= set(paths[:4]) and 1 <= len(board) < 4
@@ -620,11 +620,11 @@ def test_the_storyline_follows_your_themes(tmp_path, monkeypatch):
     blocks.sort(key=lambda b: b["activity"] != "Boat")
     trip.set_storyline(order=themes.THEME, blocks=[{k: b[k] for k in ("key", "activity", "person", "on")} for b in blocks],
                        finale=False)
-    plan = trip.auto_edit_steady(autoedit.Limits(max_video=3, max_photo=2, min_shot=1), None, 0.0, "Fade")
+    plan = trip.auto_edit_steady(autoedit.Limits(max_video=3, max_photo=2, min_shot=1, pack="normal"), None, 0.0, "Fade")
     assert [Path(s.path).name for s in plan.shots] == ["p2.jpg", "p0.jpg"]  # the boat first, though taken later
     assert [Path(r["path"]).name for r in trip.storyboard()] == ["p2.jpg", "p0.jpg"]
     trip.set_storyline(order=themes.TIME)
-    plan = trip.auto_edit_steady(autoedit.Limits(max_video=3, max_photo=2, min_shot=1), None, 0.0, "Fade")
+    plan = trip.auto_edit_steady(autoedit.Limits(max_video=3, max_photo=2, min_shot=1, pack="normal"), None, 0.0, "Fade")
     assert [Path(s.path).name for s in plan.shots] == ["p0.jpg", "p2.jpg"]  # as it happened (Other still off)
     # Renaming a theme takes its shots, its first guesses from tags and the storyline along.
     trip.set_storyline(order=themes.THEME, blocks=[{k: b[k] for k in ("key", "activity", "person", "on")} for b in blocks])

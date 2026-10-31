@@ -87,7 +87,7 @@ def test_a_trip_of_photos_fills_a_minute():
     rows = [_clip(n, 5.0) for n in range(4)] + [_clip(10 + n, 0.0, kind="photo") for n in range(40)]
     for n, r in enumerate(rows):
         r["similar_set"] = 1  # even if they all look alike
-    limits = autoedit.Limits(max_video=4.0, max_photo=2.5, min_shot=1.0)
+    limits = autoedit.Limits(max_video=4.0, max_photo=2.5, min_shot=1.0, pack="normal")
     long_song = SongMap(duration=90.0, bpm=120, period=0.5, first_beat=0.0, clear_beat=True, downbeat=0,
                         sections=[Section(0, 32, 0.1, "Calm"), Section(32, 90, 0.9, "Lively")])
     plan = autoedit.plan_to_music(rows, {}, long_song, limits, 60.0, 0.8, "Fade")
@@ -251,7 +251,7 @@ def test_a_planned_montage_is_cut_quickly_in_the_lively_music():
     roles = ["opening"] + ["build-up"] * 7 + ["montage"] * 8 + ["build-up"] * 13 + ["ending"]
     for n, (r, role) in enumerate(zip(rows, roles)):
         r.update(plan_role=role, plan_pos=n, similar_set=n)
-    limits = autoedit.Limits(max_video=4.0, max_photo=4.0, min_shot=1.0, storyline="stories")
+    limits = autoedit.Limits(max_video=4.0, max_photo=4.0, min_shot=1.0, storyline="stories", pack="normal")
     plan = autoedit.plan_to_music(rows, {}, _song(), limits, None, 0.8, "Fade")
     begin, montage = 0.0, []
     by_path = {r["path"]: r for r in rows}
@@ -447,3 +447,14 @@ def test_room_for_the_opening_and_ending_cards():
     assert out[-1].room and out[-1].seconds >= 7.75 and out[-1].end == 40.0
     assert not any(s.room for s in out[1:-1])
     assert reserve_room(slots, 0, 0) == slots
+
+
+def test_more_moments_puts_lone_photos_together_when_no_spare_photos_are_left():
+    from trip_memory.autoedit import Shot, Slot, collages
+    shots = [Shot(path=f"/p{k}.jpg", kind="photo", start=0.0, seconds=2.0) for k in range(5)]
+    slots = [Slot(k * 2.0, k * 2.0 + 2.0, 0.3) for k in range(5)]
+    rows = {s.path: {"path": s.path, "kind": "photo", "story": 1} for s in shots}
+    assert len(collages(shots, slots, rows, 0.5)) == 5  # (calm music: normally no collage)
+    out = collages(shots, slots, rows, 0.5, everywhere=True)
+    assert len(out) < 5 and out[0].effects["collage"]
+    assert {p for s in out for p in [s.path, *s.effects.get("collage", [])]} == {s.path for s in shots}  # all still in
