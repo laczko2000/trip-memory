@@ -785,14 +785,26 @@ class Page:
             return True
 
         def extra(dialog) -> None:
+            with ui.row().classes("w-full items-center gap-3 px-2 py-1 rounded bg-orange-50"):
+                picture = self.trip.moment_picture(row, f["t"])
+                if picture:
+                    ui.image(data_url(picture)).classes("w-40 rounded border-2 border-orange-500") \
+                        .style("aspect-ratio:16/10").props("fit=contain no-spinner")
+                with ui.column().classes("gap-0 flex-1"):
+                    ui.label(f"The app's pick: this frame, at {clock(f['t'])} (the orange mark on the strip; the "
+                             "video stands still on it, the red line on it).").classes("text-sm font-medium "
+                                                                                        "text-orange-900")
+                    ui.label("Right frame? Press ⭐ Keep. A bit off? Press and drag along the strip to the right "
+                             "frame (or Space to play, Space to stop), then ⭐ Keep: the ⭐ goes where the red line "
+                             "is.").classes("text-xs text-orange-800")
+                ui.button("Back to the app's pick", icon="my_location", on_click=lambda: ui.run_javascript(
+                    f"tmShowAt('{box}', {a:.2f}, {b:.2f}, {f['t']:.2f})")).props("flat dense no-caps color=orange-9")
             for side, step, icon in (("left", -1, "chevron_left"), ("right", 1, "chevron_right")):
                 if 0 <= k + step < len(items):
                     ui.button(icon=icon, on_click=lambda s=step: (go(k + s), dialog.close())) \
                         .props(f"round unelevated color=grey-9 size=xl data-nav={step}") \
                         .style(f"position:fixed;{side}:10px;top:50%;transform:translateY(-50%);z-index:20;opacity:.85") \
                         .tooltip(("Previous" if step < 0 else "Next") + " suggestion (← →)")
-            ui.label("Orange: the second the app suggests. It plays the seconds around it. Keep puts the ⭐ there, "
-                     "or where you stopped the red line.").classes("text-xs text-orange-800 px-2")
 
         def hidden() -> None:
             if not state["nav"]:
@@ -801,8 +813,8 @@ class Page:
         self.part_dialog(row | {"ideas": [{"t": f["t"]}]}, a, b,
                          f"{title}: suggestion {k + 1} of {len(items)} · {Path(row['path']).name} at {clock(f['t'])}",
                          [("Not this", "close", dropped, "outline no-caps color=grey-8"),
-                          ("Keep", "star", kept, "unelevated no-caps color=orange-8")],
-                         extra=extra, on_hide=hidden, full=True)
+                          ("Keep at the red line", "star", kept, "unelevated no-caps color=orange-8")],
+                         extra=extra, on_hide=hidden, full=True, focus=f["t"])
 
     def open_idea(self, ideas: list[dict], k: int) -> None:
         rows = {x["path"]: x for x in self.all_items}
@@ -1549,8 +1561,9 @@ class Page:
     def part_dialog(self, it: dict, a: float, b: float, title: str, actions: list[tuple],
                     taken: list[tuple[float, float, int]] | None = None,
                     made: list[tuple[float, float, str]] | None = None, extra=None, on_hide=None,
-                    full: bool = False, on_highlight=None) -> None:
-        """A big window to choose a part of a video: it plays that part (silently, again and again), the strip below
+                    full: bool = False, on_highlight=None, focus: float | None = None) -> None:
+        """focus: open paused on this very frame, the red line on it (a suggested second you check and move).
+        A big window to choose a part of a video: it plays that part (silently, again and again), the strip below
         shows the whole clip (move the mouse along it to look), and the green handles set the part.
         actions: (label, icon, callback(start, end), props) buttons; a callback returning True closes the window."""
         full0, full1 = kept_part(it) or (0.0, float(it["duration"] or 0))
@@ -1626,8 +1639,9 @@ class Page:
 
             async def start() -> None:
                 ui.run_javascript(f"const b = document.getElementById('{box}'); if (b) {{ b.dataset.full0 = {full0}; "
-                                  f"b.dataset.full1 = {full1}; }} tmPlayPart('{box}', {part['min']}, {part['max']}, "
-                                  f"{part['min']})")
+                                  f"b.dataset.full1 = {full1}; }} " +
+                                  (f"tmShowAt('{box}', {part['min']}, {part['max']}, {focus:.2f})" if focus is not None
+                                   else f"tmPlayPart('{box}', {part['min']}, {part['max']}, {part['min']})"))
                 show()
                 picture = await run.io_bound(self.trip.filmstrip, self.clip_of(it))
                 if picture:
@@ -2064,20 +2078,40 @@ class Page:
                             .props("flat dense round size=xs").tooltip("Take this highlight off")
                 for idea in self.trip.highlight_ideas(path):
                     with ui.row().classes("items-center gap-0 bg-orange-50 border border-orange-400 border-dashed "
-                                          "rounded px-2").tooltip("The app suggests this second: keep or drop it"):
-                        ui.label(f"Suggested {clock(idea['t'])}").classes("text-xs text-orange-800")
+                                          "rounded px-2").tooltip("The app suggests this frame: click to see it. Keep "
+                                                                  "puts the ⭐ at the red line (drag it to move)"):
+                        ui.label(f"Suggested {clock(idea['t'])}").classes("text-xs text-orange-800 cursor-pointer "
+                                                                          "underline") \
+                            .on("click", lambda t=idea["t"]: ui.run_javascript(
+                                f"(() => {{ const b = document.getElementById('tm-part-{clip_id(path)}'); if (b) "
+                                f"tmShowAt(b.id, parseFloat(b.dataset.start), parseFloat(b.dataset.end), {t:.2f}); }})()"))
                         ui.button(icon="star", on_click=lambda t=idea["t"]: answer(t, True)) \
                             .props("flat dense round size=xs color=amber-8").tooltip("Keep: a ⭐ highlight")
                         ui.button(icon="close", on_click=lambda t=idea["t"]: answer(t, False)) \
                             .props("flat dense round size=xs").tooltip("Drop: not a highlight")
 
         async def answer(t: float, keep: bool) -> None:
-            await run.io_bound(self.trip.keep_idea if keep else self.trip.drop_idea, path, t)
+            idea_t = t
+            if keep:  # at the red line if you moved it near there (within 5 s), else at the suggested frame
+                at = t
+                try:
+                    red = await ui.run_javascript(
+                        f"(() => {{ const b = document.getElementById('tm-part-{clip_id(path)}'), "
+                        "v = b && b.querySelector('video'); return v && v.src && v.paused && b.dataset.red ? "
+                        "parseFloat(b.dataset.red) : null; })()", timeout=3)
+                    if red is not None and abs(float(red) - t) <= 5:
+                        at = round(float(red), 2)
+                except Exception:
+                    pass
+                await run.io_bound(self.trip.keep_idea, path, at, t)
+                t = at
+            else:
+                await run.io_bound(self.trip.drop_idea, path, t)
             if keep:
                 history.append((f"highlight {clock(t)}", lambda t=t: drop_highlight_at(t)))
                 ui.run_javascript(f"tmHighlightMark({t:.2f})")
             mark()
-            ui.run_javascript(f"document.querySelectorAll('.q-dialog .tm-idea[data-t=\"{t:.2f}\"]')"
+            ui.run_javascript(f"document.querySelectorAll('.q-dialog .tm-idea[data-t=\"{idea_t:.2f}\"]')"
                               ".forEach(el => el.remove())")
             ui.notify(("⭐ Kept" if keep else "Dropped") + ": the app learns from it.", timeout=1500)
             highlights_row.refresh()
@@ -2360,7 +2394,8 @@ class Page:
                                                        else "mark a good part")),
             actions,
             made=[(x["start"], x["end"], f"shot {k}") for k, x in enumerate(shots, 1)],
-            extra=controls, on_hide=after, full=True, on_highlight=highlight)
+            extra=controls, on_hide=after, full=True, on_highlight=highlight,
+            focus=at if at is not None and it["kind"] == "video" else None)
 
     def photo_editor(self, it: dict, dialog, mark, on_rotate=None, on_crop=None) -> None:
         """Zoom in on a photo and drag it to choose what shows: the video uses exactly that part."""
