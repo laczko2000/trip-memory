@@ -456,7 +456,9 @@ class Page:
                 self.progress_bar.set_visibility(True)
                 self.progress_bar.value = p.fraction
                 self.progress_label.text = p.message
-                if self.dirty and time.time() - self.last_refresh > 8:
+                # (while it works through a big trip, redraw less often: every redraw of a page with thousands
+                # of files competes with the work for the computer, and the page can lose its connection)
+                if self.dirty and time.time() - self.last_refresh > max(8.0, len(self.all_items) / 40):
                     self.refresh_all()
                 if getattr(self, "ai_bar", None) is not None and self.ai_busy:
                     self.ai_bar.set_visibility(True)
@@ -478,20 +480,17 @@ class Page:
             self.render_status.text = r["message"]
 
     def refresh_all(self) -> None:
-        self.reload()
-        self.sync_video_size()
-        self.choose_view.refresh()
-        self.filters_view.refresh()
-        self.gallery.refresh()
-        self.people_view.refresh()
-        self.video_summary.refresh()
-        self.editor_card.refresh()
-        self.titles_card.refresh()
-        self.looks_card.refresh()
-        self.storyboard_view.refresh()
-        self.themes_view.refresh()
-        self.stories_view.refresh()
-        self.director_card.refresh()
+        slow = []
+        for name in ("reload", "sync_video_size", "choose_view", "filters_view", "gallery", "people_view",
+                     "video_summary", "editor_card", "titles_card", "looks_card", "storyboard_view", "themes_view",
+                     "stories_view", "director_card"):
+            started = time.time()
+            part = getattr(self, name)
+            part.refresh() if hasattr(part, "refresh") else part()
+            if time.time() - started > 0.3:
+                slow.append(f"{name} {time.time() - started:.1f} s")
+        if slow:  # (in the Terminal: what makes the page slow with a big trip)
+            print("Slow to draw:", ", ".join(slow), flush=True)
 
     # ---------- Choose files ----------
 
@@ -9285,6 +9284,9 @@ def reveal(path: Path | None) -> None:
 
 
 def main() -> None:
+    # The page talks to the app many times a second; with a big trip being analysed in the background, give it
+    # its turn more often (the work threads hand over every 2 ms instead of 5), so it never loses the connection.
+    sys.setswitchinterval(0.002)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     app.add_media_files("/videos", OUTPUT_DIR)
     (app_dir() / "drafts").mkdir(exist_ok=True)
@@ -9297,7 +9299,7 @@ def main() -> None:
     print("\nTrip Memory is running. Your browser should open by itself.")
     print("If it does not, open http://localhost:8765 . Close this window to stop the app.\n")
     # A busy moment (drawing many pictures on a MacBook Air) must not count as the page being closed, which reloads it.
-    ui.run(title="Trip Memory", host="127.0.0.1", port=8765, reload=False, show=True, favicon="🎬", reconnect_timeout=30,
+    ui.run(title="Trip Memory", host="127.0.0.1", port=8765, reload=False, show=True, favicon="🎬", reconnect_timeout=120,
            unocss="wind4")  # UnoCSS styles only what changed; Tailwind re-checked the whole page on every tick
 
 
