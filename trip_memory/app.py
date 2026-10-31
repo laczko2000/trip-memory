@@ -166,6 +166,8 @@ class Page:
         self.last_refresh = 0.0
         self.filters = {"day": ALL, "theme": ALL, "place": ALL, "scene": ALL, "tag": ALL, "look": ALL, "person": ALL,
                         "show": ALL}
+        self.draft_pick: int | None = None  # the clip chosen on the strip under the draft
+        self.draft_busy = False
         self.lock_views: dict[str, list[tuple]] = {}  # clip -> the places on screen that show its locked moments
         self.library_focus: dict | None = None  # one shot opened by double-click: {path, tab, name, scroll}
         self.pending_click = None  # a single click waiting to see whether it becomes a double-click
@@ -264,6 +266,7 @@ class Page:
         ui.on("tm_dictation", self.dictation)
         ui.on("tm_story_drop", self.story_drop)
         ui.on("tm_board_drop", self.board_drop)
+        ui.on("tm_draft_drop", self.draft_drop)
         ui.add_css(".thumb { height: 150px; object-fit: cover; }")
         with ui.column().classes("w-full max-w-6xl mx-auto p-4 gap-3"):
             with ui.row().classes("items-baseline gap-2"):
@@ -417,6 +420,7 @@ class Page:
         self.gallery.refresh()
         self.people_view.refresh()
         self.video_summary.refresh()
+        self.editor_card.refresh()
         self.titles_card.refresh()
         self.looks_card.refresh()
         self.storyboard_view.refresh()
@@ -4261,6 +4265,7 @@ class Page:
 
     def build_video(self) -> None:
         self.video_summary()
+        self.editor_card()
         self.looks_card()
         self.titles_card()
         with ui.card().classes("w-full"):
@@ -4299,6 +4304,255 @@ class Page:
             self.render_status = ui.label("")
             self.result_box = ui.column().classes("w-full")
             self.render_progress.set_visibility(False)
+
+    # ---------- the editor under the video: draft, fine-tune, finalize ----------
+
+    DRAFT_SCALE = 3  # a draft is a third of the size (Full HD -> 640 x 360): quick to make
+
+    def _draft_files(self) -> tuple[Path, Path]:
+        folder = app_dir() / "drafts"
+        folder.mkdir(exist_ok=True)
+        return folder / f"{self.trip.dir.name}.json", folder
+
+    def draft_info(self) -> dict | None:
+        """The last draft of this trip: {"file", "times" [{start, length}], "board" [(path, length)]}."""
+        if not self.trip:
+            return None
+        info, folder = self._draft_files()
+        try:
+            data = json.loads(info.read_text())
+        except (OSError, ValueError):
+            return None
+        return data if (folder / data["file"]).exists() else None
+
+    def draft_board(self) -> list[tuple[str, float]]:
+        photo = self.photo_len.value if getattr(self, "photo_len", None) else 4.0
+        return [(r["path"], round(Trip.screen_length(r, photo), 2)) for r in self.trip.storyboard()]
+
+    @ui.refreshable
+    def editor_card(self) -> None:
+        if not self.trip or not self.items or not self.showing("Make video"):
+            return
+        draft = self.draft_info()
+        board = self.trip.storyboard()
+        now = self.draft_board()
+        changed = bool(draft) and [tuple(x) for x in draft["board"]] != now
+        with ui.card().classes("w-full bg-slate-50"):
+            with ui.row().classes("w-full items-center gap-3"):
+                ui.label("Draft, fine-tune, finalize").classes("text-lg font-semibold")
+                if draft:
+                    ui.label("✓ Draft up to date" if not changed else "You changed things since this draft") \
+                        .classes("text-sm " + ("text-green-700" if not changed else "text-orange-700"))
+            ui.label("1. Make a quick draft (small, fast) and watch it. 2. Fine-tune under the player: drag a clip onto "
+                     "another to swap them, click one to change it. Every cut stays where it is (on your pins). "
+                     "3. Finalize: the full-quality video.").classes("text-sm text-gray-600")
+            with ui.row().classes("items-center gap-2"):
+                self.draft_button = ui.button("Update the draft" if draft else "Make a draft", icon="bolt",
+                                              on_click=self.make_draft).props("unelevated" if not draft or changed else "outline")
+                ui.button("Finalize the video", icon="movie", on_click=self.finalize).props("color=green") \
+                    .tooltip("The full-quality video, saved in Movies › Trip Memory (clips the draft made are not reused: "
+                             "they are smaller)")
+                self.draft_status = ui.label("").classes("text-sm text-gray-600")
+            if not draft:
+                return
+            ui.html(f'<video id="tm-draft" src="/drafts/{draft["file"]}" controls playsinline preload="auto" '
+                    'style="width:100%;max-height:60vh;background:#000;border-radius:6px" '
+                    'ontimeupdate="tmDraftNow(this.currentTime)"></video>', sanitize=False).classes("w-full")
+            times = draft["times"]
+            total = (times[-1]["start"] + times[-1]["length"]) if times else 1
+            same = len(times) == len(board) and not changed
+            ui.label("Clips · drag one onto another to swap them (each keeps the other's length, so the cuts stay on "
+                     "your pins) · click one to change it" + ("" if same else " · update the draft to see your changes")) \
+                .classes("text-xs text-gray-500 mt-1")
+            with ui.element("div").classes("w-full overflow-x-auto"):
+                with ui.element("div").style(f"display:flex;gap:2px;height:56px;min-width:max(100%,{int(total * 14)}px)"):
+                    for n, r in enumerate(board):
+                        length = times[n]["length"] if same and n < len(times) else now[n][1]
+                        start = times[n]["start"] if same and n < len(times) else None
+                        self.draft_tile(n, r, length, start)
+            self.draft_clip(board)
+
+    async def finalize(self) -> None:
+        ui.run_javascript(f"getHtmlElement({self.make_button.id}).scrollIntoView({{block: 'center'}})")
+        await self.make()
+
+    def draft_tile(self, n: int, r: dict, length: float, start: float | None) -> None:
+        locked = bool(r.get("locks") and r["locks"] != "[]")
+        picked = n == self.draft_pick
+        tile = ui.element("div").classes("relative rounded overflow-hidden cursor-pointer select-none " +
+                                         ("ring-4 ring-blue-600" if picked else "ring-1 ring-slate-300"))
+        thumb = data_url(r["thumb"]) if r.get("thumb") else ""
+        tile.style(f"flex:{max(length, 0.3):.2f} 0 0;min-width:26px;background:#334155 url('{thumb}') center/cover")
+        tile._props.update({
+            "id": f"tm-ed-{n}", "draggable": "true",
+            "data-start": f"{start:.3f}" if start is not None else "", "data-length": f"{length:.3f}",
+            "ondragstart": f"event.dataTransfer.setData('text/plain','{n}')",
+            "ondragover": "event.preventDefault();this.style.outline='3px dashed #2563eb'",
+            "ondragleave": "this.style.outline=''",
+            "ondrop": "event.preventDefault();this.style.outline='';"
+                      f"emitEvent('tm_draft_drop',{{src:event.dataTransfer.getData('text/plain'),dst:{n}}})"})
+        tile.on("click", lambda n=n, start=start: self.pick_draft_clip(n, start))
+        tile.tooltip(f"{n + 1}: {length:.1f} s" + (" · 🔒 locked moment" if locked else ""))
+        with tile:
+            ui.label(f"{n + 1}" + (" 🔒" if locked else "")).classes(
+                "absolute left-1 top-0 text-[10px] font-bold text-white").style("text-shadow:0 0 3px #000")
+
+    def pick_draft_clip(self, n: int, start: float | None) -> None:
+        self.draft_pick = None if self.draft_pick == n else n
+        if start is not None and self.draft_pick is not None:
+            ui.run_javascript(f"const v = document.getElementById('tm-draft'); if (v) {{ v.currentTime = {start + 0.05}; }}")
+        self.editor_card.refresh()
+
+    def draft_clip(self, board: list[dict]) -> None:
+        n = self.draft_pick
+        if n is None or n >= len(board):
+            return
+        r = board[n]
+        photo = self.photo_len.value if getattr(self, "photo_len", None) else 4.0
+        length = Trip.screen_length(r, photo)
+        theme = self.theme_of(r)
+        with ui.card().classes("w-full mt-2"):
+            with ui.row().classes("items-center gap-2"):
+                ui.label(f"Clip {n + 1} · {theme} · {length:.1f} s").classes("font-semibold")
+                ui.label(("🎬 " if r["kind"] == "video" else "📷 ") + Path(r["part_of"] or r["path"]).name) \
+                    .classes("text-xs text-gray-500")
+            with ui.row().classes("items-center gap-2"):
+                ui.button(f"Swap for another {theme} shot", icon="swap_horiz",
+                          on_click=lambda: self.draft_swap_dialog(r, theme)).props("outline no-caps")
+                if r["kind"] == "video":
+                    ui.button("Choose the part", icon="content_cut",
+                              on_click=lambda: self.draft_part(r, length)).props("outline no-caps")
+                ui.button("Take it out", icon="remove_circle_outline",
+                          on_click=lambda: self.draft_take_out(r)).props("outline no-caps color=negative") \
+                    .tooltip("The clip before it plays on for its time, so the later cuts stay put")
+                ui.button("Open in the Library", icon="photo_library",
+                          on_click=lambda: self.open_in_library(r["path"], "Make video")).props("flat no-caps")
+            if r["kind"] == "video":
+                self.lock_area(r, "story")
+
+    def draft_changed(self, message: str) -> None:
+        ui.notify(message + " Update the draft to see it.", type="positive")
+        self.reload()
+        self.storyboard_view.refresh()
+        self.editor_card.refresh()
+
+    def draft_drop(self, e) -> None:
+        args = e.args if isinstance(e.args, dict) else {}
+        try:
+            src, dst = int(args.get("src")), int(args.get("dst"))
+        except (TypeError, ValueError):
+            return
+        board = self.trip.storyboard() if self.trip else []
+        if src == dst or not (0 <= src < len(board) and 0 <= dst < len(board)):
+            return
+        self.trip.swap_shots(board[src]["path"], board[dst]["path"], self.photo_len.value)
+        self.draft_pick = dst
+        self.draft_changed(f"Swapped clips {src + 1} and {dst + 1}; each took the other's length.")
+
+    def draft_take_out(self, r: dict) -> None:
+        self.trip.take_out(r["path"], self.photo_len.value)
+        self.draft_pick = None
+        self.draft_changed("Taken out; the clip before it plays on.")
+
+    def draft_swap_dialog(self, r: dict, theme: str) -> None:
+        on_board = {x["part_of"] or x["path"] for x in self.trip.storyboard()}
+        others = [it for it in self.items if self.theme_of(it) == theme and it["path"] not in on_board and it["thumb"]]
+        with ui.dialog() as dialog, ui.card().classes("w-[56rem] max-w-full"):
+            ui.label(f"Swap clip for another {theme} shot").classes("text-lg font-semibold")
+            if not others:
+                ui.label(f"Every {theme} shot is in the video already. Confirm more shots as {theme} in Themes.") \
+                    .classes("text-sm text-gray-600")
+            else:
+                ui.label("Click one: it takes this clip's place and length (the cuts stay put). Hover a video to "
+                         "play it.").classes("text-sm text-gray-600")
+            with ui.element("div").classes("w-full grid grid-cols-4 gap-2 max-h-[60vh] overflow-auto"):
+                for it in others[:120]:
+                    with ui.element("div").classes("rounded p-1 cursor-pointer hover:bg-blue-50") as tile:
+                        self.preview(it, "width:100%;aspect-ratio:16/10", start=self.hover_start(it), view="swap")
+                        ui.label(("🎬 " if it["kind"] == "video" else "📷 ") + fmt_time(it["taken_at"])) \
+                            .classes("text-xs text-gray-600")
+
+                    def use(it=it) -> None:
+                        dialog.close()
+                        self.trip.replace_shot(r["path"], it["path"], self.photo_len.value)
+                        self.draft_changed("Swapped for another shot of the same length.")
+
+                    tile.on("click", use)
+            with ui.row().classes("justify-end w-full"):
+                ui.button("Cancel", on_click=dialog.close).props("flat")
+        dialog.open()
+
+    def draft_part(self, r: dict, length: float) -> None:
+        lo, hi = self.kept_part(r)
+
+        def use(a: float, b: float, locked: bool = False) -> bool:
+            self.trip.set_trim(r["path"], a, b)
+            if locked:
+                self.trip.add_lock(self.clip_of(r), a, b)
+                self._locks_changed(self.clip_of(r))
+            self.trip.fit_length(r["path"], length)  # around the part you chose, so the cuts stay on your pins
+            self.draft_changed(f"This clip now shows {fmt_length(a)}–{fmt_length(b)}, fitted to its {length:.1f} s.")
+            return True
+
+        self.part_dialog(r, lo, hi, f"Choose the part of clip {self.draft_pick + 1} (it stays {length:.1f} s long)",
+                         [("Use this part", "check", use, "outline no-caps"),
+                          ("Use and lock", "lock", lambda a, b: use(a, b, True), "no-caps color=amber-9")],
+                         taken=self.trip.used_parts(self.clip_of(r), but=r["path"]))
+
+    def render_settings(self, scale: int = 1) -> tuple[RenderSettings | None, str | None]:
+        """The settings for making the video (scale 3: a third of the size, for a draft), or (None, problem)."""
+        width, height = RESOLUTIONS[self.resolution.value]
+        music = (self.music_input.value or "").strip().strip("'\"") or None
+        if music and not Path(music).expanduser().is_file():
+            return None, "The music file was not found."
+        settings = RenderSettings(
+            width=width // scale // 2 * 2, height=height // scale // 2 * 2,
+            photo_seconds=self.photo_len.value, max_clip_seconds=self.clip_len.value,
+            transition=self.transition.value, transition_seconds=self.t_len.value,
+            music_path=str(Path(music).expanduser()) if music else None, music_volume=self.music_vol.value,
+            look=self.trip.look(),
+        )
+        settings.end_black, settings.end_title = self.trip.end_card()
+        return settings, None
+
+    async def make_draft(self) -> None:
+        if self.draft_busy or self.rendering["busy"] or not self.trip:
+            return
+        settings, problem = self.render_settings(self.DRAFT_SCALE)
+        if problem:
+            ui.notify(problem, type="warning")
+            return
+        width, height = RESOLUTIONS[self.resolution.value]
+        items = await run.io_bound(self.trip.media_items, False, height > width)
+        if not items:
+            ui.notify("Nothing is in the Storyboard yet.", type="warning")
+            return
+        board = self.draft_board()
+        info, folder = self._draft_files()
+        name = f"{self.trip.dir.name}-{int(time.time())}.mp4"
+        state = {"message": "Starting…"}
+        status = self.draft_status
+        timer = ui.timer(0.5, lambda: status.set_text(state["message"]))
+        self.draft_busy = True
+        self.draft_button.disable()
+        try:
+            timing = folder / f"{name}.times.json"
+            await run.io_bound(render, items, settings, folder / name,
+                               lambda f, m: state.update(message=f"{m} ({100 * f:.0f}%)"), app_dir() / "clip-cache", timing)
+            old = self.draft_info()
+            info.write_text(json.dumps({"file": name, "times": json.loads(timing.read_text()), "board": board}))
+            timing.unlink(missing_ok=True)
+            if old:
+                (folder / old["file"]).unlink(missing_ok=True)
+        except Exception as exc:
+            traceback.print_exc()
+            timer.cancel()
+            status.set_text(f"Something went wrong: {exc}")
+            return
+        finally:
+            self.draft_busy = False
+        timer.cancel()
+        self.editor_card.refresh()
 
     @ui.refreshable
     def looks_card(self) -> None:
@@ -4611,6 +4865,13 @@ function tmStop(box) {
   v.style.display = 'none';
 }
 let tmPlaying = null;
+// The draft under the editor: the clip playing now is outlined on the strip.
+function tmDraftNow(t) {
+  document.querySelectorAll('[id^=tm-ed-]').forEach(el => {
+    const a = parseFloat(el.dataset.start), b = a + parseFloat(el.dataset.length);
+    el.style.boxShadow = (!isNaN(a) && t >= a && t < b) ? 'inset 0 -5px 0 #f59e0b' : '';
+  });
+}
 // Dragging a clip or a theme near the top or bottom of the window scrolls the page, faster the closer you get.
 let tmDragY = null, tmDragTimer = null;
 document.addEventListener('dragover', (e) => { tmDragY = e.clientY; });
@@ -5140,6 +5401,8 @@ def reveal(path: Path | None) -> None:
 def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     app.add_media_files("/videos", OUTPUT_DIR)
+    (app_dir() / "drafts").mkdir(exist_ok=True)
+    app.add_media_files("/drafts", app_dir() / "drafts")
     app.add_static_files("/data", app_dir())
     ui.add_body_html(HOVER_SCRIPT, shared=True)
     ui.add_body_html(TAP_SCRIPT, shared=True)

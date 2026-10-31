@@ -703,3 +703,26 @@ def test_moment_names_are_offered_again_in_the_next_trip(tmp_path, monkeypatch):
     b = catalog.Trip(tmp_path / "b")
     assert b.moment_names("Kitesurfing") == ["kite jump", "cheers"]
     assert b.moment_names("Food & drink")[0] == "cheers"
+
+
+def test_editing_under_the_video_keeps_the_cuts_where_they_are(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    for n, colour in enumerate(["red", "green", "blue", "yellow"]):
+        exif = Image.Exif()
+        exif[306] = f"2025:07:03 1{n}:00:00"
+        Image.new("RGB", (160, 90), colour).save(trip_dir / f"p{n}.jpg", exif=exif)
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    paths = [r["path"] for r in trip.items()]
+    for path, seconds in zip(paths, (1.0, 2.0, 3.0, 4.0)):
+        trip.execute("UPDATE items SET seconds = ? WHERE path = ?", (seconds, path))
+    board = lambda: [(Path(r["path"]).name, r["seconds"]) for r in trip.storyboard()]
+    trip.swap_shots(paths[0], paths[2])
+    assert board() == [("p2.jpg", 1.0), ("p1.jpg", 2.0), ("p0.jpg", 3.0), ("p3.jpg", 4.0)]
+    trip.take_out(paths[1])  # p2 before it plays on for its 2 seconds
+    assert board() == [("p2.jpg", 3.0), ("p0.jpg", 3.0), ("p3.jpg", 4.0)]
+    trip.replace_shot(paths[0], paths[1])
+    assert board() == [("p2.jpg", 3.0), ("p1.jpg", 3.0), ("p3.jpg", 4.0)]

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 import os
 import shutil
 import sys
@@ -546,8 +547,11 @@ def render(
     out_path: str | Path,
     on_progress: ProgressFn | None = None,
     cache_dir: str | Path | None = None,
+    timing: str | Path | None = None,
 ) -> Path:
     """Build the memory video. Progress is reported as (0..1, message).
+
+    timing: a file to write where each shot starts and how long it is in the video ([{"start", "length"}]).
 
     Prepared clips are kept in cache_dir (when given), so making the video again after a small change
     only prepares what is new.
@@ -589,6 +593,8 @@ def render(
         segments = [ready[_segment_key(item, settings)] for item in items]
         lengths = [_segment_length(seg) for seg in segments]
         styles = [_transition_between(items[k - 1], k, settings) for k in range(1, len(items))]
+        if timing:
+            Path(timing).write_text(json.dumps(shot_times(lengths, styles)))
         if settings.end_black > 0:
             # The last shot fades to black; the end title fades in on the black.
             seconds = settings.end_black + END_FADE
@@ -684,6 +690,19 @@ def _join(
     if made < total - 1.0:  # never hand over a video that silently stops early
         raise FFmpegError(f"The finished video is only {made:.1f} s long instead of {total:.1f} s. "
                           f"Please send me the report saved at {report}.")
+
+
+def shot_times(lengths: list[float], styles: list[tuple[str | None, float]]) -> list[dict]:
+    """Where each shot starts in the joined video (a transition overlaps it with the one before) and how long
+    it is seen, the same way _planned_length counts."""
+    out, at = [], 0
+    for k, length in enumerate(lengths):
+        if k:
+            style, seconds = styles[k - 1]
+            at -= max(1, round(min(seconds, lengths[k - 1] * 0.4, length * 0.4) * FPS)) if style else 1
+        out.append({"start": round(at / FPS, 3), "length": round(length, 3)})
+        at += round(length * FPS)
+    return out
 
 
 def _planned_length(lengths: list[float], styles: list[tuple[str | None, float]], s: RenderSettings) -> float:

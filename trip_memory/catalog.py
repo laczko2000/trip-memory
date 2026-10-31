@@ -601,6 +601,97 @@ class Trip:
             self.db.executemany("UPDATE items SET position = ? WHERE path = ?", list(enumerate(order)))
             self.db.commit()
 
+    # ---------- the editor under the video: cuts stay where they are ----------
+
+    @staticmethod
+    def screen_length(r: dict, photo_seconds: float = 4.0) -> float:
+        """How long a storyboard shot is on screen (before the transitions overlap it)."""
+        fx = json.loads(r["effects"]) if isinstance(r.get("effects"), str) and r["effects"] else (r.get("effects") or {})
+        if r["kind"] != "video":
+            return float(r["seconds"] or photo_seconds)
+        start = r["trim_start"] if r["trim_start"] is not None else (r["keep_start"] or 0.0)
+        end = r["trim_end"] if r["trim_start"] is not None else (r["keep_end"] or r["duration"] or 0.0)
+        return max(0.1, (end - start) / source_factor(fx) / (r["speed"] or 1.0)) + held(fx)
+
+    def fit_length(self, path: str, seconds: float) -> None:
+        """Make a shot last this long on screen, keeping the middle of its part (and its locked moment).
+        A video too short for it is slowed down a little (to half speed at most)."""
+        rows = [r for r in self.items(parts=True) if r["path"] == path]
+        if not rows:
+            return
+        r = rows[0]
+        if r["kind"] != "video":
+            self.execute("UPDATE items SET seconds = ? WHERE path = ?", (round(seconds, 3), path))
+            return
+        fx = json.loads(r["effects"]) if r["effects"] else {}
+        low, high = (r["keep_start"] or 0.0), (r["keep_end"] or r["duration"] or 0.0)
+        start = r["trim_start"] if r["trim_start"] is not None else low
+        end = r["trim_end"] if r["trim_start"] is not None else high
+        middle = (start + end) / 2
+        locks = [(a, b) for a, b in (json.loads(r["locks"]) if r.get("locks") else []) if a < end and b > start]
+        if locks:  # keep the locked moment it shows in, whole
+            middle = (locks[0][0] + locks[0][1]) / 2
+        speed = r["speed"] or 1.0
+        wanted = max(0.1, seconds - held(fx)) * source_factor(fx)
+        span = wanted * speed
+        if span > high - low:
+            span = high - low
+            speed = max(0.5, span / wanted)
+        a = min(max(low, middle - span / 2), high - span)
+        self.execute("UPDATE items SET trim_start = ?, trim_end = ?, speed = ? WHERE path = ?",
+                     (round(a, 3), round(a + span, 3), round(speed, 3), path))
+
+    def _fix_order(self) -> list[dict]:
+        """The storyboard with every shot's place written down (so one change can't reshuffle the rest)."""
+        board = self.storyboard()
+        with self._lock:
+            self.db.executemany("UPDATE items SET position = ? WHERE path = ?", [(n, r["path"]) for n, r in enumerate(board)])
+            self.db.commit()
+        return board
+
+    def swap_shots(self, a: str, b: str, photo_seconds: float = 4.0) -> None:
+        """Swap two shots in the storyboard. Each takes the other's length, so every cut stays where it was
+        (on your pins)."""
+        board = {r["path"]: (n, r) for n, r in enumerate(self._fix_order())}
+        if a not in board or b not in board or a == b:
+            return
+        self.checkpoint("swapping two shots")
+        (na, ra), (nb, rb) = board[a], board[b]
+        la, lb = self.screen_length(ra, photo_seconds), self.screen_length(rb, photo_seconds)
+        with self._lock:
+            self.db.executemany("UPDATE items SET position = ? WHERE path = ?", [(nb, a), (na, b)])
+            self.db.commit()
+        self.fit_length(a, lb)
+        self.fit_length(b, la)
+
+    def replace_shot(self, old: str, new: str, photo_seconds: float = 4.0) -> None:
+        """Put another shot in the place of one, as long as it was."""
+        board = {r["path"]: (n, r) for n, r in enumerate(self._fix_order())}
+        if old not in board:
+            return
+        self.checkpoint("swapping a shot for another")
+        n, r = board[old]
+        length = self.screen_length(r, photo_seconds)
+        with self._lock:
+            self.db.execute("UPDATE items SET cut_out = 1, position = NULL WHERE path = ?", (old,))
+            self.db.execute("UPDATE items SET included = 1, cut_out = 0, chosen = 1, position = ?, trim_start = NULL, "
+                            "trim_end = NULL, speed = 1.0, effects = NULL WHERE path = ?", (n, new))
+            self.db.commit()
+        self.fit_length(new, length)
+
+    def take_out(self, path: str, photo_seconds: float = 4.0) -> None:
+        """Take a shot out of the video; the shot before it plays on for its time, so the later cuts stay put."""
+        board = self._fix_order()
+        at = next((n for n, r in enumerate(board) if r["path"] == path), None)
+        if at is None:
+            return
+        self.checkpoint("taking a shot out")
+        gone = self.screen_length(board[at], photo_seconds)
+        self.execute("UPDATE items SET cut_out = 1, position = NULL WHERE path = ?", (path,))
+        neighbour = board[at - 1] if at else (board[1] if len(board) > 1 else None)
+        if neighbour:
+            self.fit_length(neighbour["path"], self.screen_length(neighbour, photo_seconds) + gone)
+
     def set_tags(self, path: str, tags: list[str] | None) -> None:
         """Your own tags for a file (None goes back to the app's suggestion)."""
         self.execute("UPDATE items SET tags_user = ? WHERE path = ?", (None if tags is None else json.dumps(tags), path))
