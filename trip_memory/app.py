@@ -208,6 +208,7 @@ class Page:
         self.theme_selected: set[str] = set()
         self.theme_limit = 60
         self.nav_order: dict[str, list[str]] = {}  # Previous / Next in the big window: the tiles where you opened it
+        self.vzoom_moved = None  # dragging the zoom frame on a video in the big window
         self.theme_ticks: dict = {}  # path -> (tick box, its mark, sure): ticking changes only that box
         self.theme_rows_shown: dict = {}
         self.theme_summary = None
@@ -1574,6 +1575,7 @@ class Page:
             height = "max(240px,calc(100vh - 360px))" if full else "min(60vh,520px)"
             with ui.element("div").classes("w-full").on("dblclick", lambda: dialog.close()) \
                     .tooltip("Double-click: close and go back") as holder:
+                holder.on("tmvzoom", lambda e: self.vzoom_moved and self.vzoom_moved(e), ["detail"])
                 if on_highlight is not None:  # Space plays and pauses, Shift puts a highlight here
                     holder.props("data-shotwin")
                     holder.on("tmhighlight", lambda e: on_highlight(float(e.args["detail"]["t"])), ["detail"])
@@ -2015,6 +2017,8 @@ class Page:
 
                 ui.button("Open in the Library", icon="photo_library", on_click=to_library) \
                     .props("flat dense no-caps size=sm")
+            if it["kind"] == "video":
+                video_tools(dialog)
             if history:
                 with ui.row().classes("w-full items-center gap-2 px-2"):
                     ui.button(f"Undo: {history[-1][0]}", icon="undo", on_click=lambda: undo(dialog)) \
@@ -2046,6 +2050,52 @@ class Page:
                                          "remove the unticked files.")
                         else:
                             ui.label("The rest of the video is dropped (unticked).").classes("text-xs text-gray-500")
+
+        def video_tools(dialog) -> None:
+            """Turn the video, and zoom in on part of it (drag the yellow frame on the picture to move it)."""
+            crop = json.loads(it["crop"]) if it.get("crop") else {}
+            z = {"zoom": float(crop.get("zoom", 1.0)), "x": float(crop.get("x", 0.5)), "y": float(crop.get("y", 0.5))}
+            box = f"tm-part-{clip_id(path)}"
+
+            def show_zoom(save: bool = True) -> None:
+                ui.run_javascript(f"tmVZoom('{box}', {z['zoom']}, {z['x']}, {z['y']})")
+                zoom_words.text = ("Whole picture" if z["zoom"] <= 1.001 else
+                                   f"Zoomed in {z['zoom']:.1f}×: the video keeps what's inside the yellow frame "
+                                   "(drag it to move)")
+                if save:
+                    self.trip.set_crop(path, z["zoom"], z["x"], z["y"])
+                    mark()
+
+            def zoom_to(value: float) -> None:
+                z["zoom"] = round(min(max(value, 1.0), 3.0), 2)
+                if slider.value != z["zoom"]:
+                    slider.value = z["zoom"]
+                show_zoom()
+
+            def dragged(e) -> None:
+                z["x"], z["y"] = float(e.args["detail"]["x"]), float(e.args["detail"]["y"])
+                show_zoom()
+
+            with ui.row().classes("w-full items-center gap-2 px-2"):
+                ui.button("Turn left", icon="rotate_left", on_click=lambda: rotate(-90, dialog)) \
+                    .props("outline dense no-caps").tooltip("Turn the video 90° anti-clockwise")
+                ui.button("Turn right", icon="rotate_right", on_click=lambda: rotate(90, dialog)) \
+                    .props("outline dense no-caps").tooltip("Turn the video 90° clockwise")
+                ui.button("Upside down", icon="sync", on_click=lambda: rotate(180, dialog)) \
+                    .props("outline dense no-caps").tooltip("Turn it round (180°)")
+                ui.separator().props("vertical")
+                ui.button(icon="zoom_out", on_click=lambda: zoom_to(z["zoom"] / 1.2)).props("flat round dense") \
+                    .tooltip("Zoom out")
+                slider = ui.slider(min=1.0, max=3.0, step=0.05, value=z["zoom"]) \
+                    .props("dense").classes("w-48 tm-zoom").on("change", lambda e: zoom_to(float(e.args)))
+                ui.button(icon="zoom_in", on_click=lambda: zoom_to(z["zoom"] * 1.2)).props("flat round dense") \
+                    .tooltip("Zoom in")
+                ui.button("Whole picture", icon="fit_screen",
+                          on_click=lambda: (z.update(x=0.5, y=0.5), zoom_to(1.0))).props("flat dense no-caps")
+                zoom_words = ui.label().classes("text-xs text-gray-600")
+                ui.label("· Trim: drag the green bar, then Cut: keep only this part").classes("text-xs text-gray-500")
+            ui.timer(0.6, lambda: show_zoom(save=False), once=True)
+            self.vzoom_moved = dragged  # (the big window passes on where you dragged the frame)
 
         @ui.refreshable
         def star_row() -> None:  # a photo's ⭐: like a video's highlight, it is always in the video
@@ -8030,6 +8080,44 @@ document.addEventListener('keydown', (e) => {
     tmNavKey(e);
   }
 }, true);
+// Zoom on a video in the big window: a frame over the picture shows what the video keeps (outside darkened);
+// drag the frame to move it. z: zoom (1 = all), x, y: its middle (0..1) in the turned picture.
+function tmVZoom(id, z, x, y) {
+  const box = document.getElementById(id);
+  if (!box) return;
+  let f = box.querySelector('.tm-vzoom');
+  if (z <= 1.001) { if (f) f.remove(); return; }
+  const img = box.querySelector('img');
+  const iw = (img && img.naturalWidth) || 16, ih = (img && img.naturalHeight) || 9;
+  const W = box.clientWidth, H = box.clientHeight, k = Math.min(W / iw, H / ih);
+  const cw = iw * k, ch = ih * k, l0 = (W - cw) / 2, t0 = (H - ch) / 2;
+  x = Math.min(Math.max(x, 0.5 / z), 1 - 0.5 / z); y = Math.min(Math.max(y, 0.5 / z), 1 - 0.5 / z);
+  if (!f) {
+    f = document.createElement('div');
+    f.className = 'tm-vzoom';
+    f.title = 'What the video keeps: drag to move it';
+    Object.assign(f.style, {position: 'absolute', border: '2px solid #facc15', boxShadow: '0 0 0 9999px rgba(0,0,0,.55)',
+                            cursor: 'grab', zIndex: 5, touchAction: 'none'});
+    f.addEventListener('dblclick', (e) => e.stopPropagation());
+    f.addEventListener('pointerdown', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      f.setPointerCapture(e.pointerId);
+      const sx = e.clientX, sy = e.clientY, ox = parseFloat(f.dataset.x), oy = parseFloat(f.dataset.y);
+      const move = (m) => tmVZoom(id, parseFloat(f.dataset.z), ox + (m.clientX - sx) / parseFloat(f.dataset.cw),
+                                  oy + (m.clientY - sy) / parseFloat(f.dataset.ch));
+      const up = () => {
+        f.removeEventListener('pointermove', move); f.removeEventListener('pointerup', up);
+        box.dispatchEvent(new CustomEvent('tmvzoom', {bubbles: true, detail: {x: parseFloat(f.dataset.x), y: parseFloat(f.dataset.y)}}));
+      };
+      f.addEventListener('pointermove', move); f.addEventListener('pointerup', up);
+    });
+    box.appendChild(f);
+    if (img && !img.complete) img.addEventListener('load', () => tmVZoom(id, parseFloat(f.dataset.z), parseFloat(f.dataset.x), parseFloat(f.dataset.y)), {once: true});
+  }
+  Object.assign(f.dataset, {z: z, x: x, y: y, cw: cw, ch: ch});
+  Object.assign(f.style, {width: cw / z + 'px', height: ch / z + 'px', left: l0 + cw * (x - 0.5 / z) + 'px',
+                          top: t0 + ch * (y - 0.5 / z) + 'px'});
+}
 // The shot window: Space plays and pauses the video, Shift puts a highlight at the second it is at.
 document.addEventListener('keydown', (e) => {
   if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !e.target.closest('.q-range, .q-slider')

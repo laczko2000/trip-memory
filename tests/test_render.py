@@ -423,3 +423,10 @@ def test_upright_videos_play_side_by_side(tmp_path):
     frame = _frame(out, 1.5)
     centres = [frame[y + th // 2, x + tw // 2].astype(int) for x, y, tw, th in side_tiles(3, 640, 360)]
     assert centres[0][0] > 150 and centres[1][1] > 100 and centres[2][2] > 150  # red, green, blue next to each other
+
+
+def test_a_zoomed_in_video_keeps_just_that_part():
+    from trip_memory.render import crop_filter
+    assert crop_filter(None) == "" and crop_filter({"zoom": 1.0}) == ""
+    f = crop_filter({"zoom": 2.0, "x": 0.9, "y": 0.5})  # (the frame can't leave the picture)
+    assert "iw/2.0000" in f and "x=iw*0.5000" in f and "y=ih*0.2500" in f

@@ -903,13 +903,14 @@ class Trip:
         with self._lock:
             self.db.execute("DELETE FROM faces WHERE path = ?", (path,))
             self.db.execute(
-                "UPDATE items SET rotation = ?, rotation_checked = 1, faces_done = 0, scene_done = 0, tags_done = 0, dhash = NULL, features = NULL "
+                "UPDATE items SET rotation = ?, rotation_checked = 1, crop = NULL, faces_done = 0, scene_done = 0, tags_done = 0, dhash = NULL, features = NULL "
                 "WHERE path = ?",
                 (rotation, path),
             )
             self.db.commit()
         row = self.query("SELECT * FROM items WHERE path = ?", (path,))[0]
         self.execute("UPDATE items SET thumb = ? WHERE path = ?", (str(self._make_thumb(row)), path))
+        self.execute("UPDATE items SET rotation = ?, crop = NULL WHERE part_of = ?", (rotation, path))  # (parts too)
 
     def reset_order(self) -> None:
         self.execute("UPDATE items SET position = NULL")
@@ -2026,11 +2027,12 @@ class Trip:
         self.execute("UPDATE items SET reverse = ? WHERE path = ? OR part_of = ?", (int(on), path, path))
 
     def set_crop(self, path: str, zoom: float, x: float, y: float) -> None:
-        """Zoom in on a photo: the video shows only that part of it (zoom 1: the whole photo again)."""
+        """Zoom in on a photo or a video: the video shows only that part of it (zoom 1: the whole picture again)."""
         zoom = min(max(float(zoom), 1.0), 5.0)
         crop = None if zoom <= 1.001 else {"zoom": round(zoom, 3), "x": round(min(max(x, 0.0), 1.0), 4),
                                             "y": round(min(max(y, 0.0), 1.0), 4)}
-        self.execute("UPDATE items SET crop = ? WHERE path = ?", (json.dumps(crop) if crop else None, path))
+        self.execute("UPDATE items SET crop = ? WHERE path = ? OR part_of = ?",
+                     (json.dumps(crop) if crop else None, path, path))
 
     @property
     def shots_dir(self) -> Path:
@@ -2076,7 +2078,7 @@ class Trip:
         new = {k: row[k] for k in ("kind", "has_audio", "hdr", "lat", "lon", "camera", "place", "country",
                                    "place_guessed", "rotation", "rotation_checked", "theme", "theme_auto", "theme_sure",
                                    "story", "scene", "scene_user", "tags", "tags_user", "people_tag", "included",
-                                   "clip_sound", "clip_volume") if k in row}
+                                   "clip_sound", "clip_volume", "crop") if k in row}
         new |= {"path": str(out), "shot_of": path, "taken_at": when.isoformat(), "taken_orig": orig.isoformat(),
                 "duration": end - start, "mtime": out.stat().st_mtime, "chosen": 1, "best": 1,
                 "locks": json.dumps(locks) if locks else None, "postits": json.dumps(postits) if postits else None}

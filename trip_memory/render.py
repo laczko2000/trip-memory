@@ -177,7 +177,7 @@ def _video_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
     moving = (end - start) / speed / source_factor(effects)  # the video playing
     length = moving + held(effects)  # on screen, with a freeze-frame at the end
     smooth = f",framerate=fps={FPS}" if speed < 0.95 else ""  # slow motion: blend frames, so it doesn't stutter
-    look = (_hdr_to_sdr() if item.hdr else "") + rotate_filter(item.rotation)
+    look = (_hdr_to_sdr() if item.hdr else "") + rotate_filter(item.rotation) + crop_filter(item.crop)
     graph = ""
     src = "[0:v]reverse," if item.reverse else "[0:v]"  # played backwards (only the part used is read in)
     if effects.get("ramp"):
@@ -339,6 +339,16 @@ def _zoom_filter(item: MediaItem, length: float) -> str:
     return (f",perspective=x0='{expr(corner['l'])}':y0='{expr(corner['t'])}':x1='{expr(corner['r'])}':"
             f"y1='{expr(corner['t'])}':x2='{expr(corner['l'])}':y2='{expr(corner['b'])}':x3='{expr(corner['r'])}':"
             f"y3='{expr(corner['b'])}':interpolation=linear:eval=frame")
+
+
+def crop_filter(crop: dict | None) -> str:
+    """FFmpeg filter for the part of a (turned) video you zoomed in on: crop {"zoom", "x", "y"} as for photos."""
+    zoom = float((crop or {}).get("zoom") or 1.0)
+    if zoom <= 1.001:
+        return ""
+    x = min(max(float(crop.get("x", 0.5)), 0.5 / zoom), 1 - 0.5 / zoom) - 0.5 / zoom
+    y = min(max(float(crop.get("y", 0.5)), 0.5 / zoom), 1 - 0.5 / zoom) - 0.5 / zoom
+    return f"crop=w=trunc(iw/{zoom:.4f}/2)*2:h=trunc(ih/{zoom:.4f}/2)*2:x=iw*{x:.4f}:y=ih*{y:.4f},"
 
 
 def rotate_filter(rotation: int) -> str:
@@ -578,6 +588,8 @@ def _segment_key(item: MediaItem, s: RenderSettings) -> str:
     else:
         parts += [clip_range(item, s), item.has_audio and item.sound and s.keep_clip_sound, item.volume * s.clip_volume,
                   item.speed, sorted((item.effects or {}).items()), item.fx_in, item.fx_out, item.reverse]
+        if item.crop:
+            parts += [sorted(item.crop.items())]
     return hashlib.sha1(repr(parts).encode()).hexdigest()[:20]
 
 
