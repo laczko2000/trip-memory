@@ -1546,6 +1546,48 @@ class Trip:
         self._group_stories()
         return str(out)
 
+    def crop_to_copy(self, path: str) -> str:
+        """Crop a photo the way you zoomed and moved it: the cropped picture is saved as a copy (in the app's folder;
+        your photo is not changed) that takes the photo's place: the copy is ticked, the photo unticked. Undo with
+        drop_shot (and tick the photo again). Returns the copy's path."""
+        row = dict(self.query("SELECT * FROM items WHERE path = ?", (path,))[0])
+        crop = json.loads(row["crop"]) if row.get("crop") else None
+        if row["kind"] != "photo" or not crop:
+            raise ValueError("Zoom in on the photo first")
+        from .render import crop_photo
+
+        self.checkpoint("cropping a photo")
+        self.shots_dir.mkdir(parents=True, exist_ok=True)
+        stem = Path(path).stem
+        n = 1
+        while list(self.shots_dir.glob(f"{stem} crop {n}.jpg")):
+            n += 1
+        out = self.shots_dir / f"{stem} crop {n}.jpg"
+        with Image.open(path) as img:
+            picture = ImageOps.exif_transpose(img).convert("RGB").rotate(-(row["rotation"] or 0), expand=True)
+        picture = crop_photo(picture, crop)
+        exif = Image.Exif()
+        when = datetime.fromisoformat(row["taken_orig"] or row["taken_at"]).strftime("%Y:%m:%d %H:%M:%S")
+        exif[306] = when
+        picture.save(out, quality=95, exif=exif)
+        new = {k: row[k] for k in ("kind", "taken_at", "taken_orig", "lat", "lon", "camera", "place", "country",
+                                   "theme", "theme_auto", "theme_sure", "story", "scene", "scene_user", "tags",
+                                   "tags_user", "included", "seconds", "position") if k in row}
+        new |= {"path": str(out), "shot_of": path, "mtime": out.stat().st_mtime, "chosen": 1, "best": 1,
+                "rotation": 0, "rotation_checked": 1, "duration": 0.0, "has_audio": 0, "hdr": 0}
+        with self._lock:
+            self.db.execute(f"INSERT INTO items ({', '.join(new)}) VALUES ({', '.join('?' * len(new))})",
+                            tuple(new.values()))
+            self.db.execute("UPDATE items SET chosen = 0, position = NULL WHERE path = ?", (path,))
+            self.db.commit()
+        made = dict(self.query("SELECT * FROM items WHERE path = ?", (str(out),))[0])
+        try:
+            self.execute("UPDATE items SET thumb = ? WHERE path = ?", (str(self._make_thumb(made)), str(out)))
+        except Exception:
+            traceback.print_exc()
+        self._group_stories()
+        return str(out)
+
     def shots_from(self, path: str) -> list[dict]:
         """The shots you made from a video, in order: [{path, start, end}] (seconds in the video)."""
         rows = self.query("SELECT path, taken_at, duration FROM items WHERE shot_of = ? AND removed = 0", (path,))

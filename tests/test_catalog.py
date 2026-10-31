@@ -826,3 +826,29 @@ def test_pasting_a_shot_in_front_keeps_every_cut_in_place(tmp_path, monkeypatch)
     assert board() == [("p3.jpg", 1.0), ("p2.jpg", 2.0), ("p1.jpg", 3.0), ("p0.jpg", 4.0)]
     trip.move(paths[3], 2)  # two down
     assert board() == [("p2.jpg", 1.0), ("p1.jpg", 2.0), ("p3.jpg", 3.0), ("p0.jpg", 4.0)]
+
+
+def test_crop_saves_a_cropped_copy_in_place_of_the_photo(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    img = Image.new("RGB", (400, 200), "red")
+    img.paste("blue", (200, 0, 400, 200))
+    exif = Image.Exif()
+    exif[306] = "2025:07:03 10:00:00"
+    img.save(trip_dir / "p.jpg", exif=exif)
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    photo = str(trip_dir / "p.jpg")
+    trip.set_crop(photo, 2.0, 0.75, 0.5)
+    copy = trip.crop_to_copy(photo)
+    by = {i["path"]: i for i in trip.items()}
+    assert by[copy]["chosen"] and not by[photo]["chosen"] and by[copy]["shot_of"] == photo
+    assert by[copy]["taken_at"] == by[photo]["taken_at"] and by[copy]["thumb"]
+    with Image.open(copy) as c:
+        assert c.size == (200, 100) and c.getpixel((100, 50))[2] > 200  # the blue half, zoomed in
+    with Image.open(photo) as p:
+        assert p.size == (400, 200)  # your own photo is not changed
+    trip.prepare()
+    assert copy in {i["path"] for i in trip.items()}

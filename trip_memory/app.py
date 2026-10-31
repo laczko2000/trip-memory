@@ -1679,7 +1679,8 @@ class Page:
             if it["kind"] == "video":
                 highlights_row()
             if it.get("shot_of"):
-                ui.label("✂ A shot you made from " + Path(it["shot_of"]).name).classes("text-xs text-green-800 px-2")
+                ui.label(("✂ A shot you made from " if it["kind"] == "video" else "✂ A cropped copy of ")
+                         + Path(it["shot_of"]).name).classes("text-xs text-green-800 px-2")
             if shots:
                 with ui.column().classes("w-full gap-1 px-2"):
                     ui.label(f"Shots you made from this video ({len(shots)}): each is its own shot now, with its own "
@@ -1756,8 +1757,39 @@ class Page:
                 await done
             mark()
             ui.notify(f"Undone: {what}", timeout=2000)
+            if self.trip.query("SELECT 1 FROM items WHERE path = ?", (path,)):
+                again()
+            else:  # (undoing a crop: back to the photo)
+                go(changed.get("back_to") or path, dialog)
+                return
+            dialog.close()
+
+        async def rotate(degrees: int, dialog) -> None:
+            await run.io_bound(self.trip.rotate, path, degrees)
+            history.append(("turn", lambda: run.io_bound(self.trip.rotate, path, -degrees)))
+            mark()
             again()
             dialog.close()
+
+        async def crop(dialog) -> None:
+            try:
+                copy = await run.io_bound(self.trip.crop_to_copy, path)
+            except Exception as exc:
+                ui.notify(f"Could not crop: {exc}", type="warning")
+                return
+
+            async def back(copy=copy) -> None:
+                self.trip.execute("UPDATE items SET position = (SELECT position FROM items WHERE path = ?) "
+                                  "WHERE path = ?", (copy, path))
+                self.trip.set_chosen([path], True)
+                await run.io_bound(self.trip.drop_shot, copy)
+
+            history.append(("crop", back))
+            changed["back_to"] = path
+            mark()
+            ui.notify("Cropped: the cropped photo is used from now on (your own photo is not changed).",
+                      type="positive")
+            go(copy, dialog)
 
         async def take_back(shot: str, dialog) -> None:
             await run.io_bound(self.trip.drop_shot, shot)
@@ -1777,7 +1809,8 @@ class Page:
             with self.window_box, ui.dialog().props("maximized") as dialog, \
                     ui.card().classes("w-full h-full gap-2 overflow-auto"):
                 ui.label(Path(path).name).classes("text-lg font-semibold")
-                self.photo_editor(it, dialog, mark)
+                self.photo_editor(it, dialog, mark, lambda d, dialog=dialog: rotate(d, dialog),
+                                  lambda dialog=dialog: crop(dialog))
                 controls(dialog)
                 with ui.row().classes("w-full justify-end"):
                     ui.button("Close", on_click=dialog.close).props("flat no-caps")
@@ -1839,7 +1872,7 @@ class Page:
             made=[(x["start"], x["end"], f"shot {k}") for k, x in enumerate(shots, 1)],
             extra=controls, on_hide=after, full=True, on_highlight=highlight)
 
-    def photo_editor(self, it: dict, dialog, mark) -> None:
+    def photo_editor(self, it: dict, dialog, mark, on_rotate=None, on_crop=None) -> None:
         """Zoom in on a photo and drag it to choose what shows: the video uses exactly that part."""
         path = it["path"]
         from PIL import Image
@@ -1902,6 +1935,14 @@ class Page:
                 .tooltip("Zoom in")
             ui.button("Whole photo", icon="fit_screen",
                       on_click=lambda: (state.update(x=0.5, y=0.5), zoom_to(1.0))).props("flat dense no-caps")
+            if on_crop is not None:
+                ui.button("Crop", icon="crop", on_click=lambda: on_crop() if state["zoom"] > 1.001 else
+                          ui.notify("Zoom in and move the photo first: Crop keeps what you see.", type="info")) \
+                    .props("unelevated dense no-caps color=primary") \
+                    .tooltip("Keep only what you see: saved as a cropped copy, your photo is not changed")
+            if on_rotate is not None:
+                ui.separator().props("vertical")
+                rotate_buttons(on_rotate)
             ui.label("Double-click the photo to close.").classes("text-xs text-gray-500")
         ui.timer(0.2, lambda: show(save=False), once=True)
 
