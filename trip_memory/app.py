@@ -648,15 +648,17 @@ class Page:
             ).classes("text-sm text-gray-700")
             with ui.row().classes("items-center gap-2"):
                 level = self.trip.look_alike_level()
-                ui.select(stories.STRICTNESS_NAMES, value=level, label="Doubles",
-                          on_change=lambda e: self.set_look_alike(e.value)).classes("w-96") \
-                    .tooltip("Level 1 first: the same moment shot again and again, a minute or two apart (small sets, "
-                             "quick to sort out). Then level 2, the second cleaning: similar shots of the same scene, "
-                             "up to 10 minutes apart. Never further apart than that.")
-                if level == "burst":
-                    ui.button("Level 2: second cleaning", icon="arrow_forward",
-                              on_click=lambda: self.set_look_alike("normal")).props("flat dense no-caps") \
-                        .tooltip("When the bursts are sorted out: similar shots of the same scene, up to 10 min apart")
+                ui.label("Doubles:").classes("text-sm font-medium")
+                for key, name in stories.STRICTNESS_NAMES.items():
+                    ui.button(name, on_click=lambda k=key: self.set_look_alike(k)).props(
+                        "dense no-caps size=sm " + ("unelevated color=amber-9" if key == level else "outline color=amber-9"))\
+                        .tooltip("Look for doubles at this level. Start with level 1, accept, then go on to 2 and 3: "
+                                 "the shots you kept can pair up again at the next level. Never more than 10 min apart.")
+            with ui.row().classes("items-center gap-2"):
+                ui.button("✓ Accept all markings", icon="done_all", on_click=lambda: self.accept_sets(None)) \
+                    .props("unelevated no-caps color=primary") \
+                    .tooltip("Every look-alike set: the ticks as they are (a set you didn't touch keeps only its ⭐), "
+                             "and the set is done")
                 ui.button("Keep only the ⭐ of every set", icon="star", on_click=self.suggest).props("outline") \
                     .tooltip("Untick every double or triple except the best one (sharpest, best exposed)")
                 self.remove_button = ui.button(f"Remove {total - chosen} unticked from the trip", icon="delete_sweep",
@@ -1319,6 +1321,11 @@ class Page:
                 paths = [it["path"] for it in items]
                 ui.button("Tick story", on_click=lambda p=paths: self.choose_paths(p, True)).props("flat dense size=sm")
                 ui.button("Untick story", on_click=lambda p=paths: self.choose_paths(p, False)).props("flat dense size=sm")
+                if len({it["similar_set"] for it in items}) < len(items):  # (some look-alike set here)
+                    ui.button("✓ Accept all in this story", on_click=lambda n=number: self.accept_sets(n)) \
+                        .props("unelevated dense no-caps size=sm color=primary") \
+                        .tooltip("Every look-alike set of this story: the ticks as they are (a set you didn't touch "
+                                 "keeps only its ⭐), and the set is done")
                 ui.space()
                 if number > 0:
                     ui.button("Link to previous", icon="north", on_click=lambda n=number: self.link_story(n, False)) \
@@ -1828,6 +1835,19 @@ class Page:
         ui.notify(f"Sorted out: kept {kept} of {len(members)}." + (" The unticked ones go when you remove the unticked "
                   "files." if kept < len(members) else ""), type="positive")
         self.choose_focus, self.choose_focus_path = number, paths[0]  # stay where you were
+        self.stale = True
+        self.refresh_choose()
+
+    async def accept_sets(self, story: int | None) -> None:
+        sets, dropped = await run.io_bound(self.trip.accept_sets, story)
+        if not sets:
+            ui.notify("No look-alike sets left here.")
+            return
+        ui.notify(f"Accepted {sets} sets" + (f" ({dropped} doubles unticked)" if dropped else "")
+                  + (". Next: the next level of doubles, or remove the unticked files." if story is None else "."),
+                  type="positive", multi_line=True)
+        if story is not None:
+            self.choose_focus, self.choose_focus_path = story, None  # stay where you were
         self.stale = True
         self.refresh_choose()
 

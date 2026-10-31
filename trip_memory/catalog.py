@@ -2451,7 +2451,7 @@ class Trip:
         level = self.look_alike_level()
         at = self.cleaned_levels()
         cleaned = {p: kept for p, kept in cleaned.items()
-                   if not kept or list(stories.STRICTNESS).index(at.get(p, "burst")) >= list(stories.STRICTNESS).index(level)}
+                   if not kept or list(stories.STRICTNESS).index(stories.OLD_LEVELS.get(at.get(p, "l1"), at.get(p, "l1"))) >= list(stories.STRICTNESS).index(level)}
         if cleaned:
             free = max((sim for _, sim, _ in groups.values() if sim is not None), default=-1) + 1
             for path in sorted(cleaned):
@@ -2469,6 +2469,26 @@ class Trip:
         """Shots of look-alike sets you have sorted out (Keep marked): path -> 1 if you kept it, else 0."""
         rows = self.query("SELECT value FROM meta WHERE key = 'sets_cleaned'")
         return json.loads(rows[0]["value"]) if rows else {}
+
+    def accept_sets(self, story: int | None = None) -> tuple[int, int]:
+        """Accept the markings of every look-alike set (of one story, or of the whole trip): a set you didn't touch
+        (all still ticked) keeps only its ⭐; then every set is sorted out, as with Keep marked.
+        Returns (sets, shots unticked)."""
+        rows = self.query("SELECT path, story, similar_set, best, chosen FROM items WHERE removed = 0 AND part_of IS NULL"
+                          + ("" if story is None else " AND story = ?"), () if story is None else (story,))
+        sets: dict[int, list] = {}
+        for r in rows:
+            if r["similar_set"] is not None:
+                sets.setdefault(r["similar_set"], []).append(r)
+        sets = {k: v for k, v in sets.items() if len(v) > 1}
+        drop = [r["path"] for v in sets.values() if all(r["chosen"] for r in v) for r in v if not r["best"]]
+        if not sets:
+            return 0, 0
+        self.checkpoint("accepting the doubles")
+        if drop:
+            self.set_chosen(drop, False)
+        self.keep_marked([r["path"] for v in sets.values() for r in v])
+        return len(sets), len(drop)
 
     def cleaned_levels(self) -> dict[str, str]:
         """At which level of doubles you sorted each shot out (Keep marked)."""
@@ -2551,8 +2571,8 @@ class Trip:
 
     def look_alike_level(self) -> str:
         rows = self.query("SELECT value FROM meta WHERE key = 'look_alike'")
-        level = stories.OLD_LEVELS.get(rows[0]["value"], rows[0]["value"]) if rows else "burst"
-        return level if level in stories.STRICTNESS else "burst"
+        level = stories.OLD_LEVELS.get(rows[0]["value"], rows[0]["value"]) if rows else "l1"
+        return level if level in stories.STRICTNESS else "l1"
 
     def set_look_alike_level(self, level: str) -> None:
         """How alike shots must be to count as doubles; the sets are worked out again (your ticks stay)."""

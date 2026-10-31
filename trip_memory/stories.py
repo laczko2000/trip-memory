@@ -24,18 +24,20 @@ STORY_MOVE_KM = 1.0
 SIMILAR_HASH_BITS = 18  # of 64: how different two pictures may look and still count as "the same shot"
 SIMILAR_COLOUR = 40.0
 
-# The two levels of doubles. Level 1, bursts: the same moment shot again and again (5-6 pictures in a minute or
-# two), so each set is small and its best one easy to pick. Level 2, a second cleaning: similar shots of the same
-# scene. Never more than 10 minutes apart: anything later is another picture.
+# Doubles, level by level. Level 1: the same moment shot again and again, seconds apart, near-identical (the
+# same people, the same view). Level 2: within a minute or so, still clearly the same shot. Level 3: a few minutes
+# apart, more loosely alike. Never more than 10 minutes apart: anything later is another picture.
 # gap: minutes between one shot and the set's last; span: minutes from the set's first shot; the rest is how alike
-# they must look (share of matching details, layout match, colour overlap).
+# they must look (share of matching details, layout match, colour overlap); most: shots in one set.
 STRICTNESS = {
-    "burst": {"gap": 1.5, "span": 3.0, "details": 0.12, "layout": 0.5, "colours": 0.5, "most": 10},
-    "normal": {"gap": 5.0, "span": 10.0, "details": 0.12, "layout": 0.5, "colours": 0.5, "most": 30},
+    "l1": {"gap": 0.5, "span": 1.0, "details": 0.18, "layout": 0.65, "colours": 0.6, "most": 10},
+    "l2": {"gap": 1.0, "span": 2.0, "details": 0.12, "layout": 0.5, "colours": 0.5, "most": 12},
+    "l3": {"gap": 3.0, "span": 10.0, "details": 0.08, "layout": 0.4, "colours": 0.45, "most": 20},
 }
-STRICTNESS_NAMES = {"burst": "Level 1 · Same moment: bursts a minute or two apart",
-                    "normal": "Level 2 · Similar shots of the same scene (up to 10 min)"}
-OLD_LEVELS = {"strict": "burst", "loose": "normal"}  # (names of earlier versions)
+STRICTNESS_NAMES = {"l1": "Level 1 · seconds apart, near-identical",
+                    "l2": "Level 2 · within a minute, the same shot",
+                    "l3": "Level 3 · a few minutes apart, alike"}
+OLD_LEVELS = {"strict": "l1", "burst": "l1", "normal": "l2", "loose": "l3"}  # (names of earlier versions)
 
 
 def fingerprint(thumb_path: str) -> tuple[str, bytes, float]:
@@ -119,7 +121,7 @@ def likeness(a: dict, b: dict) -> tuple[float, float, float]:
     return details, layout, colours
 
 
-def alike(a: dict, b: dict, level: str = "burst") -> bool:
+def alike(a: dict, b: dict, level: str = "l1") -> bool:
     """Whether two shots look like the same shot. Videos: any of their frames looking alike counts, as
     two takes of the same scene often start or end the same way."""
     if "frames" in a or "frames" in b:
@@ -128,7 +130,7 @@ def alike(a: dict, b: dict, level: str = "burst") -> bool:
 
 
 def _alike(a: dict, b: dict, level: str) -> bool:
-    t = STRICTNESS.get(OLD_LEVELS.get(level, level), STRICTNESS["burst"])
+    t = STRICTNESS.get(OLD_LEVELS.get(level, level), STRICTNESS["l1"])
     colours = float(np.minimum(a["colours"], b["colours"]).sum())
     if colours < 0.3:  # quick check first: clearly different colours are never the same shot
         return False
@@ -167,7 +169,7 @@ def score(row: dict) -> float:
     return s
 
 
-def group(rows: list[dict], level: str = "burst", links: list[str] | None = None) -> dict[str, tuple[int, int, bool]]:
+def group(rows: list[dict], level: str = "l1", links: list[str] | None = None) -> dict[str, tuple[int, int, bool]]:
     """For each file: (story number, similar-set number, is it the best of its set).
 
     links: places where you joined two stories, each as "taken_at|path" of the later story's first file; no new
@@ -175,7 +177,7 @@ def group(rows: list[dict], level: str = "burst", links: list[str] | None = None
 
     A shot joins a set when it looks like one of that set's last few shots, taken within a few minutes, in the
     same story; so a burst stays together even with other shots taken in between."""
-    t = STRICTNESS.get(OLD_LEVELS.get(level, level), STRICTNESS["burst"])
+    t = STRICTNESS.get(OLD_LEVELS.get(level, level), STRICTNESS["l1"])
     rows = sorted(rows, key=lambda r: (r["taken_at"], r["path"]))
     result: dict[str, tuple[int, int, bool]] = {}
     story = -1
