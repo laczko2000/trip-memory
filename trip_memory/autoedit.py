@@ -346,7 +346,7 @@ class Limits:
     min_shot: float = 1.0
     cut_on: str = "strong"  # which beats the cuts go on: a key of CUT_ON
     storyline: str = "teaser"  # how the shots are arranged: a key of STORYLINES
-    speed_effects: bool = True  # slow motion in calm moments, sped-up shots in lively ones
+    speed_effects: bool = False  # slow motion in calm moments, sped-up shots in lively ones (off: normal speed)
     camera_effects: bool = True  # zoom transitions, punch-ins on big hits, slow push-ins, speed ramps
 
 

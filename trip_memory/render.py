@@ -54,10 +54,11 @@ def _codec(width: int, height: int, final: bool) -> list[str]:
     """Use the Mac's built-in video chip when available: several times faster than the CPU."""
     if _hardware["ok"] and has_encoder("h264_videotoolbox"):
         bitrate = width * height * (6 if final else 10)  # about 12 Mbit/s final at 1080p
-        return ["-c:v", "h264_videotoolbox", "-b:v", str(bitrate), "-allow_sw", "1"]
+        return ["-c:v", "h264_videotoolbox", "-b:v", str(bitrate), "-allow_sw", "1", "-g", "30"]
+    # (a key frame every second or so: the editor can jump and scrub through the video smoothly)
     if final:
-        return ["-c:v", "libx264", "-preset", "faster", "-crf", "20"]
-    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18"]
+        return ["-c:v", "libx264", "-preset", "faster", "-crf", "20", "-g", "30"]
+    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-g", "30"]
 
 
 def _run_encode(args_for: Callable[[list[str]], list[str]], width: int, height: int, final: bool, **kwargs) -> None:

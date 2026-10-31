@@ -198,7 +198,7 @@ def test_storyline_has_a_teaser_openers_and_a_calm_ending():
 def test_speed_effects():
     rows = [_clip(n, action=0.2, camera=1.5) for n in range(20)]  # calm, cinematic views
     rows += [_clip(20 + n, action=0.5, camera=0.0) for n in range(30)]  # calm shots, also used in lively music
-    limits = autoedit.Limits(max_video=4.0, max_photo=2.0, min_shot=1.0, storyline="date")
+    limits = autoedit.Limits(max_video=4.0, max_photo=2.0, min_shot=1.0, storyline="date", speed_effects=True)
     plan = autoedit.plan_to_music(rows, {}, _song(), limits, None, 0.8, "Fade")
     calm = [s for s in plan.shots if s.speed < 1]
     fast = [s for s in plan.shots if s.speed > 1]

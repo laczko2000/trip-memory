@@ -30,7 +30,7 @@ from PIL import Image, ImageOps
 
 from .faces import FaceFinder, group_faces
 from .media import MediaItem, scan_folder
-from . import autoedit, director, highlights, moments, motion, musicmood, stories, themes, timeshift, titles
+from . import autoedit, director, highlights, transitions, moments, motion, musicmood, stories, themes, timeshift, titles
 from .scenes import SceneTagger, mean_vector
 from .tags import TAG_GROUP, Tagger, group_name, look_alike_groups, people_tag, story_subject
 from .tools import ffmpeg_paths, probe
@@ -668,8 +668,8 @@ class Trip:
         return max(0.1, (end - start) / source_factor(fx) / (r["speed"] or 1.0)) + held(fx)
 
     def fit_length(self, path: str, seconds: float) -> None:
-        """Make a shot last this long on screen, keeping the middle of its part (and its locked moment).
-        A video too short for it is slowed down a little (to half speed at most)."""
+        """Make a shot last this long on screen, keeping the middle of its part (and its locked moment), at its
+        own speed. A video too short for it stays shorter (reflow then puts the cuts back on the pins)."""
         rows = [r for r in self.items(parts=True) if r["path"] == path]
         if not rows:
             return
@@ -685,15 +685,60 @@ class Trip:
         locks = [(a, b) for a, b in (json.loads(r["locks"]) if r.get("locks") else []) if a < end and b > start]
         if locks:  # keep the locked moment it shows in, whole
             middle = (locks[0][0] + locks[0][1]) / 2
-        speed = r["speed"] or 1.0
+        speed = r["speed"] or 1.0  # (never changed here: a clip plays at the speed you gave it)
         wanted = max(0.1, seconds - held(fx)) * source_factor(fx)
-        span = wanted * speed
-        if span > high - low:
-            span = high - low
-            speed = max(0.5, span / wanted)
+        span = min(wanted * speed, high - low)  # too short a video: it is simply shorter
         a = min(max(low, middle - span / 2), high - span)
         self.execute("UPDATE items SET trim_start = ?, trim_end = ?, speed = ? WHERE path = ?",
                      (round(a, 3), round(a + span, 3), round(speed, 3), path))
+
+    def most_length(self, r: dict) -> float:
+        """The longest a shot can be on screen at its speed (a photo: as long as you like)."""
+        if r["kind"] != "video":
+            return 1e9
+        fx = json.loads(r["effects"]) if r.get("effects") else {}
+        low, high = (r["keep_start"] or 0.0), (r["keep_end"] or r["duration"] or 0.0)
+        return max(0.1, (high - low) / source_factor(fx) / (r["speed"] or 1.0)) + held(fx)
+
+    def reflow(self, pins: list[float], wants: dict[str, float] | None = None, photo_seconds: float = 4.0,
+               transition_seconds: float = 0.8) -> int:
+        """Lay the shots on the music's pins again, in their order, at their own speed (never sped up or slowed
+        down to fit): each shot ends on the pin nearest to the length it wants (wants: path -> seconds, else the
+        length it has), as far as its video reaches. A longer shot takes more pins, so the ones after it move on;
+        shots past the end of the music leave the video. Returns how many left."""
+        board = self._fix_order()
+        cuts = sorted(p for p in pins or [] if p > 0.2)
+        if not board:
+            return 0
+        wants = wants or {}
+        if not cuts:  # no music: just the lengths you asked for
+            for r in board:
+                if r["path"] in wants:
+                    self.fit_length(r["path"], wants[r["path"]])
+            return 0
+        end = cuts[-1]
+        t = 0.0  # where this shot's cut is (the middle of its transition)
+        half_before = 0.0
+        gone = []
+        for k, r in enumerate(board):
+            if t >= end - 0.25:
+                gone.append(r["path"])
+                continue
+            screen = self.screen_length(r, photo_seconds)
+            half_after = transitions.seconds_of(r.get("transition"), transition_seconds) / 2 if k < len(board) - 1 else 0
+            want = wants.get(r["path"], screen - half_before - half_after)  # between its two cuts
+            most = self.most_length(r) - half_before - half_after
+            near = [p for p in cuts if t + 0.4 < p <= t + most + 0.05]
+            e = min(near, key=lambda p: (abs(p - (t + want)), p)) if near else min(end, t + most)
+            length = round(e - t + half_before + half_after, 3)
+            if abs(length - screen) > 0.01:
+                self.fit_length(r["path"], length)
+            t, half_before = e, half_after
+        if gone:
+            with self._lock:
+                self.db.executemany("UPDATE items SET cut_out = 1, position = NULL WHERE path = ?", [(p,) for p in gone])
+                self.db.commit()
+        return len(gone)
 
     def _fix_order(self) -> list[dict]:
         """The storyboard with every shot's place written down (so one change can't reshuffle the rest)."""

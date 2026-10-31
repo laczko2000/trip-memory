@@ -899,3 +899,26 @@ def test_highlights_from_one_trip_are_suggested_on_the_next(tmp_path, monkeypatc
     new.drop_idea(drop, 8.5)
     assert new.highlight_ideas() == [] and new.highlights_learned() == (6, 1)
     assert new.suggest_highlights() == []  # the dropped second isn't suggested again
+
+
+def test_reflow_puts_a_longer_shot_on_the_next_pins_at_normal_speed(tmp_path, monkeypatch):
+    from trip_memory import autoedit
+
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    for n, colour in enumerate(["red", "green", "blue", "yellow"]):
+        exif = Image.Exif()
+        exif[306] = f"2025:07:03 1{n}:00:00"
+        Image.new("RGB", (160, 90), colour).save(trip_dir / f"p{n}.jpg", exif=exif)
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    paths = [r["path"] for r in trip.items()]
+    for path in paths:
+        trip.execute("UPDATE items SET seconds = 2.0, transition = ? WHERE path = ?", (autoedit.HARD_CUT, path))
+    # The first shot wants 3.7 s: it ends on the pin at 4, the others follow pin by pin, the last no longer fits.
+    gone = trip.reflow([2.0, 4.0, 6.0, 8.0], {paths[0]: 3.7})
+    board = [(Path(r["path"]).name, round(r["seconds"], 1)) for r in trip.storyboard()]
+    assert gone == 1 and board == [("p0.jpg", 4.0), ("p1.jpg", 2.0), ("p2.jpg", 2.0)]
+    assert all((r["speed"] or 1.0) == 1.0 for r in trip.storyboard())

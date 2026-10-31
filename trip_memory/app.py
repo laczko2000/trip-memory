@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 import hashlib
 import json
 import re
@@ -281,6 +282,7 @@ class Page:
         ui.on("tm_draft_drop", self.draft_drop)
         ui.on("tm_title_move", self.title_move)
         ui.on("tm_title_click", self.title_click)
+        ui.on("tm_title_menu", self.title_menu)
         ui.on("tm_postit", self.postit_key)
         ui.timer(1.0, self.auto_update_tick)  # (here, outside every redrawn part, so it keeps running)
         self.window_box = ui.element("div")  # the shot window lives here: redrawing a tab never closes it
@@ -1796,6 +1798,8 @@ class Page:
                 with ui.row().classes("w-full items-center gap-2 px-2"):
                     ui.button(f"Undo: {history[-1][0]}", icon="undo", on_click=lambda: undo(dialog)) \
                         .props("outline dense no-caps")
+            if in_video:
+                in_video_box()
             if it["kind"] == "video":
                 highlights_row()
             if it.get("shot_of"):
@@ -2014,19 +2018,90 @@ class Page:
         if in_video and in_video.get("trim_start") is not None and in_video.get("trim_end") is not None:
             a, b = float(in_video["trim_start"]), float(in_video["trim_end"])
 
+        def in_video_box() -> None:
+            """Opened from the editor: this clip's speed in the video, and the draft made again right here."""
+            with ui.column().classes("w-full gap-1 px-2 py-1 rounded bg-indigo-50"):
+                speed_row()
+                with ui.row().classes("w-full items-center gap-2"):
+                    ui.button("Update and show me", icon="play_circle", on_click=update_and_show) \
+                        .props("unelevated no-caps color=indigo") \
+                        .tooltip("Makes the draft again (only the changed clips) and plays this clip in the video, "
+                                 "with a second before and after it")
+                    ui.label("Clips play at normal speed unless you pick another here. Use this part in the video: "
+                             "the part you set ends on the nearest pin and the clips after it move along.") \
+                        .classes("text-xs text-gray-600 flex-1")
+                preview_box()
+
+        @ui.refreshable
+        def speed_row() -> None:
+            row = next((r for r in self.trip.storyboard() if r["path"] == in_video["path"]), in_video)
+            speed = row.get("speed") or 1.0
+            with ui.row().classes("w-full items-center gap-1 no-wrap"):
+                ui.label(f"Speed in the video: {speed:g}×").classes("text-sm font-medium text-indigo-900 w-48")
+                for v in self.SPEEDS:
+                    ui.button(f"{v:g}×", on_click=lambda v=v: set_speed(v)) \
+                        .props("dense no-caps size=sm " + ("unelevated color=indigo" if abs(v - speed) < 0.01
+                                                           else "outline color=indigo"))
+                ui.slider(min=0.25, max=3.0, step=0.05, value=speed).props("dense label color=indigo") \
+                    .classes("flex-1 min-w-32").on("change", lambda e: set_speed(float(e.args)))
+
+        def set_speed(value: float) -> None:
+            row = next((r for r in self.trip.storyboard() if r["path"] == in_video["path"]), in_video)
+            was = (row["trim_start"], row["trim_end"], row.get("speed") or 1.0)
+            value = round(max(0.25, min(3.0, value)), 2)
+            self.trip.set_speed(in_video["path"], value)
+            self.trip.fit_length(in_video["path"], slot)  # its place, at the speed you chose
+            self.reflow_board()
+            history.append((f"speed {value:g}×", lambda: (self.trip.set_trim(in_video["path"], was[0], was[1]),
+                                                          self.trip.set_speed(in_video["path"], was[2]))))
+            mark()
+            ui.notify(f"Plays at {value:g}×. Update and show me to see it.", timeout=2500)
+            speed_row.refresh()
+
+        @ui.refreshable
+        def preview_box() -> None:
+            shown = changed.get("preview")
+            if not shown:
+                return
+            ui.html(f'<video id="tm-mini" src="/drafts/{shown["file"]}#t={shown["a"]:.2f}" autoplay muted playsinline '
+                    f'controls data-a="{shown["a"]:.2f}" data-b="{shown["b"]:.2f}" '
+                    'ontimeupdate="if (this.currentTime > parseFloat(this.dataset.b)) '
+                    '{ this.currentTime = parseFloat(this.dataset.a); }" '
+                    'style="width:100%;max-height:34vh;background:#000;border-radius:6px"></video>',
+                    sanitize=False).classes("w-full")
+            ui.label(f"Your clip in the video ({shown['when']}), with a second before and after, again and again.") \
+                .classes("text-xs text-indigo-900")
+
+        async def update_and_show() -> None:
+            n = ui.notification("Making the draft again (only the changed clips)…", spinner=True, timeout=None)
+            try:
+                await self.make_draft()
+            finally:
+                n.dismiss()
+            draft = self.draft_info()
+            board = self.trip.storyboard()
+            k = next((i for i, r in enumerate(board) if r["path"] == in_video["path"]), None)
+            if not draft or k is None:
+                ui.notify("This clip is not in the video now.", type="warning")
+                return
+            times = self.editor_times(board)
+            start, length = times[k]["start"], times[k]["length"]
+            changed["preview"] = {"file": draft["file"], "a": max(0.0, start - 1.0), "b": start + length + 1.0,
+                                  "when": f"{fmt_length(start)}–{fmt_length(start + length)}"}
+            preview_box.refresh()
+            ui.run_javascript("setTimeout(() => { const m = document.getElementById('tm-mini'); "
+                              "if (m) m.scrollIntoView({behavior: 'smooth', block: 'center'}); }, 200)")
+
         def use_in_video(a: float, b: float) -> bool:
             """The part you set plays in the clip's slot: the cuts stay on your pins, the speed fits it in."""
-            was = (in_video["trim_start"], in_video["trim_end"], in_video.get("speed") or 1.0)
-            speed = round(max(0.25, min(3.0, (b - a) / max(0.1, slot))), 2)
-            self.trip.set_trim(in_video["path"], round(a, 3), round(a + speed * slot, 3))
-            self.trip.set_speed(in_video["path"], speed)
-            history.append(("use in the video", lambda: (self.trip.set_trim(in_video["path"], was[0], was[1]),
-                                                         self.trip.set_speed(in_video["path"], was[2]))))
+            self.trip.checkpoint("using a new part of a clip")
+            self.trip.set_trim(in_video["path"], round(a, 3), round(b, 3))
+            gone = self.reflow_board()  # at its own speed: it ends on the nearest pin, the rest move along
+            history.append(("use in the video", lambda: self.trip.undo()))
             mark()
-            pace = "" if abs(speed - 1) < 0.02 else f", played at {speed:g}× so it fits" + \
-                (" (slow motion)" if speed < 1 else "")
-            ui.notify(f"The video now uses {fmt_length(a)}–{fmt_length(b)} in this clip's {slot:.1f} s{pace}. "
-                      "The cuts stay on your pins; the draft updates.", type="positive", multi_line=True)
+            ui.notify(f"The video now uses {fmt_length(a)}–{fmt_length(b)} at its own speed, ending on the nearest "
+                      "pin; the clips after it moved along" + (f" ({gone} at the end left the video)" if gone else "")
+                      + ". The draft updates.", type="positive", multi_line=True)
             return True
 
         actions = [("Lock this part", "lock", lock, "outline no-caps"),
@@ -5268,24 +5343,29 @@ class Page:
                     marks = "".join(f'<span style="position:absolute;left:{100 * k * step / total:.3f}%;top:0;'
                                     f'font-size:10px;color:#94a3b8;border-left:1px solid #64748b;padding-left:2px">'
                                     f'{fmt_length(k * step)}</span>' for k in range(int(total // step) + 1))
-                    ui.html(f'<div style="position:relative;height:16px;cursor:pointer" '
-                            f'onclick="tmSeekRuler(event, this, {total:.3f})">{marks}</div>', sanitize=False) \
-                        .classes("w-full").tooltip("Click to jump there")
-                    ui.html('<div id="tm-playhead" style="position:absolute;top:0;bottom:0;left:0;width:2px;'
-                            'background:#ef4444;z-index:5;pointer-events:none;box-shadow:0 0 4px #ef4444"></div>',
-                            sanitize=False)
+                    ui.html(f'<div style="position:relative;height:22px;cursor:ew-resize;background:#0f172a;'
+                            f'border-radius:4px;touch-action:none" onpointerdown="tmScrubStart(event)">{marks}</div>',
+                            sanitize=False).classes("w-full").tooltip("Press and drag: the video follows")
+                    ui.html('<div id="tm-playhead" onpointerdown="tmScrubStart(event)" style="position:absolute;'
+                            'top:0;bottom:0;left:0;width:14px;margin-left:-6px;z-index:6;cursor:ew-resize;'
+                            'touch-action:none"><div style="position:absolute;left:6px;top:0;bottom:0;width:2px;'
+                            'background:#ef4444;box-shadow:0 0 4px #ef4444"></div><div style="position:absolute;'
+                            'left:0;top:0;width:14px;height:14px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);'
+                            'background:#ef4444"></div></div>', sanitize=False)
                     bars = sorted(self.title_bars(board, times), key=lambda b: b["at"])
                     ends: list[float] = []  # titles that overlap in time go on rows of their own
                     for bar in bars:
                         lane = next((k for k, end in enumerate(ends) if end <= bar["at"] + 0.01), len(ends))
                         ends[lane:lane + 1] = [bar["at"] + float(bar["length"])]
                         bar["lane"] = lane
-                    with ui.element("div").style(f"position:relative;height:{6 + 24 * max(1, len(ends))}px;"
+                    with ui.element("div").style(f"position:relative;height:{8 + 34 * max(1, len(ends))}px;"
                                                  "background:#312e81;border-radius:4px;margin-bottom:4px") \
-                            .props(f'data-total="{total:.3f}"'):
+                            .props(f'data-total="{total:.3f}" data-snaps="'
+                                   + ",".join(f"{x:.3f}" for x in sorted({round(t["start"], 3) for t in times} | set(pins)))
+                                   + '"'):
                         for bar in bars:
                             self.title_bar(bar, total)
-                    with ui.element("div").style("position:relative;height:72px"):
+                    with ui.element("div").style("position:relative;height:80px"):
                         for n, r in enumerate(board):
                             was = before[n] if n < len(before) else None
                             self.draft_tile(n, r, times[n]["length"], times[n]["start"], total,
@@ -5305,11 +5385,19 @@ class Page:
                     ticks = "".join(f'<i style="position:absolute;top:0;bottom:0;left:{100 * p / total:.3f}%;'
                                     'width:2px;background:#22c55e"></i>' for p in pins)
                     ui.html(f'<div style="position:relative;height:34px;margin-top:4px;background:#0f172a;'
-                            f'border-radius:4px;overflow:hidden" title="The music, with your pins (green): the cuts">'
+                            f'border-radius:4px;overflow:hidden;cursor:ew-resize;touch-action:none" '
+                            f'onpointerdown="tmScrubStart(event)" '
+                            f'title="The music, with your pins (green): the cuts · drag to scrub">'
                             f'<canvas id="tm-edwave" data-src="/drafts/{draft["file"]}" '
                             f'style="position:absolute;inset:0;width:100%;height:100%"></canvas>{ticks}</div>',
                             sanitize=False).classes("w-full")
         ui.run_javascript("setTimeout(tmEditorReady, 60)")
+
+    def editor_times(self, board: list[dict]) -> list[dict]:
+        """Where each clip is in the video: the draft's own times while it is up to date."""
+        draft = self.draft_info()
+        changed = bool(draft) and ([tuple(x) for x in draft["board"]] != self.draft_board())
+        return self.board_times(board, draft, changed)
 
     def board_times(self, board: list[dict], draft: dict | None, changed: bool) -> list[dict]:
         """Where each clip is in the video: from the draft while it is up to date, else worked out."""
@@ -5347,16 +5435,24 @@ class Page:
                                        + ("cursor-grab" if bar["kind"] == "timeline" else "cursor-pointer"))
         style = ("background:#e0e7ff;color:#3730a3;border:1px solid #6366f1" if bar["kind"] == "timeline"
                  else "background:#f8fafc;color:#475569;border:1px dashed #94a3b8")
-        el.style(f"left:{left:.3f}%;width:{width:.3f}%;top:{3 + 24 * bar.get('lane', 0)}px;height:21px;{style}"
-                 + (";box-shadow:0 0 0 2px #2563eb" if picked else ""))
+        el.style(f"left:{left:.3f}%;width:{width:.3f}%;top:{4 + 34 * bar.get('lane', 0)}px;height:30px;{style};"
+                 "padding:0 12px;line-height:28px;touch-action:none"
+                 + (";box-shadow:0 0 0 2px #60a5fa" if picked else ""))
         el._props["data-id"] = bar["id"]
         if bar["kind"] == "timeline":
             el._props["onpointerdown"] = "tmTitleDown(event, this)"
         else:
             el.on("click", lambda b=bar: self.shot_title_to_timeline(b))
+            el.on("dblclick", lambda b=bar: self.title_menu(SimpleNamespace(args={"id": b["id"]})))
         link = " 🔗" if bar.get("link") else ""
         with el:
             ui.label(words + link)
+            if bar["kind"] == "timeline":  # grips: drag an end to trim the title from that side
+                for side in ("left", "right"):
+                    ui.element("div").style(
+                        f"position:absolute;{side}:0;top:0;bottom:0;width:10px;cursor:ew-resize;"
+                        "background:repeating-linear-gradient(90deg,#6366f1 0 2px,transparent 2px 4px);"
+                        f"border-radius:{'4px 0 0 4px' if side == 'left' else '0 4px 4px 0'};opacity:.8")
         el.tooltip(f"{words} · {clock(bar['at'])} → {clock(bar['at'] + float(bar['length']))}" + (" · moves with its clip" if bar.get("link") else "")
                    + ("" if bar["kind"] == "timeline" else " · on its shot: click to move it onto the timeline"))
 
@@ -5376,6 +5472,30 @@ class Page:
         self.draft_title = (e.args or {}).get("id") if isinstance(e.args, dict) else None
         self.editor_card.refresh()
 
+    def title_menu(self, e) -> None:
+        """Double-click on a title: a small window with its words, style and timing (double-click it to close)."""
+        key = (e.args or {}).get("id") if isinstance(e.args, dict) else None
+        if not key:
+            return
+        if key.startswith("shot:"):  # a title still sitting on its shot: onto the timeline first
+            board = self.trip.storyboard()
+            new = self.trip.title_to_timeline(key[5:], next((t["length"] for r, t in zip(board, self.editor_times(board))
+                                                            if r["path"] == key[5:]), 3.0))
+            if not new:
+                return
+            key = new["id"]
+        for old in list(self.window_box):
+            if isinstance(old, ui.dialog) and not old.value:
+                old.delete()
+        with self.window_box, ui.dialog().props("seamless position=top") as dialog, \
+                ui.card().classes("w-[44rem] max-w-full mt-16").style("box-shadow:0 10px 30px rgba(0,0,0,.5)") as card:
+            card.on("dblclick", dialog.close)
+            board = self.trip.storyboard()
+            self.draft_title_editor(board, self.editor_times(board), key=key, dialog=dialog)
+            ui.label("Double-click here to close").classes("text-xs text-gray-400")
+        dialog.on("hide", lambda: self.editor_card.refresh())
+        dialog.open()
+
     def title_move(self, e) -> None:
         args = e.args if isinstance(e.args, dict) else {}
         try:
@@ -5383,7 +5503,7 @@ class Page:
         except (KeyError, TypeError, ValueError):
             return
         board = self.trip.storyboard()
-        times = self.board_times(board, self.draft_info(), True)
+        times = self.editor_times(board)
         place = {r["path"]: n for n, r in enumerate(board)}
         found = self.trip.timeline_titles()
         for t in found:
@@ -5423,8 +5543,8 @@ class Page:
         self.draft_title = new["id"]
         self.editor_card.refresh()
 
-    def draft_title_editor(self, board: list[dict], times: list[dict]) -> None:
-        key = getattr(self, "draft_title", None)
+    def draft_title_editor(self, board: list[dict], times: list[dict], key: str | None = None, dialog=None) -> None:
+        key = key or getattr(self, "draft_title", None)
         found = self.trip.timeline_titles()
         t = next((x for x in found if x["id"] == key), None)
         if t is None:
@@ -5455,6 +5575,8 @@ class Page:
             self.trip.save_timeline_titles([x for x in found if x["id"] != key])
             self.draft_title = None
             ui.notify("Title taken away.")
+            if dialog is not None:
+                dialog.close()
             self.editor_card.refresh()
 
         at = (times[place[t["link"]]]["start"] + float(t.get("offset") or 0)) if t.get("link") in place \
@@ -5478,17 +5600,19 @@ class Page:
                 sub = ui.input("Second line", value=t.get("sub") or "").classes("min-w-40")
                 sub.on("blur", lambda: save_and_draw(sub=sub.value))
                 ui.select({k: v["label"] for k, v in titles.STYLES.items()}, value=t.get("style") or "clean",
-                          label="Style", on_change=lambda e: save(style=e.value)).classes("w-44")
+                          label="Style", on_change=lambda e: save_and_draw(style=e.value)).classes("w-44")
                 ui.select({"": "Style's own place", **titles.WHERE}, value=t.get("where") or "", label="Where",
-                          on_change=lambda e: save(where=e.value)).classes("w-36")
+                          on_change=lambda e: save_and_draw(where=e.value)).classes("w-36")
             with ui.row().classes("items-end gap-2"):
                 for label, field, top in (("Shows for (s)", "length", 30), ("Fade in (s)", "fade_in", 5),
                                           ("Fade out (s)", "fade_out", 5)):
                     ui.number(label, value=float(t.get(field) or 0), min=0 if field != "length" else 0.3, max=top,
                               step=0.1, format="%.1f",
                               on_change=lambda e, f=field: e.value is not None and save(**{f: round(float(e.value), 2)})) \
+                        .on("blur", lambda: self.editor_card.refresh()) \
                         .props("dense outlined").classes("w-32")
                 ui.button("Done", icon="check", on_click=lambda: (setattr(self, "draft_title", None),
+                                                                  dialog.close() if dialog is not None else None,
                                                                   self.editor_card.refresh())).props("flat dense no-caps")
             ui.label("Changes show over the playing draft straight away; Finalize puts the titles into the video.") \
                 .classes("text-xs text-gray-500")
@@ -5514,13 +5638,16 @@ class Page:
     def draft_tile(self, n: int, r: dict, length: float, start: float, total: float, changed: bool = False) -> None:
         locked = bool(r.get("locks") and r["locks"] != "[]")
         picked = n == self.draft_pick
-        tile = ui.element("div").classes("relative rounded cursor-pointer select-none " +
-                                         ("ring-4 ring-blue-500" if picked else "ring-1 ring-slate-400"))
+        tile = ui.element("div").classes("relative cursor-pointer select-none")
         thumb = data_url(r["thumb"]) if r.get("thumb") else ""
-        tile.style(f"position:absolute;top:0;bottom:0;left:{100 * start / total:.3f}%;"
-                   f"width:calc({100 * length / total:.3f}% - 2px);min-width:6px;"
-                   f"background:#334155 url('{thumb}') left center/auto 100% repeat-x"
-                   + (";outline:3px solid #fb923c;outline-offset:-3px" if changed else ""))
+        # Each clip a closed box: its own frame and rounded ends, a gap to the next one.
+        edge = "#fb923c" if changed else "#e2e8f0"
+        tile.style(f"position:absolute;top:4px;bottom:4px;left:calc({100 * start / total:.3f}% + 2px);"
+                   f"width:calc({100 * length / total:.3f}% - 4px);min-width:6px;border-radius:7px;"
+                   f"border:2px solid {edge};box-sizing:border-box;"
+                   f"background:#334155 url('{thumb}') left center/auto 100% repeat-x;"
+                   + ("box-shadow:0 0 0 3px #3b82f6,0 6px 14px rgba(59,130,246,.6);transform:translateY(-3px);z-index:3"
+                      if picked else "box-shadow:0 2px 4px rgba(0,0,0,.5)"))
         tile._props.update({
             "id": f"tm-ed-{n}", "draggable": "true",
             "data-start": f"{start:.3f}", "data-length": f"{length:.3f}",
@@ -5598,23 +5725,32 @@ class Page:
             ui.slider(min=0.25, max=3.0, step=0.05, value=speed) \
                 .props("dense label color=indigo").classes("w-full") \
                 .on("change", lambda e: self.draft_set_speed(r, length, float(e.args)))
-            ui.label("It keeps its place and length, so the cuts stay on your pins: faster shows more of the "
-                     "video, slower shows less in slow motion.").classes("text-xs text-gray-600")
+            ui.label("Only if you want it: every clip plays at normal speed unless you pick another speed here. "
+                     "It keeps its place, so the cuts stay on your pins.").classes("text-xs text-gray-600")
 
     def draft_set_speed(self, r: dict, length: float, speed: float) -> None:
         speed = round(max(0.25, min(3.0, speed)), 2)
         self.trip.set_speed(r["path"], speed)
-        self.trip.fit_length(r["path"], length)
-        got = next((x.get("speed") or 1.0 for x in self.trip.storyboard() if x["path"] == r["path"]), speed)
-        note = "" if abs(got - speed) < 0.02 else \
-            f" The video is too short for {speed:g}× in this slot, so it plays at {got:g}×."
-        self.draft_changed(f"Clip {self.draft_pick + 1} plays at {got:g}×, still {length:.1f} s long.{note}")
+        self.trip.fit_length(r["path"], length)  # its place, at the speed you chose (shorter if the video ends)
+        self.draft_changed(f"Clip {self.draft_pick + 1} plays at {speed:g}×.")
 
     def draft_reverse(self, r: dict, on: bool) -> None:
         self.trip.set_reverse(self.clip_of(r), on)
         self.draft_changed("Clip plays backwards." if on else "Clip plays forwards again.")
 
+    def reflow_board(self) -> int:
+        """The clips back on the music's pins at their own speed (see Trip.reflow): how many no longer fit."""
+        music = self.music_path()
+        pins = song_taps.final_taps(music, app_dir() / "music-taps") if music else None
+        photo = self.photo_len.value if getattr(self, "photo_len", None) else 4.0
+        seconds = self.t_len.value if getattr(self, "t_len", None) else 0.8
+        return self.trip.reflow(pins or [], None, photo, seconds)
+
     def draft_changed(self, message: str) -> None:
+        gone = self.reflow_board()
+        if gone:
+            message += (f" {gone} clip{'s' if gone > 1 else ''} at the end no longer fit{'' if gone > 1 else 's'} "
+                        "the music and left the video.")
         if self.auto_update:
             self.update_due = time.time() + self.AUTO_PAUSE
             ui.notify(message + " The draft updates by itself when you pause.", type="positive")
@@ -5682,18 +5818,16 @@ class Page:
         lo, hi = self.kept_part(r)
 
         def use(a: float, b: float, locked: bool = False) -> bool:
-            # The part you chose plays in the clip's slot (the cuts stay on your pins): the speed fits it in.
-            speed = round(max(0.25, min(3.0, (b - a) / max(0.1, length))), 2)
-            self.trip.set_trim(r["path"], round(a, 3), round(a + speed * length, 3))
-            self.trip.set_speed(r["path"], speed)
+            # The part you chose, at its own speed: it ends on the nearest pin, the clips after it move along.
+            self.trip.set_trim(r["path"], round(a, 3), round(b, 3))
             if locked:
                 self.trip.add_lock(self.clip_of(r), a, b)
                 self._locks_changed(self.clip_of(r))
-            self.draft_changed(f"This clip now shows {fmt_length(a)}–{fmt_length(b)} in its {length:.1f} s"
-                               + ("" if abs(speed - 1) < 0.02 else f", at {speed:g}×") + ".")
+            self.draft_changed(f"This clip now shows {fmt_length(a)}–{fmt_length(b)}, ending on the nearest pin; "
+                               "the clips after it moved along.")
             return True
 
-        self.part_dialog(r, lo, hi, f"Choose the part of clip {self.draft_pick + 1} (it stays {length:.1f} s: a longer part plays faster)",
+        self.part_dialog(r, lo, hi, f"Choose the part of clip {self.draft_pick + 1} (now {length:.1f} s; it ends on the nearest pin)",
                          [("Use this part", "check", use, "outline no-caps"),
                           ("Use and lock", "lock", lambda a, b: use(a, b, True), "no-caps color=amber-9")],
                          taken=self.trip.used_parts(self.clip_of(r), but=r["path"]))
@@ -6076,7 +6210,8 @@ let tmPlaying = null;
 function tmTitleDown(e, el) {
   const row = el.parentElement, total = parseFloat(row.dataset.total), W = row.clientWidth;
   const box = el.getBoundingClientRect(), x0 = e.clientX;
-  const mode = (x0 - box.left < 8) ? 'left' : (box.right - x0 < 8) ? 'right' : 'move';
+  const mode = (x0 - box.left < 12) ? 'left' : (box.right - x0 < 12) ? 'right' : 'move';
+  e.preventDefault();
   const l0 = el.offsetLeft, w0 = el.offsetWidth;
   let moved = false;
   el.setPointerCapture(e.pointerId);
@@ -6087,6 +6222,12 @@ function tmTitleDown(e, el) {
     if (mode === 'move') l = Math.max(0, Math.min(W - w0, l0 + dx));
     else if (mode === 'left') { l = Math.max(0, Math.min(l0 + w0 - 6, l0 + dx)); w = w0 + (l0 - l); }
     else w = Math.max(6, Math.min(W - l0, w0 + dx));
+    // Near a cut or a pin (8 pixels), the moved edge snaps to it.
+    const snaps = (row.dataset.snaps || '').split(',').filter(x => x).map(x => W * parseFloat(x) / total);
+    const snap = (x) => { let best = x, d = 8; for (const p of snaps) if (Math.abs(p - x) < d) { d = Math.abs(p - x); best = p; } return best; };
+    if (mode === 'move') { const s1 = snap(l), s2 = snap(l + w) - w; l = Math.abs(s1 - l) <= Math.abs(s2 - l) ? s1 : s2; }
+    else if (mode === 'left') { const e0 = l + w; l = Math.min(e0 - 6, snap(l)); w = e0 - l; }
+    else w = Math.max(6, snap(l + w) - l);
     el.style.left = (100 * l / W) + '%'; el.style.width = (100 * w / W) + '%';
     const a = total * l / W, len = total * w / W;
     el.dataset.times = `${tmClock2(a)} → ${tmClock2(a + len)}`;
@@ -6098,11 +6239,20 @@ function tmTitleDown(e, el) {
     const img = document.querySelector(`.tm-live-title[data-id="${el.dataset.id}"]`);
     if (img) { img.dataset.start = a; img.dataset.len = len; }
     const v = document.getElementById('tm-draft');
-    if (v) { v.pause(); v.currentTime = mode === 'right' ? Math.max(0, a + len - 0.1) : a + Math.min(0.5, len / 2); tmDraftNow(v.currentTime); }
+    if (v) { v.pause(); tmSeekSoft(v, mode === 'right' ? Math.max(0, a + len - 0.1) : a + Math.min(0.5, len / 2)); }
   };
   const up = () => {
     el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up);
-    if (!moved) { emitEvent('tm_title_click', {id: el.dataset.id}); return; }
+    if (!moved) {  // a click picks the title; a double-click opens its small window
+      const now = Date.now(), id = el.dataset.id;
+      if (window.tmTitleTap && window.tmTitleTap.id === id && now - window.tmTitleTap.at < 400) {
+        clearTimeout(window.tmTitleTap.timer); window.tmTitleTap = null;
+        emitEvent('tm_title_menu', {id: id}); return;
+      }
+      window.tmTitleTap = {id: id, at: now, timer: setTimeout(() => { window.tmTitleTap = null;
+        emitEvent('tm_title_click', {id: id}); }, 400)};
+      return;
+    }
     emitEvent('tm_title_move', {id: el.dataset.id, start: total * el.offsetLeft / W, length: total * el.offsetWidth / W});
   };
   el.addEventListener('pointermove', move); el.addEventListener('pointerup', up);
@@ -6195,6 +6345,40 @@ document.addEventListener('keydown', (e) => {  // keys in the editor: Space, ←
     v.currentTime = Math.max(0, v.currentTime + (e.key === 'ArrowLeft' ? -0.5 : 0.5)); tmDraftNow(v.currentTime);
   }
 }, true);
+// Scrubbing: press on the ruler, the red line or the music and drag; the video shows the frame under the cursor.
+// A new frame is asked for only once the last one is shown, so it keeps up with the mouse.
+function tmSeekSoft(v, t) {
+  v._want = t;
+  if (v._busy) return;
+  v._busy = true;
+  const go = () => {
+    const want = v._want; v._want = null;
+    v.currentTime = want;
+    v.addEventListener('seeked', () => { if (v._want !== null && v._want !== undefined) go(); else v._busy = false; }, {once: true});
+  };
+  go();
+}
+function tmScrubStart(e) {
+  const tl = document.getElementById('tm-timeline'), v = document.getElementById('tm-draft');
+  if (!tl || !v) return;
+  e.preventDefault();
+  const total = parseFloat(tl.dataset.total), head = document.getElementById('tm-playhead');
+  const was = !v.paused; v.pause();
+  const at = (ev) => {
+    const r = tl.getBoundingClientRect();
+    const t = Math.max(0, Math.min(total - 0.04, total * (ev.clientX - r.left) / r.width));
+    if (head) head.style.left = (100 * t / total) + '%';
+    window.tmDraftT = t;
+    const clock = document.getElementById('tm-edclock');
+    if (clock) clock.textContent = `${tmClock2(t)} / ${tmClock2(v.duration || 0)}`;
+    tmSeekSoft(v, t);
+  };
+  at(e);
+  const move = (ev) => at(ev);
+  const up = () => { document.removeEventListener('pointermove', move); document.removeEventListener('pointerup', up);
+                     if (was) v.play(); };
+  document.addEventListener('pointermove', move); document.addEventListener('pointerup', up);
+}
 function tmSeekRuler(e, el, total) {
   const v = document.getElementById('tm-draft'), r = el.getBoundingClientRect();
   if (v) { v.currentTime = total * (e.clientX - r.left) / r.width; tmDraftNow(v.currentTime); }
