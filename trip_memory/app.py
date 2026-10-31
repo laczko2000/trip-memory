@@ -300,6 +300,10 @@ class Page:
                 ui.label("Trip Memory").classes("text-3xl font-bold")
                 ui.label(f"version {app_version()}").classes("text-sm text-gray-500")
             self.build_folder_row()
+            self.guided = bool(load_settings().get("guided", True))
+            self.guide_step = 0
+            self.guide_detour = False
+            self.guide_bar()
             with ui.tabs().classes("w-full") as tabs:
                 # The path to a video, left to right; then the extra tabs for looking things up.
                 self.choose_tab = ui.tab("Choose files", icon="checklist")
@@ -315,6 +319,9 @@ class Page:
             self.library_tab = library_tab
             self.music_tab = music_tab
             self.people_tab = people_tab
+            self.stories_tab = stories_tab
+            self.tabs_bar = tabs
+            tabs.set_visibility(not self.guided)
             with ui.tab_panels(tabs, value=self.choose_tab, on_change=self.tab_opened).classes("w-full") as self.panels:
                 with ui.tab_panel(self.choose_tab):
                     self.choose_view()
@@ -457,8 +464,115 @@ class Page:
 
     # ---------- Choose files ----------
 
+    # ---------- the guided way: one step after another, Next and Back ----------
+
+    GUIDE = [
+        ("Files", "Choose files", None,
+         "Open your trip folder. The app looks at everything once (faces, places, look-alikes). Untick what you "
+         "don't want in the video."),
+        ("Doubles", "Choose files", "tm-step-doubles",
+         "Look-alike shots are grouped: keep the best of each (⭐ is the app's pick), leave the rest out."),
+        ("Themes & best bits", "Themes", None,
+         "Confirm what each shot is: tick the right ones, ⇄ moves a wrong one. Run the Second check. Mark the best "
+         "bits in your videos with post-its."),
+        ("Music", "Music & audio", None, "Choose the song, trim it, and put pins where you want the cuts."),
+        ("Story", "Storyboard", None,
+         "Choose how the story runs (As it happened, By theme or My story) and press Make the first cut."),
+        ("Watch & finish", "Make video", None,
+         "Open the editor: watch it, change clips, titles, cards and transitions, then Finalize."),
+    ]
+
+    def guide_tab(self, name: str):
+        return {"Choose files": self.choose_tab, "Themes": self.themes_tab, "Music & audio": self.music_tab,
+                "Storyboard": self.storyboard_tab, "Make video": self.video_tab}[name]
+
+    @ui.refreshable
+    def guide_bar(self) -> None:
+        if not self.guided:
+            with ui.row().classes("w-full justify-end -mb-2"):
+                ui.button("Guided steps", icon="assistant_navigation", on_click=lambda: self.set_guided(True)) \
+                    .props("flat dense no-caps size=sm").tooltip("One step after another, with Next and Back")
+            return
+        k = self.guide_step
+        title, _, _, words = self.GUIDE[k]
+        with ui.card().classes("w-full gap-2 bg-slate-50"):
+            with ui.row().classes("w-full items-center gap-1 no-wrap overflow-x-auto"):
+                for n, (name, *_rest) in enumerate(self.GUIDE):
+                    done, now = n < k, n == k
+                    ui.button(f"{'✓' if done else n + 1} {name}", on_click=lambda n=n: self.go_step(n)) \
+                        .props("dense no-caps rounded " + ("unelevated color=primary" if now else
+                                                          "flat color=positive" if done else "flat color=grey-8"))
+                    if n < len(self.GUIDE) - 1:
+                        ui.icon("chevron_right").classes("text-gray-400")
+                ui.space()
+                with ui.button("More", icon="more_horiz").props("flat dense no-caps"):
+                    with ui.menu():
+                        ui.menu_item("Library: all shots", on_click=lambda: self.guide_open(self.library_tab))
+                        ui.menu_item("People", on_click=lambda: self.guide_open(self.people_tab))
+                        ui.menu_item("Stories", on_click=lambda: self.guide_open(self.stories_tab))
+                        ui.separator()
+                        ui.menu_item("Show all the tabs instead", on_click=lambda: self.set_guided(False))
+            with ui.row().classes("w-full items-center gap-3 no-wrap"):
+                ui.label(f"Step {k + 1} of {len(self.GUIDE)}: {title}").classes("text-lg font-semibold flex-none")
+                ui.label(words).classes("text-sm text-gray-700 flex-1")
+                if k == 2:
+                    ui.button("📌 Mark the best bits", on_click=self.guide_best_bits).props("outline dense no-caps")
+                if k == 5:
+                    ui.button("Open the editor", icon="movie_edit", on_click=lambda: self.open_editor(True)) \
+                        .props("unelevated dense no-caps color=positive")
+                if k:
+                    ui.button("Back", icon="chevron_left", on_click=lambda: self.go_step(k - 1)) \
+                        .props("outline dense no-caps")
+                if k < len(self.GUIDE) - 1:
+                    ui.button(f"Next: {self.GUIDE[k + 1][0]}",
+                              on_click=lambda: self.go_step(k + 1)).props("unelevated dense no-caps")
+        if k < len(self.GUIDE) - 1:  # (also at the bottom of the screen, wherever you scrolled)
+            ui.button(f"Next: {self.GUIDE[k + 1][0]} →", on_click=lambda: self.go_step(k + 1)) \
+                .props("unelevated no-caps rounded color=primary").classes("shadow-lg") \
+                .style("position:fixed;right:24px;bottom:24px;z-index:1500")
+
+    def set_guided(self, on: bool) -> None:
+        self.guided = on
+        save_settings(guided=on)
+        self.tabs_bar.set_visibility(not on)
+        if on:
+            self.guide_step = self._step_for_panel(default=self.guide_step)
+        self.guide_bar.refresh()
+        self.storyboard_view.refresh()
+
+    def _step_for_panel(self, default: int = 0) -> int:
+        here = [n for n, g in enumerate(self.GUIDE) if self.showing(g[1])]
+        return default if not here or default in here else here[0]
+
+    def go_step(self, k: int) -> None:
+        self.guide_step = max(0, min(len(self.GUIDE) - 1, k))
+        self.guide_detour = False
+        _, tab, anchor, _ = self.GUIDE[self.guide_step]
+        self.panels.set_value(self.guide_tab(tab))
+        self.guide_bar.refresh()
+        if anchor:
+            ui.run_javascript(f"setTimeout(() => {{ const e = document.getElementById('{anchor}'); "
+                              f"if (e) e.scrollIntoView({{behavior: 'smooth', block: 'start'}}); }}, 400)")
+        else:
+            ui.run_javascript("setTimeout(() => window.scrollTo({top: 0, behavior: 'smooth'}), 200)")
+
+    def guide_open(self, tab) -> None:
+        self.guide_detour = True
+        self.panels.set_value(tab)
+
+    def guide_best_bits(self) -> None:
+        self.guide_detour = True
+        self.panels.set_value(self.choose_tab)
+        ui.run_javascript("setTimeout(() => { const e = document.getElementById('tm-step-bestbits'); "
+                          "if (e) e.scrollIntoView({behavior: 'smooth', block: 'start'}); }, 500)")
+
     def tab_opened(self) -> None:
         # Tabs are only built while open (a big trip would otherwise make the page very slow), so build this one now.
+        if getattr(self, "guided", False) and not self.guide_detour:
+            step = self._step_for_panel(default=self.guide_step)
+            if step != self.guide_step:  # (a button took you to another step's screen)
+                self.guide_step = step
+                self.guide_bar.refresh()
         self.stale = False
         if self.library_focus and not self.showing("Library"):
             self.library_focus = None  # you left the Library by its tab: it shows everything again next time
@@ -493,8 +607,8 @@ class Page:
         removed = self.trip.removed_count()
         size = sum(_file_size(it["path"]) for it in self.all_items)
         doubles = total - len({it["similar_set"] for it in self.all_items})
-        with ui.card().classes("w-full bg-amber-50"):
-            ui.label("Step 1: sort out").classes("text-lg font-semibold")
+        with ui.card().classes("w-full bg-amber-50").props('id="tm-step-doubles"'):
+            ui.label("Sort out doubles" if getattr(self, "guided", False) else "Step 1: sort out").classes("text-lg font-semibold")
             self.sort_label = ui.label(self.sort_text(total, chosen, size, removed)).classes("text-sm")
             ui.label(
                 f"Go through quickly and untick what you don't want. {doubles} files are doubles or triples of another "
@@ -554,9 +668,10 @@ class Page:
         if not videos:
             return
         marked = sum(1 for it in videos if it.get("postits"))
-        with ui.card().classes("w-full mt-2 bg-yellow-50"):
+        with ui.card().classes("w-full mt-2 bg-yellow-50").props('id="tm-step-bestbits"'):
             with ui.row().classes("w-full items-center gap-3"):
-                ui.label("Step 1b: mark the best bits").classes("text-lg font-semibold")
+                ui.label("📌 Mark the best bits" if getattr(self, "guided", False) else "Step 1b: mark the best bits") \
+                    .classes("text-lg font-semibold")
                 ui.label(f"{marked} of {len(videos)} videos marked").classes("text-sm text-gray-600")
                 ui.space()
                 ui.button("Mark the best bits", icon="sticky_note_2",
@@ -1029,7 +1144,7 @@ class Page:
         self.camera_clocks_card()
         self.postit_card()
         with ui.row().classes("w-full items-center gap-3"):
-            ui.label("Step 2:").classes("text-lg font-semibold")
+            ui.label("Analyse:" if getattr(self, "guided", False) else "Step 2:").classes("text-lg font-semibold")
             ui.button(
                 f"Analyse the {chosen} chosen files", icon="auto_awesome", on_click=self.analyse_chosen
             ).props("" if chosen else "disable")
@@ -3478,6 +3593,14 @@ class Page:
         board = self.trip.storyboard()
         if not board:
             ui.label("Nothing is in the video yet. Tick files in the Library, or let Auto-edit choose.").classes("text-gray-500")
+            return
+        if getattr(self, "guided", False) and not getattr(self, "board_list_open", False):
+            with ui.row().classes("w-full items-center gap-3"):
+                ui.label(f"{len(board)} clips in the first cut. You change them in the editor (next step: Watch & "
+                         "finish).").classes("text-sm text-gray-700")
+                ui.button("Show the clip list", on_click=lambda: (setattr(self, "board_list_open", True),
+                                                                   self.storyboard_view.refresh())) \
+                    .props("flat dense no-caps size=sm")
             return
         with ui.row().classes("w-full items-center gap-4"):
             ui.label(f"{len(board)} clips in this order").classes("text-lg font-semibold")
