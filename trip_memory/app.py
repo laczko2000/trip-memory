@@ -1870,7 +1870,24 @@ class Page:
             return
         way = "clockwise" if degrees > 0 else "anti-clockwise"
         ui.notify(f"Turned {Path(path).name} {way}.", timeout=1500)
+        # Stay on the picture you turned: where it is on the screen now, it is after the page is drawn again.
+        cid = clip_id(path)
+        try:
+            top = await ui.run_javascript(
+                f"(() => {{ const e = document.querySelector('[data-tile=\"{cid}\"]'); "
+                "return e ? e.getBoundingClientRect().top : null; })()", timeout=2.0)
+        except Exception:
+            top = None
+        it = next((x for x in self.all_items if x["path"] == path), None)
+        if it is not None:
+            self.choose_focus, self.choose_focus_path = it["story"], path  # (drawn down to it)
+        self.choose_keep_scroll = True
         self.refresh_all()  # last: this rebuilds the tile the button sits on
+        self.choose_keep_scroll = False
+        if top is not None:
+            ui.run_javascript(
+                f"setTimeout(() => {{ const e = document.querySelector('[data-tile=\"{cid}\"]'); "
+                f"if (e) window.scrollBy(0, e.getBoundingClientRect().top - ({float(top):.1f})); }}, 150)")
 
     def choose_paths(self, paths: list[str], chosen: bool) -> None:
         self.tick_in_place(paths, chosen)
