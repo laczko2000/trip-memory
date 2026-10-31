@@ -24,14 +24,18 @@ STORY_MOVE_KM = 1.0
 SIMILAR_HASH_BITS = 18  # of 64: how different two pictures may look and still count as "the same shot"
 SIMILAR_COLOUR = 40.0
 
-# How strict "look alike" is: minutes between shots, share of matching details, layout and colour closeness.
+# The two levels of doubles. Level 1, bursts: the same moment shot again and again (5-6 pictures in a minute or
+# two), so each set is small and its best one easy to pick. Level 2, a second cleaning: similar shots of the same
+# scene. Never more than 10 minutes apart: anything later is another picture.
+# gap: minutes between one shot and the set's last; span: minutes from the set's first shot; the rest is how alike
+# they must look (share of matching details, layout match, colour overlap).
 STRICTNESS = {
-    "strict": {"minutes": 4, "details": 0.18, "layout": 0.65, "colours": 0.6},
-    "normal": {"minutes": 10, "details": 0.12, "layout": 0.5, "colours": 0.5},
-    "loose": {"minutes": 25, "details": 0.08, "layout": 0.4, "colours": 0.45},
+    "burst": {"gap": 1.5, "span": 3.0, "details": 0.12, "layout": 0.5, "colours": 0.5, "most": 10},
+    "normal": {"gap": 5.0, "span": 10.0, "details": 0.12, "layout": 0.5, "colours": 0.5, "most": 30},
 }
-STRICTNESS_NAMES = {"strict": "Only near-identical shots", "normal": "Same people, same setting (normal)",
-                    "loose": "Anything alike in the same place"}
+STRICTNESS_NAMES = {"burst": "Level 1 · Same moment: bursts a minute or two apart",
+                    "normal": "Level 2 · Similar shots of the same scene (up to 10 min)"}
+OLD_LEVELS = {"strict": "burst", "loose": "normal"}  # (names of earlier versions)
 
 
 def fingerprint(thumb_path: str) -> tuple[str, bytes, float]:
@@ -115,7 +119,7 @@ def likeness(a: dict, b: dict) -> tuple[float, float, float]:
     return details, layout, colours
 
 
-def alike(a: dict, b: dict, level: str = "normal") -> bool:
+def alike(a: dict, b: dict, level: str = "burst") -> bool:
     """Whether two shots look like the same shot. Videos: any of their frames looking alike counts, as
     two takes of the same scene often start or end the same way."""
     if "frames" in a or "frames" in b:
@@ -124,7 +128,7 @@ def alike(a: dict, b: dict, level: str = "normal") -> bool:
 
 
 def _alike(a: dict, b: dict, level: str) -> bool:
-    t = STRICTNESS.get(level, STRICTNESS["normal"])
+    t = STRICTNESS.get(OLD_LEVELS.get(level, level), STRICTNESS["burst"])
     colours = float(np.minimum(a["colours"], b["colours"]).sum())
     if colours < 0.3:  # quick check first: clearly different colours are never the same shot
         return False
@@ -163,7 +167,7 @@ def score(row: dict) -> float:
     return s
 
 
-def group(rows: list[dict], level: str = "normal", links: list[str] | None = None) -> dict[str, tuple[int, int, bool]]:
+def group(rows: list[dict], level: str = "burst", links: list[str] | None = None) -> dict[str, tuple[int, int, bool]]:
     """For each file: (story number, similar-set number, is it the best of its set).
 
     links: places where you joined two stories, each as "taken_at|path" of the later story's first file; no new
@@ -171,7 +175,7 @@ def group(rows: list[dict], level: str = "normal", links: list[str] | None = Non
 
     A shot joins a set when it looks like one of that set's last few shots, taken within a few minutes, in the
     same story; so a burst stays together even with other shots taken in between."""
-    t = STRICTNESS.get(level, STRICTNESS["normal"])
+    t = STRICTNESS.get(OLD_LEVELS.get(level, level), STRICTNESS["burst"])
     rows = sorted(rows, key=lambda r: (r["taken_at"], r["path"]))
     result: dict[str, tuple[int, int, bool]] = {}
     story = -1
@@ -196,13 +200,15 @@ def group(rows: list[dict], level: str = "normal", links: list[str] | None = Non
                 open_sets = []
         best_set = None
         for k in list(reversed(open_sets))[:12]:  # the most recent sets only, so big trips stay quick
-            last = sets[k][-1]
+            last, first = sets[k][-1], sets[k][0]
             if last["kind"] != row["kind"]:
                 continue  # a video's doubles are other videos (a photo of the same scene is still worth keeping)
             ended = datetime.fromisoformat(last["taken_at"]).timestamp() + (last.get("duration") or 0)
-            if (when.timestamp() - ended) / 60 > t["minutes"]:
+            if (when.timestamp() - ended) / 60 > t["gap"] or len(sets[k]) >= t["most"]:
                 continue
-            for other in sets[k][-2:]:
+            if (when - datetime.fromisoformat(first["taken_at"])).total_seconds() / 60 > t["span"]:
+                continue  # (a set never grows across the whole afternoon one similar shot at a time)
+            for other in ([first] if first is not last else []) + sets[k][-2:]:
                 a, b = look(row), look(other)
                 if (alike(a, b, level) if a is not None and b is not None else looks_alike(row, other)):
                     best_set = k

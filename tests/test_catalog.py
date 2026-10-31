@@ -415,7 +415,7 @@ def test_video_doubles_are_found_on_several_frames(tmp_path, monkeypatch):
     trip_dir = tmp_path / "trip"
     trip_dir.mkdir()
     make_clip(trip_dir / "take1.mp4", "640x360", 4, "2025-07-03T10:00:00Z", audio=False)
-    make_clip(trip_dir / "take2.mp4", "640x360", 6, "2025-07-03T10:06:00Z", audio=False)  # 6 min after take 1 ended
+    make_clip(trip_dir / "take2.mp4", "640x360", 6, "2025-07-03T10:01:00Z", audio=False)  # a minute after take 1
     subprocess.run([ffmpeg_paths()[0], "-loglevel", "error", "-y", "-f", "lavfi", "-i", "mandelbrot=s=640x360:r=30",
                     "-t", "4", "-metadata", "creation_time=2025-07-03T10:08:00Z", "-c:v", "libx264",
                     str(trip_dir / "other.mp4")], check=True)
@@ -438,7 +438,7 @@ def test_keep_marked_sorts_out_a_set_for_good(tmp_path, monkeypatch):
     trip_dir = tmp_path / "trip"
     trip_dir.mkdir()
     make_clip(trip_dir / "take1.mp4", "640x360", 4, "2025-07-03T10:00:00Z", audio=False)
-    make_clip(trip_dir / "take2.mp4", "640x360", 6, "2025-07-03T10:06:00Z", audio=False)
+    make_clip(trip_dir / "take2.mp4", "640x360", 6, "2025-07-03T10:01:00Z", audio=False)
     trip = catalog.Trip(trip_dir)
     trip.prepare()
     names = lambda: {Path(i["path"]).name: i for i in trip.items()}
@@ -1096,3 +1096,31 @@ def test_the_ending_card_has_its_own_room_at_the_end(tmp_path):
     assert trip.card_rooms()["end_room"] == 8.0
     trip.set_title_settings(end_room=0, end_black=3.0)
     assert trip.closing_card() is None and trip.end_card()[0] == 3.0
+
+
+def test_doubles_level_one_bursts_then_a_second_cleaning(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    scene = Image.fromarray(np.kron(rng.integers(0, 255, (8, 12, 3)), np.ones((40, 40, 1))).astype(np.uint8))
+    for name, when in [("a", "2025:07:03 10:00:00"), ("b", "2025:07:03 10:00:40"), ("c", "2025:07:03 10:05:00"),
+                       ("d", "2025:07:03 10:20:00")]:
+        exif = Image.Exif()
+        exif[306] = when
+        scene.save(trip_dir / f"{name}.jpg", exif=exif)
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    sets = lambda: {Path(i["path"]).stem: i["similar_set"] for i in trip.items()}
+    assert trip.look_alike_level() == "burst"
+    s = sets()
+    assert s["a"] == s["b"] != s["c"] != s["d"]  # level 1: only the burst
+    both = [str(trip_dir / "a.jpg"), str(trip_dir / "b.jpg")]
+    trip.set_chosen(both, True)
+    trip.keep_marked(both)  # sorted out, both kept
+    trip.set_look_alike_level("normal")  # the second cleaning
+    s = sets()
+    assert s["a"] == s["b"] == s["c"] != s["d"]  # the same scene within 10 minutes; 20 minutes later is another

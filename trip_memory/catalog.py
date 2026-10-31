@@ -2446,7 +2446,13 @@ class Trip:
         cleaned = self.cleaned_sets()
         for r in self.query("SELECT path FROM items WHERE shot_of IS NOT NULL AND removed = 0"):
             cleaned.setdefault(r["path"], 1)  # a shot made from a video is never a double of its video
-        if cleaned:  # sets you sorted out with Keep marked: each of their shots stands alone now
+        # Sets you sorted out with Keep marked: each of their shots stands alone now. The ones you kept at level 1
+        # (bursts) can still be doubles of each other at level 2: the second cleaning.
+        level = self.look_alike_level()
+        at = self.cleaned_levels()
+        cleaned = {p: kept for p, kept in cleaned.items()
+                   if not kept or list(stories.STRICTNESS).index(at.get(p, "burst")) >= list(stories.STRICTNESS).index(level)}
+        if cleaned:
             free = max((sim for _, sim, _ in groups.values() if sim is not None), default=-1) + 1
             for path in sorted(cleaned):
                 if path in groups:
@@ -2464,6 +2470,11 @@ class Trip:
         rows = self.query("SELECT value FROM meta WHERE key = 'sets_cleaned'")
         return json.loads(rows[0]["value"]) if rows else {}
 
+    def cleaned_levels(self) -> dict[str, str]:
+        """At which level of doubles you sorted each shot out (Keep marked)."""
+        rows = self.query("SELECT value FROM meta WHERE key = 'sets_cleaned_level'")
+        return json.loads(rows[0]["value"]) if rows else {}
+
     def keep_marked(self, paths: list[str]) -> None:
         """A set of look-alikes is sorted out: the ticked shots stay as single shots, the frame and the star go.
         Remembered, also when the app looks for doubles again."""
@@ -2472,13 +2483,16 @@ class Trip:
             f"SELECT path, chosen FROM items WHERE path IN ({','.join('?' * len(paths))})", tuple(paths))}
         cleaned.update({p: int(chosen.get(p, 0)) for p in paths})
         self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('sets_cleaned', ?)", (json.dumps(cleaned),))
+        at = self.cleaned_levels()
+        at.update({p: self.look_alike_level() for p in paths})
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('sets_cleaned_level', ?)", (json.dumps(at),))
         free = (self.query("SELECT MAX(similar_set) AS m FROM items")[0]["m"] or 0) + 1
         self.db_write_many("UPDATE items SET similar_set = ?, best = ? WHERE path = ?",
                            [(free + i, cleaned[p], p) for i, p in enumerate(paths)])
 
     def regroup_sets(self) -> None:
         """Undo every Keep marked: the look-alike frames come back."""
-        self.execute("DELETE FROM meta WHERE key = 'sets_cleaned'")
+        self.execute("DELETE FROM meta WHERE key IN ('sets_cleaned', 'sets_cleaned_level')")
         self._group_stories()
 
     def story_links(self) -> list[str]:
@@ -2537,7 +2551,8 @@ class Trip:
 
     def look_alike_level(self) -> str:
         rows = self.query("SELECT value FROM meta WHERE key = 'look_alike'")
-        return rows[0]["value"] if rows and rows[0]["value"] in stories.STRICTNESS else "normal"
+        level = stories.OLD_LEVELS.get(rows[0]["value"], rows[0]["value"]) if rows else "burst"
+        return level if level in stories.STRICTNESS else "burst"
 
     def set_look_alike_level(self, level: str) -> None:
         """How alike shots must be to count as doubles; the sets are worked out again (your ticks stay)."""

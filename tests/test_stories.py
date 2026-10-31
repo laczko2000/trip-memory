@@ -67,7 +67,10 @@ def test_a_burst_stays_together_with_people_moving_and_other_shots_in_between(tm
         return r
 
     rows = [row("a1", 0, scene), row("b1", 2, other), row("a2", 4, moved(12, 0.9)), row("a3", 9, moved(30, 0.85))]
-    g = {k.split("/")[-1][:-4]: v[1] for k, v in stories.group(rows).items()}
-    assert g["a1"] == g["a2"] == g["a3"] != g["b1"]
-    strict = {k.split("/")[-1][:-4]: v[1] for k, v in stories.group(rows, "strict").items()}
-    assert strict["a3"] != strict["a1"]  # 5 minutes after the last one: too long for "only near-identical"
+    g = {k.split("/")[-1][:-4]: v[1] for k, v in stories.group(rows, "normal").items()}
+    assert g["a1"] == g["a2"] == g["a3"] != g["b1"]  # level 2: the same scene within 10 minutes
+    burst = {k.split("/")[-1][:-4]: v[1] for k, v in stories.group(rows).items()}
+    assert burst["a3"] != burst["a1"]  # level 1 (bursts): 5 minutes after the last one is another moment
+    late = row("a4", 12, moved(12, 0.9))
+    g = {k.split("/")[-1][:-4]: v[1] for k, v in stories.group([*rows, late], "normal").items()}
+    assert g["a4"] != g["a1"]  # never more than 10 minutes from the set's first shot
