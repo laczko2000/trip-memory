@@ -298,6 +298,11 @@ class Page:
         self.window_box = ui.element("div")  # the shot window lives here: redrawing a tab never closes it
         self.window_timers = ui.element("div")
         ui.add_css(".thumb { height: 150px; object-fit: cover; }")
+        # The big window fills the screen without scrolling: the video takes whatever room the rest leaves.
+        ui.add_css(".tm-fill { display: flex; flex-direction: column; } .tm-fill > * { flex: 1 1 0; min-height: 0; }"
+                   ".tm-fill > * > .tm-hover { height: 100% !important; }"
+                   ".tm-bigwin { display: flex; flex-direction: column; flex-wrap: nowrap; overflow: hidden; }"
+                   ".tm-bigwin > * { flex: none; }")
         with ui.column().classes("w-full max-w-6xl mx-auto p-4 gap-3"):
             with ui.row().classes("items-baseline gap-2"):
                 ui.label("Trip Memory").classes("text-3xl font-bold")
@@ -797,7 +802,7 @@ class Page:
                     ui.label(f"The app's pick: this frame, at {clock(f['t'])} (the orange mark on the strip; the "
                              "video stands still on it, the red line on it).").classes("text-sm font-medium "
                                                                                         "text-orange-900")
-                    ui.label("Right frame? Press ⭐ Keep. A bit off? Press and drag along the strip to the right "
+                    ui.label("Right frame? Press ⭐ Keep. A bit off? Move the mouse along the strip to the right "
                              "frame (or Space to play, Space to stop), then ⭐ Keep: the ⭐ goes where the red line "
                              "is.").classes("text-xs text-orange-800")
                 ui.button("Back to the app's pick", icon="my_location", on_click=lambda: ui.run_javascript(
@@ -831,7 +836,7 @@ class Page:
                           ("Keep at the red line", "star", kept, "unelevated no-caps color=orange-8")],
                          extra=extra, on_hide=hidden, full=True, focus=f["t"],
                          on_highlight=add_highlight if highlights else None,
-                         video_height="max(200px,calc(100vh - 520px))" if highlights else None)
+                         )
 
     def highlight_cards(self, row: dict, box: str, holder: dict) -> None:
         """Your own ⭐ highlights in this video, each as its picture with its time: click to go to it, ✕ to take it
@@ -843,7 +848,7 @@ class Page:
             marks = self.trip.postits(path)
             with ui.row().classes("w-full items-center gap-2 px-2"):
                 ui.label(f"⭐ Your highlights in this video ({len(marks)}):" if marks else
-                         "⭐ Another great moment in this video? Drag the strip to it and tap Shift: it becomes one "
+                         "⭐ Another great moment in this video? Move the mouse along the strip to it and tap Shift: it becomes one "
                          "of your highlights too.").classes("text-sm font-medium text-amber-900")
                 for n, m in enumerate(marks):
                     with ui.column().classes("gap-0 p-1 rounded border-2 border-amber-400 bg-amber-50 items-center"):
@@ -1622,11 +1627,12 @@ class Page:
         full0, full1 = kept_part(it) or (0.0, float(it["duration"] or 0))
         part = {"min": round(max(full0, a), 1), "max": round(min(full1, b), 1)}
         with ui.dialog().props("maximized" if full else "") as dialog, \
-                ui.card().classes("w-full h-full gap-2 overflow-auto" if full else "w-[60rem] max-w-full gap-2"):
-            ui.label(title).classes("text-lg font-semibold")
-            height = video_height or ("max(240px,calc(100vh - 360px))" if full else "min(60vh,520px)")
-            with ui.element("div").classes("w-full").on("dblclick", lambda: dialog.close()) \
-                    .tooltip("Double-click: close and go back") as holder:
+                ui.card().classes("w-full h-full gap-1 p-2 tm-bigwin" if full else "w-[60rem] max-w-full gap-2"):
+            ui.label(title).classes("text-base font-semibold truncate" if full else "text-lg font-semibold")
+            height = video_height or ("100%" if full else "min(60vh,520px)")
+            with ui.element("div").classes("w-full" + (" tm-fill" if full else "")) \
+                    .style("flex:1 1 0;min-height:160px" if full else "") \
+                    .on("dblclick", lambda: dialog.close()).tooltip("Double-click: close and go back") as holder:
                 holder.on("tmvzoom", lambda e: self.vzoom_moved and self.vzoom_moved(e), ["detail"])
                 if on_highlight is not None:  # Space plays and pauses, Shift puts a highlight here
                     holder.props("data-shotwin")
@@ -1670,11 +1676,11 @@ class Page:
             ui.range(min=full0, max=full1, step=0.1, value=dict(part),
                      on_change=lambda e: moved(e.value["min"], e.value["max"])).props("color=green dense drag-range") \
                 .classes("w-full px-2")
-            label = ui.label().classes("text-sm font-medium text-green-800 px-2")
-            ui.label("Press and drag on the strip: the red line and the video follow (a click puts the line there). "
-                     "Space or Play plays from the red line. Drag the green bar's middle to move the same length to "
-                     "another moment, or its ends to make it longer or shorter: the video shows that very frame. "
-                     "Double-click the picture to close.").classes("text-xs text-gray-500 px-2")
+            with ui.row().classes("w-full items-center gap-3 px-2 no-wrap"):
+                label = ui.label().classes("text-sm font-medium text-green-800 whitespace-nowrap")
+                ui.label("Move the mouse along the strip to look through it · Space plays and stops · the green bar is "
+                         "the part used (drag its middle or ends) · double-click the picture to close") \
+                    .classes("text-xs text-gray-500 truncate")
 
             def show() -> None:
                 label.text = (f"{fmt_length(part['min'])}–{fmt_length(part['max'])} · "
