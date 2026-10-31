@@ -255,7 +255,7 @@ def _side_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
     """Two or three upright videos playing next to each other on one cut (the first one's sound)."""
     fx = item.effects or {}
     start, end = clip_range(item, s)
-    length = max(0.5, end - start)
+    length = max(0.5, end - start + held(fx))  # (under the ending card a short clip holds its last picture)
     others = list(fx.get("side") or [])
     starts = list(fx.get("starts") or [0.0] * len(others))
     turns = list(fx.get("turns") or [0] * len(others))
@@ -425,6 +425,9 @@ def _photo_segment(item: MediaItem, s: RenderSettings, out: Path, workdir: Path)
 
 
 POP = 0.18  # seconds a collage tile takes to pop into place
+RESHUFFLE_AFTER = 1.2  # a long collage changes its view this long after its last photo popped in ...
+RESHUFFLE_EVERY = 1.8  # ... and again every this many seconds (the photos move round one place)
+RESHUFFLE_FADE = 0.3  # seconds the change of view takes
 COLLAGE_GAP_SHARE = 0.008  # the thin dark line between tiles, as a share of the video's width
 
 
@@ -453,19 +456,48 @@ def _collage_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
     appear = list(fx.get("appear") or [0.0] * len(paths))
     seconds = item.seconds or s.photo_seconds
     w, h = s.width, s.height
-    tiles = []
-    for path, turn, (x, y, tw, th) in zip(paths, turns, collage_tiles(len(paths), w, h)):
+    tiles, pictures = [], []
+    places = collage_tiles(len(paths), w, h)
+    for path, turn, (x, y, tw, th) in zip(paths, turns, places):
         with Image.open(path) as img:
             img = ImageOps.exif_transpose(img).convert("RGB").rotate(-turn, expand=True)
             img.thumbnail((2400, 2400))
+            pictures.append(img.copy())
             tiles.append((x, y, np.asarray(ImageOps.fit(img, (tw, th), Image.LANCZOS))))
     frames = max(1, round(seconds * FPS))
+    # A long collage changes its view now and then: the same photos move round one place (fresh on screen
+    # without new photos). Each view is a whole picture; the change is a quick cross-fade.
+    first = (max(appear) if appear else 0.0) + POP + RESHUFFLE_AFTER
+    changes = [first + k * RESHUFFLE_EVERY for k in range(20)
+               if first + k * RESHUFFLE_EVERY < seconds - RESHUFFLE_EVERY * 0.6] if len(paths) > 1 else []
+    views: list[np.ndarray] = []
+
+    def view(turn: int) -> np.ndarray:
+        while len(views) <= turn % len(paths):
+            r = len(views)
+            frame = np.full((h, w, 3), 12, np.uint8)
+            for i, pic in enumerate(pictures):
+                x, y, tw, th = places[(i + r) % len(paths)]
+                frame[y:y + th, x:x + tw] = np.asarray(ImageOps.fit(pic, (tw, th), Image.LANCZOS))
+            views.append(frame)
+        return views[turn % len(paths)]
     layer = np.asarray(titles.draw(item.overlay, w, h)) if item.overlay and (
         item.overlay.get("text") or item.overlay.get("sub")) else None
 
     def feed(pipe) -> None:
         for n in range(frames):
             t = n / FPS
+            done = sum(1 for c in changes if t >= c)
+            if done:
+                since = t - changes[done - 1]
+                frame = view(done)
+                if since < RESHUFFLE_FADE:
+                    k = since / RESHUFFLE_FADE
+                    frame = (view(done - 1) * (1 - k) + frame * k).astype(np.uint8)
+                if layer is not None:
+                    frame = titles.blend(frame, layer, titles.strength(t, seconds))
+                pipe.write(np.ascontiguousarray(frame).tobytes())
+                continue
             frame = np.full((h, w, 3), 12, np.uint8)
             for (x, y, tile), start in zip(tiles, appear):
                 if t < start:

@@ -331,7 +331,8 @@ class Trip:
         # The photos inside a collage show as part of its first photo, not on their own.
         inside = {p for r in rows if r["effects"] for key in ("collage", "side")
                   for p in json.loads(r["effects"]).get(key, [])}
-        rows = [r for r in rows if r["path"] not in inside]
+        # (a video next to another one can also have a cut of its own: then it has its place)
+        rows = [r for r in rows if r["path"] not in inside or r["position"] is not None]
 
         def order(r: dict) -> tuple:  # by story, then the story's plan, then time
             return rank.get(source[r["path"]], 0), r["plan_pos"] is None, r["plan_pos"] or 0, r["taken_at"]
@@ -1986,7 +1987,11 @@ class Trip:
                      shot.path),
                 )
             # The photos inside a collage are part of this cut (they show through its first photo).
-            parts = [(p,) for shot in result.shots for key in ("collage", "side") for p in (shot.effects or {}).get(key, [])]
+            # (never a shot of its own: a video can also show another of its moments next to itself, or next to
+            # another upright video that has a cut of its own)
+            own = {shot.path for shot in result.shots} | {result.parts[s.path][0] for s in result.shots if s.path in result.parts}
+            parts = [(p,) for shot in result.shots for key in ("collage", "side") for p in (shot.effects or {}).get(key, [])
+                     if p not in own]
             self.db.executemany("UPDATE items SET cut_out = 0, position = NULL WHERE path = ?", parts)
             # Left out of this cut, but still in your selection, so the next Auto-edit can use it again.
             self.db.executemany("UPDATE items SET cut_out = 1, position = NULL WHERE path = ?",

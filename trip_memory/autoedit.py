@@ -740,6 +740,8 @@ def speed_for(row: dict, slot: Slot, seconds: float) -> tuple[float, str | None]
 COLLAGE_MAX = 4  # photos in one collage (2x2)
 COLLAGE_GAP = 12.0  # at least this many seconds between two collages
 COLLAGE_SHOT = 1.6  # only quick shots are gathered into a collage
+COLLAGE_LONG = 5.0  # a collage of photos that had cuts of their own lasts at most this long
+QUICK_POP = 0.35  # the photos of a collage all pop in at the start, this far apart (no waiting for the next one)
 
 
 def _group_of(row: dict) -> tuple:
@@ -765,7 +767,8 @@ def collages(shots: list[Shot], slots: list[Slot], rows: dict[str, dict], transi
         story = _group_of(rows.get(shots[k].path, {}))
         run = k
         while run < len(shots) and run - k < COLLAGE_MAX and fits(run, story) and (
-                run == k or shots[run - 1].transition in (None, HARD_CUT)):
+                run == k or shots[run - 1].transition in (None, HARD_CUT)) and (
+                not everywhere or run == k or sum(g.seconds for g in shots[k:run + 1]) <= COLLAGE_LONG):
             run += 1
         if run - k >= (2 if everywhere else 3) and (everywhere or at - last_end >= COLLAGE_GAP):
             group = shots[k:run]
@@ -774,6 +777,8 @@ def collages(shots: list[Shot], slots: list[Slot], rows: dict[str, dict], transi
             for g, overlap in zip(group, [*inside, 0.0]):
                 appear.append(round(t, 3))
                 t += g.seconds - overlap
+            if everywhere:  # (quick: all in within a second, not one every few seconds)
+                appear = [round(n * QUICK_POP, 3) for n in range(len(group))]
             lead = group[0]
             result.append(Shot(path=lead.path, kind="photo", seconds=round(t, 4), transition=group[-1].transition,
                                why=group[-1].why,
@@ -864,8 +869,8 @@ def pack(shots: list[Shot], candidates: list[dict], limits: Limits, curves: dict
     def video_ok(shot: Shot) -> bool:
         r = rows.get(shot.path, {})
         # (camera moves give way: an upright video alone with black sides looks worse than any zoom helps)
-        return (limits.landscape and shot.kind == "video" and not shot.effects.get("still") and abs(shot.speed - 1) < 1e-3
-                and r.get("upright") is True and not r.get("locked") and shot.seconds >= SIDE_FROM)
+        return (limits.landscape and shot.kind == "video" and abs(shot.speed - 1) < 1e-3
+                and r.get("upright") is True and shot.seconds >= SIDE_FROM)
 
     # (cuts still to come in each group: the spare shots are shared fairly between them)
     ahead: dict[tuple, int] = {}
@@ -890,7 +895,7 @@ def pack(shots: list[Shot], candidates: list[dict], limits: Limits, curves: dict
                 when = _when(r)
                 room.sort(key=lambda x: abs(_when(x) - when))
                 group, spare[key] = room[:extra], room[extra:]
-                step = min(0.6, max(POP_GAP, shot.seconds * 0.6 / extra))
+                step = min(QUICK_POP, shot.seconds * 0.5 / extra)
                 shot = replace(shot, effects={"collage": [g["path"] for g in group],
                                               "appear": [round(k * step, 3) for k in range(extra + 1)]},
                                effects_why=f"Collage of {extra + 1} photos: more moments on one cut")
@@ -934,8 +939,11 @@ def pack(shots: list[Shot], candidates: list[dict], limits: Limits, curves: dict
                 # A short clip with no other upright video in its part of the story: itself again, a moment later
                 # (the same clip in two timings rather than alone with black sides).
                 length = own.get("duration") or shot.seconds
-                lag = min(max(0.0, length - shot.seconds), max(0.4, shot.seconds * 0.5))
-                a = shot.start + lag if shot.start + lag + shot.seconds <= length + 1e-3 else max(0.0, shot.start - lag)
+                if length > shot.seconds + 0.2:
+                    lag = min(length - shot.seconds, max(0.4, shot.seconds * 0.5))
+                    a = shot.start + lag if shot.start + lag + shot.seconds <= length + 1e-3 else max(0.0, shot.start - lag)
+                else:  # (shorter than its cut: the other half of it, holding its last picture at the end)
+                    a = length * 0.5
                 picked.append((own, round(a, 2)))
             group = [g for g, _ in picked]
             if group:
@@ -951,8 +959,9 @@ def pack(shots: list[Shot], candidates: list[dict], limits: Limits, curves: dict
                         a = fixed
                     starts.append(round(a + (g.get("keep_offset") or 0.0) + (g.get("part_begin") or 0.0), 2))
                 extra = len(group)
+                hold = ({"freeze": shot.effects["freeze"], "still": True} if shot.effects.get("still") else {})
                 shot = replace(shot, effects={"side": [_source(g["path"]) if "#" in g["path"] else g["path"] for g in group],
-                                              "starts": starts},
+                                              "starts": starts, **hold},
                                effects_why=f"{extra + 1} upright videos side by side: more moments on one cut")
         out.append(shot)
     return out

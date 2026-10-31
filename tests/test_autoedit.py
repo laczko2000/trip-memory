@@ -393,7 +393,7 @@ def test_more_moments_pack_spare_photos_into_collages_and_upright_videos_side_by
     assert len(first.effects["collage"]) == 2 and len(second.effects["collage"]) == 2  # 3 photos a cut
     assert set(first.effects["collage"]) == {"p1.jpg", "p2.jpg"}  # the nearest in time to p0
     assert "o.jpg" not in first.effects["collage"] + second.effects["collage"]  # never from another story
-    assert first.effects["appear"][0] == 0.0 and first.effects["appear"][1] >= autoedit.POP_GAP
+    assert first.effects["appear"] == [0.0, autoedit.QUICK_POP, 2 * autoedit.QUICK_POP]  # all in quickly
     assert video.effects["side"] == ["v1.mov", "v2.mov"] and len(video.effects["starts"]) == 2  # three on a 3 s cut
     assert not landscape.effects  # a wide video stays alone
 
