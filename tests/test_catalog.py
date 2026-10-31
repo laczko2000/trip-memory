@@ -945,3 +945,65 @@ def test_rough_cut_snaps_to_the_pins_only_when_fitted_and_the_fit_can_be_undone(
     assert [round(r["seconds"], 1) for r in trip.storyboard()] == [2.0, 2.0, 2.0]
     assert trip.undo() == "fitting to the music"
     assert trip.edit_stage() == "rough" and [round(r["seconds"], 1) for r in trip.storyboard()] == [2.6, 2.6, 2.6]
+
+
+def test_a_new_trip_replaces_the_last_trips_themes_with_its_own(tmp_path, monkeypatch):
+    from trip_memory import themefinder
+
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    table = themefinder.phrases()
+    rng = np.random.default_rng(2)
+    sentences = rng.normal(size=(len(table), 512)).astype(np.float32)
+    sentences /= np.linalg.norm(sentences, axis=1, keepdims=True)
+    gates = next(i for i, p in enumerate(table) if p[1] == "Torii gates")
+    ramen = next(i for i, p in enumerate(table) if p[1] == "Ramen & noodles")
+    for n in range(8):
+        exif = Image.Exif()
+        exif[306] = f"2025:07:03 1{n}:00:00"
+        Image.new("RGB", (160 + n, 90), "red").save(trip_dir / f"p{n}.jpg", exif=exif)
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    for n, r in enumerate(sorted(trip.items(), key=lambda r: r["path"])):
+        v = sentences[gates if n < 4 else ramen] + 0.02 * rng.normal(size=512)
+        trip.execute("UPDATE items SET clip = ?, chosen = 1 WHERE path = ?",
+                     ((v / np.linalg.norm(v)).astype(np.float32).tobytes(), r["path"]))
+    assert trip.missing_fingerprints() == 0
+    found = trip.propose_themes(sentences)
+    assert {p["name"] for p in found} == {"Temples & shrines", "Food"} and trip.theme_proposals() == found
+    food = next(p for p in found if p["name"] == "Food")
+    trip.use_theme_proposals([food | {"name": "Ramen", "vector": None,
+                                      "subs": [{"name": "Noodles", "paths": food["paths"][:2]}]}])
+    assert [a["name"] for a in trip.activities()] == ["Ramen", "Other"]
+    confirmed = [r for r in trip.items() if r["theme"] == "Ramen"]
+    assert len(confirmed) == 2 and trip.theme_proposals() == []
+    assert [len(m["shots"]) for m in trip.moments() if m["activity"] == "Ramen"] == [2]
+
+
+def test_fit_to_music_puts_every_cut_exactly_on_a_pin_whatever_the_transitions(tmp_path, monkeypatch):
+    from trip_memory import autoedit
+    from trip_memory.render import overlaps, shot_times, style_between
+
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    for n in range(7):
+        exif = Image.Exif()
+        exif[306] = f"2025:07:03 1{n}:00:00"
+        Image.new("RGB", (160 + n, 90), "red").save(trip_dir / f"p{n}.jpg", exif=exif)
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    kinds = [autoedit.HARD_CUT, None, "Dissolve", autoedit.HARD_CUT, None, "Zoom punch", None]
+    for r, kind, seconds in zip(sorted(trip.items(), key=lambda r: r["path"]), kinds, [1.3, 2.9, 1.1, 2.2, 1.7, 3.1, 2.0]):
+        trip.execute("UPDATE items SET seconds = ?, transition = ? WHERE path = ?", (seconds, kind, r["path"]))
+    pins = [1.2, 2.0, 2.6, 3.5, 4.1, 5.0, 6.2, 7.0, 8.3, 9.0, 10.4, 12.0, 14.0]
+    trip.fit_to_music(pins, 4.0, 0.8, "Fade")
+    board = trip.storyboard()
+    lengths = [trip.screen_length(r) for r in board]
+    styles = [style_between(board[k]["transition"], k + 1, "Fade", 0.8) for k in range(len(board) - 1)]
+    times, over = shot_times(lengths, styles), overlaps(lengths, styles)
+    cuts = [times[k]["start"] + times[k]["length"] - over[k] / 2 for k in range(len(board) - 1)]
+    assert all(min(abs(c - p) for p in pins) < 0.02 for c in cuts), cuts

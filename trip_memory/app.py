@@ -21,6 +21,7 @@ from nicegui import app, background_tasks, run, ui
 
 from .catalog import Trip, app_dir, kept_part
 from .media import MediaItem
+from . import themefinder
 from . import director
 from . import looks
 from . import titles
@@ -37,7 +38,7 @@ from . import taps as song_taps
 from .beats import song_length
 from .autoedit import CUT_ON, shot_value
 from .autoedit import Limits as AutoLimits
-from .render import TRANSITIONS, RenderSettings, clip_range, held, render, shot_times, source_factor
+from .render import TRANSITIONS, RenderSettings, clip_range, held, render, shot_times, source_factor, style_between
 from .scenes import SCENES, text_vectors
 from .tags import ALL_TAGS, EDITABLE_TAGS, TAG_GROUP
 
@@ -4143,6 +4144,11 @@ class Page:
             ui.timer(0.1, self.suggest_themes, once=True)
             ui.label("Looking at your shots…").classes("text-gray-500")
             return
+        proposals = self.trip.theme_proposals()
+        if proposals:  # the trip's own themes, waiting for your answer
+            self.theme_review(proposals)
+            return
+        self.new_themes_bar()
         activities = self.trip.activities()
         names = [a["name"] for a in activities]
         if self.theme_shown not in names:
@@ -4188,6 +4194,178 @@ class Page:
                     ui.button(icon="add", on_click=lambda: self.add_activity(new.value)).props("flat dense round")
             with ui.column().classes("flex-grow gap-2 min-w-0"):
                 self.theme_grid(rows, activities)
+
+    def new_themes_bar(self) -> None:
+        """A new trip: the app proposes its own themes from the shots (not the last trip's)."""
+        claude = load_settings().get("ai", {}).get("provider") == "claude_code"
+        if self.trip._meta_json("own_themes", False):  # done for this trip: only a small button to do it again
+            with ui.row().classes("w-full justify-end"):
+                ui.button("Suggest this trip's themes again", icon="auto_awesome", on_click=self.propose_trip_themes) \
+                    .props("flat dense no-caps color=indigo")
+            return
+        with ui.row().classes("w-full items-center gap-3 p-2 rounded bg-indigo-50"):
+            ui.label("✨ A new trip? Let the app look at your shots and suggest this trip's own themes and "
+                     "sub-themes (instead of the last trip's)." + (" Claude (your Pro) gives them names."
+                                                                    if claude else "")) \
+                .classes("text-sm text-indigo-900 flex-1")
+            ui.button("Suggest themes for this trip", icon="auto_awesome", on_click=self.propose_trip_themes) \
+                .props("unelevated no-caps color=indigo")
+
+    async def propose_trip_themes(self) -> None:
+        if self.busy():
+            return
+        missing = self.trip.missing_fingerprints()
+        if missing:
+            ui.notify(f"First the app looks at the {missing} chosen shot{'s' if missing > 1 else ''} it hasn't "
+                      "analysed yet (Analyse); the themes come right after.", multi_line=True, timeout=6000)
+            await self.run_step(self.trip.analyse)
+            self.panels.value = self.themes_tab
+        if not self.trip.has_fingerprints():
+            ui.notify("The picture model isn't ready, so the app can't see the shots yet. Try Analyse in Choose "
+                      "files first.", type="warning", multi_line=True)
+            return
+        ai = None
+        if load_settings().get("ai", {}).get("provider") == "claude_code":
+            try:
+                ai = director.make(load_settings().get("ai", {}))
+            except director.DirectorError:
+                ai = None
+        state = {"share": 0.0, "step": "starting"}
+        note = ui.notification("", spinner=True, timeout=None, multi_line=True)
+        timer = ui.timer(0.5, lambda: setattr(note, "message", f"✨ Finding this trip's themes: {state['step']}…"))
+        self.ai_busy = True
+        try:
+            sentences = [f"a holiday photo of {x}" for _, _, x in themefinder.phrases()]
+            vectors = await run.io_bound(text_vectors, sentences, app_dir() / "models" / "clip")
+            found = await run.io_bound(self.trip.propose_themes, vectors, ai,
+                                       lambda f, m: state.update(share=f, step=m))
+        except Exception as exc:
+            traceback.print_exc()
+            ui.notify(f"Could not suggest themes: {exc}", type="negative", multi_line=True)
+            return
+        finally:
+            self.ai_busy = False
+            timer.cancel()
+            note.dismiss()
+        self.theme_edits = {}
+        ui.notify(f"{len(found)} themes suggested. Keep, rename or merge them, then Use these themes.",
+                  type="positive")
+        self.themes_view.refresh()
+
+    def theme_review(self, proposals: list[dict]) -> None:
+        """The proposed themes, each with its pictures: keep it or not, rename it, merge it into another, drop a
+        sub-theme. Use these themes makes them this trip's themes."""
+        edits = getattr(self, "theme_edits", None) or {}
+        self.theme_edits = edits
+        for n, p in enumerate(proposals):
+            edits.setdefault(n, {"keep": True, "name": p["name"], "emoji": p["emoji"], "into": None,
+                                 "subs": [True] * len(p["subs"])})
+        rows = {r["path"]: r for r in self.all_items}
+        with ui.row().classes("w-full items-center gap-3"):
+            ui.label("✨ This trip's themes").classes("text-lg font-semibold")
+            ui.label("The app put the shots that look alike together and named each group. Untick what you don't "
+                     "want, click a name to change it, or merge a group into another. Sub-themes become moments "
+                     "inside a theme.").classes("text-sm text-gray-600 flex-1")
+        for n, p in enumerate(proposals):
+            e = edits[n]
+            with ui.card().classes("w-full p-2" + ("" if e["keep"] else " opacity-50")):
+                with ui.row().classes("w-full items-center gap-2 no-wrap"):
+                    ui.checkbox(value=e["keep"], on_change=lambda ev, e=e: (e.update(keep=ev.value),
+                                                                             self.themes_view.refresh()))
+                    ui.input(value=e["emoji"], on_change=lambda ev, e=e: e.update(emoji=ev.value)) \
+                        .props("dense borderless").classes("w-10 text-xl")
+                    ui.input(value=e["name"], on_change=lambda ev, e=e: e.update(name=ev.value)) \
+                        .props("dense outlined").classes("w-64 font-semibold")
+                    ui.label(f"{len(p['paths'])} shots").classes("text-sm text-gray-600")
+                    if p.get("from") == "earlier":
+                        ui.badge("like an earlier trip's theme", color="indigo-3")
+                    ui.space()
+                    others = {m: edits[m]["name"] for m in range(len(proposals)) if m != n}
+                    ui.select({None: "—", **others}, value=e["into"], label="Merge into",
+                              on_change=lambda ev, e=e: (e.update(into=ev.value), self.themes_view.refresh())) \
+                        .props("dense outlined").classes("w-56")
+                with ui.row().classes("w-full gap-1 no-wrap overflow-hidden"):
+                    for path in p["sample"][:8]:
+                        it = rows.get(path)
+                        if it:
+                            with ui.element("div").classes("flex-none").style("width:120px"):
+                                self.preview(it, "width:120px;height:76px", start=self.hover_start(it), view="prop")
+                if p["subs"]:
+                    with ui.row().classes("w-full items-center gap-1"):
+                        ui.label("Sub-themes:").classes("text-xs text-gray-600")
+                        for k, sub in enumerate(p["subs"]):
+                            on = e["subs"][k]
+                            ui.chip(f"↳ {sub['name']} · {len(sub['paths'])}", removable=on, selectable=False,
+                                    color="purple-1" if on else "grey-3",
+                                    on_click=(None if on else lambda e=e, k=k: (e["subs"].__setitem__(k, True),
+                                                                                self.themes_view.refresh()))) \
+                                .props("dense" + ("" if on else " outline")) \
+                                .on("remove", lambda e=e, k=k: (e["subs"].__setitem__(k, False),
+                                                                self.themes_view.refresh()))
+        kept = sum(1 for e in edits.values() if e["keep"] and e["into"] is None)
+        with ui.row().classes("w-full items-center gap-2 mt-2"):
+            ui.button(f"Use these {kept} themes", icon="check", on_click=self.use_trip_themes) \
+                .props("unelevated no-caps color=positive")
+            ui.button("Cancel (keep the old themes)", on_click=self.cancel_trip_themes).props("flat no-caps")
+            ui.label("Shots of themes you untick get a suggestion from the kept ones (or Other).") \
+                .classes("text-xs text-gray-500")
+
+    def cancel_trip_themes(self) -> None:
+        self.trip.drop_theme_proposals()
+        self.theme_edits = {}
+        self.themes_view.refresh()
+
+    async def use_trip_themes(self) -> None:
+        proposals = self.trip.theme_proposals()
+        edits = getattr(self, "theme_edits", {}) or {}
+        chosen: dict[int, dict] = {}
+        for n, p in enumerate(proposals):
+            e = edits.get(n) or {"keep": True, "name": p["name"], "emoji": p["emoji"], "into": None,
+                                 "subs": [True] * len(p["subs"])}
+            target = n
+            seen = set()
+            while edits.get(target, {}).get("into") is not None and target not in seen:  # (merged into a merged one)
+                seen.add(target)
+                target = edits[target]["into"]
+            if not (edits.get(target) or e)["keep"]:
+                continue
+            te = edits.get(target) or e
+            name = " ".join((te["name"] or "").split())[:30] or proposals[target]["name"]
+            into = chosen.setdefault(target, {"name": name, "emoji": (te["emoji"] or "⭐").strip()[:4],
+                                              "describe": list(proposals[target]["describe"]), "paths": [],
+                                              "subs": []})
+            into["paths"] += p["paths"]
+            into["subs"] += [s for k, s in enumerate(p["subs"]) if k < len(e["subs"]) and e["subs"][k]]
+        if not chosen:
+            ui.notify("Keep at least one theme.", type="warning")
+            return
+        names = [c["name"].lower() for c in chosen.values()]
+        if len(set(names)) < len(names):
+            ui.notify("Two themes have the same name: rename one, or merge them.", type="warning")
+            return
+        note = ui.notification("Setting up this trip's themes…", spinner=True, timeout=None)
+        for c in chosen.values():  # what the name looks like to the picture model
+            c["vector"] = None
+            if not self.trip.has_fingerprints():
+                continue
+            try:
+                v = await run.io_bound(text_vectors, [f"a holiday photo of {d}" for d in
+                                                      [c["name"].lower()] + c["describe"]], app_dir() / "models" / "clip")
+                mean = v.mean(axis=0)
+                c["vector"] = [round(float(x), 5) for x in mean / np.linalg.norm(mean)]
+            except Exception:
+                traceback.print_exc()
+        try:
+            await run.io_bound(self.trip.use_theme_proposals, list(chosen.values()))
+        finally:
+            note.dismiss()
+        self.theme_edits = {}
+        self.theme_shown = ""
+        self.reload()
+        ui.notify(f"{len(chosen)} themes for this trip. The clearest shots of each are confirmed; check the rest "
+                  "(? marks a guess). Sub-themes are moments inside their theme.", type="positive", multi_line=True,
+                  timeout=8000)
+        self.themes_view.refresh()
 
     def theme_grid(self, rows: list[dict], activities: list[dict]) -> None:
         name = self.theme_shown
@@ -5447,7 +5625,7 @@ class Page:
             return
         photo = self.photo_len.value if getattr(self, "photo_len", None) else 4.0
         seconds = self.t_len.value if getattr(self, "t_len", None) else 0.8
-        result = self.trip.fit_to_music(pins, photo, seconds)
+        result = self.trip.fit_to_music(pins, photo, seconds, self.transition_name())
         parts = [f"Fitted to the music: {result['moved']} cut{'s' if result['moved'] != 1 else ''} moved onto your pins"
                  if result["moved"] else "Fitted to the music: every cut was on a pin already"]
         if result["longer"] or result["shorter"]:
@@ -5488,7 +5666,7 @@ class Page:
         """What the instant player plays: each clip straight from your file (its part, speed, turn, crop, sound),
         at its place in the video, and the song."""
         clips = []
-        for r, at in zip(board, times):
+        for k, (r, at) in enumerate(zip(board, times)):
             file = Path(r.get("part_of") or r["path"])
             thumb = data_url(r["thumb"]) if r.get("thumb") else ""
             try:
@@ -5498,7 +5676,9 @@ class Page:
             crop = json.loads(r["crop"]) if r.get("crop") else None
             clip = {"k": "v" if r["kind"] == "video" else "p", "src": src, "fb": thumb,
                     "st": round(at["start"], 3), "len": round(at["length"], 3), "rot": r.get("rotation") or 0,
-                    "crop": crop, "rev": bool(r.get("reverse"))}
+                    "crop": crop, "rev": bool(r.get("reverse")),
+                    # (fades in over the end of the one before: as long as their transition overlaps them)
+                    "fin": round(max(0.0, times[k - 1]["start"] + times[k - 1]["length"] - at["start"]), 3) if k else 0}
             if r["kind"] == "video":
                 clip.update(a=round(r["trim_start"] if r["trim_start"] is not None else (r["keep_start"] or 0.0), 3),
                             sp=r.get("speed") or 1.0, snd=bool(r.get("clip_sound")),
@@ -5683,7 +5863,13 @@ class Page:
         photo = self.photo_len.value if getattr(self, "photo_len", None) else 4.0
         seconds = self.t_len.value if getattr(self, "t_len", None) else 0.8
         lengths = [Trip.screen_length(r, photo) for r in board]
-        return shot_times(lengths, [("fade", seconds)] * max(0, len(lengths) - 1)) if lengths else []
+        styles = [style_between(board[k].get("transition"), k + 1, self.transition_name(), seconds)
+                  for k in range(len(board) - 1)]  # (each shot's own transition, as the video is made)
+        return shot_times(lengths, styles) if lengths else []
+
+    def transition_name(self) -> str:
+        """The video's transition (Make video › More settings), for shots without their own."""
+        return self.transition.value if getattr(self, "transition", None) else "Fade"
 
     def title_bars(self, board: list[dict], times: list[dict]) -> list[dict]:
         """Every title on the video: the timeline ones and the ones still sitting on a shot."""
@@ -6029,7 +6215,7 @@ class Page:
         pins = song_taps.final_taps(music, app_dir() / "music-taps") if music else None
         photo = self.photo_len.value if getattr(self, "photo_len", None) else 4.0
         seconds = self.t_len.value if getattr(self, "t_len", None) else 0.8
-        return self.trip.reflow(pins or [], None, photo, seconds)
+        return self.trip.reflow(pins or [], None, photo, seconds, self.transition_name())
 
     def draft_changed(self, message: str) -> None:
         gone = self.reflow_board()
@@ -6755,7 +6941,7 @@ function tmInstant(id, data, onTime) {
       if (i < 0) { s.style.opacity = 0; return; }
       const c = clips[i], v = s.querySelector('video'), im = s.querySelector('img');
       const on = T >= c.st && T < c.st + c.len;
-      s.style.opacity = on ? (i > 0 && fade > 0 ? Math.min(1, (T - c.st) / fade) : 1) : 0;
+      s.style.opacity = on ? (c.fin > 0.05 ? Math.min(1, (T - c.st) / c.fin) : 1) : 0;
       s.style.zIndex = i + 1;
       const local = Math.max(0, Math.min(c.len, T - c.st));
       if (c.k === 'v') {

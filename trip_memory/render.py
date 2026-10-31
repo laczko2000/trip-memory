@@ -663,10 +663,21 @@ def _black_segment(s: RenderSettings, seconds: float, out: Path) -> None:
 def _transition_between(before: MediaItem, k: int, s: RenderSettings) -> tuple[str | None, float]:
     """The FFmpeg transition into clip k and how long it lasts: the one set after the previous clip, else the
     default."""
-    name = before.transition or s.transition
+    return style_between(before.transition, k, s.transition, s.transition_seconds)
+
+
+def style_between(name: str | None, k: int, default: str | None, seconds: float) -> tuple[str | None, float]:
+    """The transition into clip k after a clip whose own transition is name (None: the video's default)."""
+    name = name or default
     style = TRANSITIONS.get(name, "fade")
-    seconds = seconds_of(name if name in TRANSITIONS else "Fade", s.transition_seconds)
+    seconds = seconds_of(name if name in TRANSITIONS else "Fade", seconds)
     return (MIXED[(k - 1) % len(MIXED)] if style == "mixed" else style), seconds
+
+
+def overlaps(lengths: list[float], styles: list[tuple[str | None, float]]) -> list[float]:
+    """How many seconds each transition overlaps the two clips around it (as shot_times counts it)."""
+    return [(max(1, round(min(sec, lengths[k] * 0.4, lengths[k + 1] * 0.4) * FPS)) if style else 1) / FPS
+            for k, (style, sec) in enumerate(styles)]
 
 
 def _join(

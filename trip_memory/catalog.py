@@ -35,7 +35,7 @@ from .scenes import SceneTagger, mean_vector
 from .tags import TAG_GROUP, Tagger, group_name, look_alike_groups, people_tag, story_subject
 from .tools import ffmpeg_paths, probe
 from .looks import LOOKS
-from .render import RAMP_SOURCE, held, source_factor
+from .render import FPS, RAMP_SOURCE, held, overlaps, source_factor, style_between
 
 
 def app_dir() -> Path:
@@ -701,11 +701,14 @@ class Trip:
         return max(0.1, (high - low) / source_factor(fx) / (r["speed"] or 1.0)) + held(fx)
 
     def reflow(self, pins: list[float], wants: dict[str, float] | None = None, photo_seconds: float = 4.0,
-               transition_seconds: float = 0.8) -> int:
+               transition_seconds: float = 0.8, transition: str | None = None) -> int:
         """Lay the shots on the music's pins again, in their order, at their own speed (never sped up or slowed
         down to fit): each shot ends on the pin nearest to the length it wants (wants: path -> seconds, else the
         length it has), as far as its video reaches. A longer shot takes more pins, so the ones after it move on;
-        shots past the end of the music leave the video. Returns how many left."""
+        shots past the end of the music leave the video. Returns how many left.
+
+        A cut is the middle of the transition between two shots; the transitions are counted exactly as the
+        video is made (each shot's own, else the video's transition, shorter between short shots)."""
         board = self._fix_order()
         cuts = sorted(p for p in pins or [] if p > 0.2)
         if not board:
@@ -717,23 +720,32 @@ class Trip:
                     self.fit_length(r["path"], wants[r["path"]])
             return 0
         end = cuts[-1]
-        t = 0.0  # where this shot's cut is (the middle of its transition)
-        half_before = 0.0
-        gone = []
-        for k, r in enumerate(board):
-            if t >= end - 0.25:
-                gone.append(r["path"])
-                continue
-            screen = self.screen_length(r, photo_seconds)
-            half_after = transitions.seconds_of(r.get("transition"), transition_seconds) / 2 if k < len(board) - 1 else 0
-            want = wants.get(r["path"], screen - half_before - half_after)  # between its two cuts
-            most = self.most_length(r) - half_before - half_after
-            near = [p for p in cuts if t + 0.4 < p <= t + most + 0.05]
-            e = min(near, key=lambda p: (abs(p - (t + want)), p)) if near else min(end, t + most)
-            length = round(e - t + half_before + half_after, 3)
-            if abs(length - screen) > 0.01:
-                self.fit_length(r["path"], length)
-            t, half_before = e, half_after
+        n = len(board)
+        styles = [style_between(board[k].get("transition"), k + 1, transition, transition_seconds) for k in range(n - 1)]
+        screens = [self.screen_length(r, photo_seconds) for r in board]
+        most = [self.most_length(r) for r in board]
+        before = overlaps(screens, styles) + [0.0]
+        want = [wants.get(r["path"], screens[k] - (before[k - 1] if k else 0) / 2 - before[k] / 2)
+                for k, r in enumerate(board)]  # the time between its two cuts
+        lengths, kept = list(screens), n
+        for _ in range(4):  # (how much two shots overlap depends on their lengths: a few rounds settle it)
+            over = [round(o * FPS) for o in overlaps(lengths, styles)] + [0]  # in frames, as the video counts
+            t, half_before, kept, start = 0.0, 0.0, n, 0
+            for k in range(n):
+                if t >= end - 0.25:
+                    kept = k
+                    break
+                half_after = over[k] / FPS / 2
+                room = most[k] - half_before - half_after
+                near = [p for p in cuts if t + 0.4 < p <= t + room + 0.05]
+                e = min(near, key=lambda p: (abs(p - (t + want[k])), p)) if near else min(end, t + room)
+                after = round(e * FPS - over[k] / 2)  # where the next shot starts (whole frames: no drift)
+                lengths[k] = (after + over[k] - start) / FPS
+                t, half_before, start = e, half_after, after
+        for k in range(kept):
+            if abs(lengths[k] - screens[k]) > 0.01:
+                self.fit_length(board[k]["path"], lengths[k])
+        gone = [r["path"] for r in board[kept:]]
         if gone:
             with self._lock:
                 self.db.executemany("UPDATE items SET cut_out = 1, position = NULL WHERE path = ?", [(p,) for p in gone])
@@ -967,12 +979,12 @@ class Trip:
         self._set_meta_json("edit_stage", "fitted" if stage == "fitted" else "rough")
 
     def fit_to_music(self, pins: list[float], photo_seconds: float = 4.0,
-                     transition_seconds: float = 0.8) -> dict:
+                     transition_seconds: float = 0.8, transition: str | None = None) -> dict:
         """The rough cut onto the music: every cut moves to the nearest pin it can reach (see reflow).
         Returns {"moved": cuts that moved, "gone": clips past the end of the music, "longer"/"shorter": clips}."""
         self.checkpoint("fitting to the music")
         before = {r["path"]: self.screen_length(r, photo_seconds) for r in self.storyboard()}
-        gone = self.reflow(pins, None, photo_seconds, transition_seconds)
+        gone = self.reflow(pins, None, photo_seconds, transition_seconds, transition)
         after = {r["path"]: self.screen_length(r, photo_seconds) for r in self.storyboard()}
         diffs = [after[p] - before[p] for p in after if p in before]
         self.set_edit_stage("fitted")
@@ -1185,6 +1197,111 @@ class Trip:
                     out += [(np.frombuffer(base64.b64decode(v), dtype=np.float16).astype(np.float32), name)
                             for v in vectors]
         return out
+
+    # ---------- a new trip's own themes (themefinder) ----------
+
+    def missing_fingerprints(self) -> int:
+        """Chosen shots the picture model hasn't looked at yet (Analyse does it)."""
+        return self.query("SELECT COUNT(*) AS n FROM items WHERE chosen = 1 AND removed = 0 AND part_of IS NULL "
+                          "AND clip IS NULL")[0]["n"]
+
+    def propose_themes(self, sentence_vectors: np.ndarray, ai=None,
+                       notify: Callable[[float, str], None] | None = None) -> list[dict]:
+        """Themes for this trip from its own shots (see themefinder), kept in meta 'theme_proposals' until you
+        answer: [{"name", "emoji", "describe", "paths", "sample", "subs": [{"name", "paths"}], "from"}]."""
+        from . import themefinder
+
+        rows = [dict(r) for r in self.query(
+            "SELECT path, clip, kind, duration, keep_start, keep_end, postits, ai_caption, place, taken_at FROM items "
+            "WHERE chosen = 1 AND removed = 0 AND part_of IS NULL AND clip IS NOT NULL ORDER BY taken_at, path")]
+        if not rows:
+            return []
+        (notify or (lambda f, m: None))(0.2, "grouping the shots that look alike")
+        vectors = np.array([np.frombuffer(r["clip"], dtype=np.float32) for r in rows])
+        marks = {a["name"]: a.get("emoji") or "⭐" for a in (_learned_themes().get("activities") or [])}
+        earlier: dict[str, tuple[str, list[np.ndarray]]] = {}
+        for trip, shots in (_learned_themes().get("trips") or {}).items():
+            if trip == self.dir.name:
+                continue
+            for name, found in shots.items():
+                if name != themes.OTHER:
+                    earlier.setdefault(name, (marks.get(name, "⭐"), []))[1].extend(
+                        np.frombuffer(base64.b64decode(v), dtype=np.float16).astype(np.float32) for v in found)
+        found = themefinder.propose(vectors, sentence_vectors, earlier)
+        if ai is not None and found:
+            (notify or (lambda f, m: None))(0.6, "asking the AI for better names")
+            facts = []
+            for p in found:
+                members = [rows[i] for i in p["sample"]]
+                days = sorted({r["taken_at"][:10] for r in (rows[i] for i in p["rows"])})
+                facts.append({"captions": [r["ai_caption"] for r in members if r.get("ai_caption")],
+                              "places": sorted({r["place"] for r in members if r.get("place")}),
+                              "days": f"{days[0]} to {days[-1]}" if len(days) > 1 else (days[0] if days else "")})
+            try:
+                from .director import name_themes
+                found = themefinder.apply_names(found, name_themes(ai, themefinder.names_prompt(found, facts)))
+            except Exception as exc:  # (the picture model's names stay)
+                print("Themes: the AI could not name them:", exc)
+        out = [{"name": p["name"], "emoji": p["emoji"], "describe": p["describe"], "from": p["from"],
+                "paths": [rows[i]["path"] for i in p["rows"]], "sample": [rows[i]["path"] for i in p["sample"]],
+                "subs": [{"name": s["name"], "paths": [rows[i]["path"] for i in s["rows"]]} for s in p["subs"]]}
+               for p in found]
+        self._set_meta_json("theme_proposals", out)
+        return out
+
+    def theme_proposals(self) -> list[dict]:
+        return self._meta_json("theme_proposals", [])
+
+    def drop_theme_proposals(self) -> None:
+        self._set_meta_json("theme_proposals", [])
+
+    CORE_SHARE = 0.5  # the shots of a proposed theme most like the rest of it count as confirmed
+
+    def use_theme_proposals(self, chosen: list[dict]) -> None:
+        """The themes you kept become this trip's themes (instead of the last trip's): the clearest shots of each
+        are confirmed, the app suggests the rest from them, sub-themes become moments.
+        chosen: proposals (renamed, merged) with "vector" (what the name looks like to CLIP, or None)."""
+        self.checkpoint("using the suggested themes")
+        activities = [{"name": p["name"], "emoji": p.get("emoji") or "⭐", "describe": p.get("describe") or
+                       [p["name"].lower()], "vector": p.get("vector")} for p in chosen]
+        activities.append({"name": themes.OTHER, "emoji": "❔", "describe": [], "vector": None})
+        names = {a["name"] for a in activities}
+        clips = {r["path"]: np.frombuffer(r["clip"], dtype=np.float32) for r in self.query(
+            "SELECT path, clip FROM items WHERE clip IS NOT NULL AND part_of IS NULL")}
+        sure = []
+        for p in chosen:
+            have = [q for q in p["paths"] if q in clips]
+            if not have:
+                continue
+            x = np.array([clips[q] for q in have])
+            centre = x.mean(axis=0)
+            order = np.argsort(-(x @ centre))
+            sure += [(p["name"], have[i]) for i in order[:max(1, int(round(len(have) * self.CORE_SHARE)))]]
+        with self._lock:
+            self.db.execute("UPDATE items SET theme = NULL WHERE theme IS NOT NULL AND theme NOT IN (%s)"
+                            % ",".join("?" * len(names)), tuple(names))
+            self.db.executemany("UPDATE items SET theme = ? WHERE path = ?", sure)
+            self.db.commit()
+        self.save_activities(activities)
+        self._save_moments([m for m in self.moments() if m["activity"] in names])
+        rows = {r["path"]: dict(r) for r in self.query(
+            "SELECT path, kind, duration, keep_start, keep_end, postits FROM items WHERE part_of IS NULL")}
+        for p in chosen:
+            for sub in p.get("subs") or []:
+                self.add_moment(p["name"], sub["name"])
+                for q in sub["paths"]:
+                    r = rows.get(q)
+                    if not r:
+                        continue
+                    t = 0.0
+                    if r["kind"] == "video":
+                        notes = json.loads(r["postits"]) if r.get("postits") else []
+                        start, end = kept_part(r) or (0.0, r["duration"] or 0.0)
+                        t = notes[0]["t"] if notes else round((start + end) / 2, 2)
+                    self.tick_moment(p["name"], sub["name"], q, t, True)
+        self.drop_theme_proposals()
+        self._set_meta_json("own_themes", True)
+        self.suggest_themes()
 
     def theme_rows(self) -> list[dict]:
         """Your selected shots with their theme: activity (yours if you confirmed it, else the app's suggestion), who,

@@ -183,3 +183,28 @@ def test_shots_you_tick_or_untick_in_a_theme_are_kept_or_left_out():
     chapters, where = themes.chapters_for({"order": themes.STORY, "story": story, "finale": False}, rows)
     assert where == [0, None, 0, None, None, 0]  # early half without the unticked one, plus the ticked late one
     assert rows[5].get("forced") and not rows[0].get("forced")
+
+
+def test_a_new_trip_gets_its_own_themes_named_from_its_pictures():
+    from trip_memory import themefinder
+
+    table = themefinder.phrases()
+    rng = np.random.default_rng(1)
+    sentences = rng.normal(size=(len(table), 64)).astype(np.float32)
+    sentences /= np.linalg.norm(sentences, axis=1, keepdims=True)
+    temple = [i for i, p in enumerate(table) if p[0] == "Temples & shrines"]
+    food = [i for i, p in enumerate(table) if p[0] == "Food"]
+    shots = []
+    for i in [temple[0]] * 6 + [temple[1]] * 6 + [food[0]] * 8:  # torii gates, temples, ramen
+        v = sentences[i] + 0.06 * rng.normal(size=64)
+        shots.append(v / np.linalg.norm(v))
+    found = themefinder.propose(np.array(shots, np.float32), sentences, k=3)
+    names = {p["name"]: p for p in found}
+    assert set(names) == {"Temples & shrines", "Food"}
+    assert len(names["Temples & shrines"]["rows"]) == 12 and len(names["Food"]["rows"]) == 8
+    assert {s["name"] for s in names["Temples & shrines"]["subs"]} == {"Torii gates", "Temple"}
+    # a group like an earlier trip's confirmed shots keeps that theme's name
+    earlier = {"Ramen nights": ("🍜", [shots[12], shots[13], shots[14]])}
+    assert "Ramen nights" in {p["name"] for p in themefinder.propose(np.array(shots, np.float32), sentences, earlier, k=3)}
+    renamed = themefinder.apply_names(found, {"themes": [{"id": 0, "name": "Shrines", "subs": [{"id": 0, "name": "Gates"}]}]})
+    assert renamed[0]["name"] == "Shrines"

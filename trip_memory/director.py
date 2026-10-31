@@ -811,3 +811,12 @@ def _clean_version(v: dict, count: int) -> dict:
         "camera_effects": bool(v.get("camera_effects", True)),
         "look": v.get("look") if v.get("look") in ("natural", "summer", "vivid", "film", "cool", "mono") else "",
     }
+
+
+def name_themes(ai, prompt: str) -> dict:
+    """Better names for the trip's proposed themes (see themefinder.names_prompt): Claude or Ollama, text only."""
+    from .themefinder import NAMES_SCHEMA
+
+    if isinstance(ai, Claude):
+        return ai._ask([{"type": "text", "text": prompt}], NAMES_SCHEMA)
+    return ai._ask(prompt, NAMES_SCHEMA)
