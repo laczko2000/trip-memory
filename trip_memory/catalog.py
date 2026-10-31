@@ -30,7 +30,7 @@ from PIL import Image, ImageOps
 
 from .faces import FaceFinder, group_faces
 from .media import MediaItem, scan_folder
-from . import autoedit, director, moments, motion, musicmood, stories, themes, timeshift, titles
+from . import autoedit, director, highlights, moments, motion, musicmood, stories, themes, timeshift, titles
 from .scenes import SceneTagger, mean_vector
 from .tags import TAG_GROUP, Tagger, group_name, look_alike_groups, people_tag, story_subject
 from .tools import ffmpeg_paths, probe
@@ -888,6 +888,115 @@ class Trip:
             elif name is not None:
                 found[k]["name"] = name.strip()
         self.set_postits(path, found)
+
+    # ---------- learning your highlights (kept in the app's folder, for every trip) ----------
+
+    def _meta_json(self, key: str, default):
+        rows = self.query("SELECT value FROM meta WHERE key = ?", (key,))
+        return json.loads(rows[0]["value"]) if rows and rows[0]["value"] else default
+
+    def _set_meta_json(self, key: str, value) -> None:
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, json.dumps(value)))
+
+    @staticmethod
+    def _frame_at(frames: dict, path: str, t: float) -> np.ndarray | None:
+        times, vectors = frames.get(path, ([], None))
+        if not len(times):
+            return None
+        return np.asarray(vectors[int(np.argmin([abs(x - t) for x in times]))], np.float32)
+
+    def learn_highlights(self, notify: Callable[[float, str], None] | None = None) -> list[dict]:
+        """What the app learned from your highlights (all trips), brought up to date with this trip's ⭐s:
+        new ones are learned, ones you took off are forgotten."""
+        trip = self.dir.name
+        examples = highlights.load(app_dir())
+        rows = [dict(r) for r in self.query(
+            "SELECT * FROM items WHERE kind = 'video' AND postits IS NOT NULL AND removed = 0")]
+        marks = {f"{trip}|{r['path']}|{p['t']:.1f}": (r, p["t"]) for r in rows for p in json.loads(r["postits"])}
+        before = len(examples)
+        examples = [e for e in examples if not (e["trip"] == trip and e["keep"] and e["key"] not in marks)]
+        have = {e["key"] for e in examples}
+        todo = {k: v for k, v in marks.items() if k not in have}
+        if todo:
+            frames = self.frame_vectors(list({r["path"]: r for r, _ in todo.values()}.values()), notify)
+            for key, (r, t) in todo.items():
+                vec = self._frame_at(frames, r["path"], t)
+                if vec is not None:
+                    examples.append(highlights.example(key, trip, True, vec, highlights.motion_at(
+                        json.loads(r["curves"]) if r.get("curves") else None, t), r.get("theme") or r.get("theme_auto")))
+        if todo or len(examples) != before:
+            highlights.save(app_dir(), examples)
+        return examples
+
+    def highlights_learned(self) -> tuple[int, int]:
+        """(highlights the app learns from, suggestions you dropped), all trips: this trip's ⭐s as they are now
+        (learned when it next looks for highlights) and the ones of earlier trips."""
+        examples = highlights.load(app_dir())
+        here = sum(len(json.loads(r["postits"])) for r in self.query(
+            "SELECT postits FROM items WHERE kind = 'video' AND postits IS NOT NULL AND removed = 0"))
+        return (here + sum(1 for e in examples if e["keep"] and e["trip"] != self.dir.name),
+                sum(1 for e in examples if not e["keep"]))
+
+    def suggest_highlights(self, notify: Callable[[float, str], None] | None = None) -> list[dict]:
+        """Seconds in your chosen videos without a ⭐ yet that look like your highlights (all trips):
+        [{"path", "t", "score"}], kept until you keep or drop them."""
+        examples = self.learn_highlights(notify)
+        if highlights.counts(examples)[0] < highlights.START_FROM:
+            self._set_meta_json("highlight_ideas", [])
+            return []
+        rows = [dict(r) for r in self.query(
+            "SELECT * FROM items WHERE kind = 'video' AND chosen = 1 AND removed = 0 AND part_of IS NULL "
+            "AND postits IS NULL")]
+        frames = self.frame_vectors(rows, notify)
+        for r in rows:  # only inside the part you kept of a clip you cut
+            part = kept_part(r)
+            if part and r["path"] in frames:
+                times, vectors = frames[r["path"]]
+                inside = [k for k, t in enumerate(times) if part[0] <= t <= part[1]]
+                frames[r["path"]] = ([times[k] for k in inside], np.asarray(vectors)[inside] if inside else vectors[:0])
+        motions = {r["path"]: json.loads(r["curves"]) if r.get("curves") else None for r in rows}
+        ideas = highlights.suggest(examples, frames, motions, self._meta_json("highlight_drops", {}))
+        self._set_meta_json("highlight_ideas", ideas)
+        return ideas
+
+    def highlight_ideas(self, path: str | None = None) -> list[dict]:
+        """The app's suggested highlights still waiting for you (one video's, or all)."""
+        ideas = self._meta_json("highlight_ideas", [])
+        return [i for i in ideas if path is None or i["path"] == path]
+
+    def _forget_idea(self, path: str, t: float) -> None:
+        self._set_meta_json("highlight_ideas", [i for i in self.highlight_ideas()
+                                                if not (i["path"] == path and abs(i["t"] - t) < 0.05)])
+
+    def keep_idea(self, path: str, t: float) -> None:
+        """A suggestion was right: it becomes a ⭐ highlight (and the app learns from it)."""
+        self._forget_idea(path, t)
+        self.add_postit(path, t)
+        try:
+            self.learn_highlights()
+        except Exception:  # (without the picture model now: it learns the next time it looks)
+            traceback.print_exc()
+
+    def drop_idea(self, path: str, t: float) -> None:
+        """A suggestion was wrong: it goes, and the app learns what is not a highlight for you."""
+        self._forget_idea(path, t)
+        drops = self._meta_json("highlight_drops", {})
+        drops.setdefault(path, []).append(round(t, 2))
+        self._set_meta_json("highlight_drops", drops)
+        rows = [dict(r) for r in self.query("SELECT * FROM items WHERE path = ?", (path,))]
+        if not rows:
+            return
+        try:
+            vec = self._frame_at(self.frame_vectors(rows), path, t)
+        except Exception:
+            traceback.print_exc()
+            vec = None
+        if vec is not None:
+            examples = highlights.load(app_dir())
+            examples.append(highlights.example(f"drop|{self.dir.name}|{path}|{t:.1f}", self.dir.name, False, vec,
+                                               highlights.motion_at(json.loads(rows[0]["curves"]) if rows[0].get(
+                                                   "curves") else None, t), rows[0].get("theme")))
+            highlights.save(app_dir(), examples)
 
     def add_lock(self, path: str, start: float, end: float) -> None:
         self.set_locks(path, self.locks(path) + [[start, end]])

@@ -30,6 +30,7 @@ from . import musicmood
 from . import pinfill
 from . import themes
 from . import moments
+from . import highlights
 from . import timeshift
 from . import taps as song_taps
 from .beats import song_length
@@ -553,6 +554,99 @@ class Page:
                      "a post-it there. Your first post-it becomes the video's picture everywhere, which makes sorting "
                      "themes much quicker, and the first cut uses the seconds around it. Optional: skip any video.") \
                 .classes("text-sm text-gray-700")
+            self.highlight_ideas_box()
+
+    def highlight_ideas_box(self) -> None:
+        """The app learns your highlights (all trips) and suggests more in orange: keep or drop each one."""
+        learned, dropped = self.trip.highlights_learned()
+        ideas = [i for i in self.trip.highlight_ideas() if any(x["path"] == i["path"] for x in self.all_items)]
+        ready = learned >= highlights.START_FROM
+        with ui.row().classes("w-full items-center gap-3 mt-1"):
+            ui.label(f"⭐ The app has {learned} of your highlights to learn from (all trips)"
+                     + (f", and {dropped} it got wrong" if dropped else "") + "."
+                     + ("" if ready else f" From {highlights.START_FROM} it suggests more like them.")) \
+                .classes("text-sm text-amber-900")
+            ui.space()
+            ui.button("Suggest highlights like mine", icon="auto_awesome", on_click=self.suggest_highlights) \
+                .props("outline no-caps color=orange-8" + ("" if ready else " disable")) \
+                .tooltip("Looks at a frame every second of the chosen videos without a ⭐ and finds the seconds most "
+                         "like your highlights (the first time takes a while).")
+        if not ideas:
+            return
+        with ui.row().classes("w-full items-center gap-2"):
+            ui.label(f"Suggested ({len(ideas)}): keep the right ones, drop the wrong ones. Both teach the app.") \
+                .classes("text-sm font-medium text-orange-800")
+            ui.space()
+            ui.button("Keep all", icon="done_all", on_click=lambda: self.idea_answer(ideas, True)) \
+                .props("flat dense no-caps color=orange-9")
+            ui.button("Drop all", icon="clear_all", on_click=lambda: self.idea_answer(ideas, False)) \
+                .props("flat dense no-caps color=grey-8")
+        rows = {x["path"]: x for x in self.all_items}
+        with ui.element("div").classes("w-full grid gap-2").style("grid-template-columns:repeat(auto-fill,minmax(11rem,1fr))"):
+            for idea in ideas:
+                row = rows[idea["path"]]
+                with ui.column().classes("gap-1 p-1 rounded border-2 border-orange-400 border-dashed bg-white"):
+                    with ui.element("div").classes("w-full").tooltip("Double-click: open it big") as wrap:
+                        thumb = self.trip.moment_picture(row, idea["t"])
+                        a, b = moments.window(idea["t"], row["duration"] or 0)
+                        self.preview(row | {"thumb": thumb}, "width:100%;aspect-ratio:16/10", a, b, view="moment")
+                    self.click_or_double(wrap, None, lambda p=idea["path"]: self.shot_window(p, "Choose files"))
+                    with ui.row().classes("w-full items-center gap-1 no-wrap"):
+                        ui.label(f"{Path(idea['path']).name[:16]} · {clock(idea['t'])}").classes("text-xs truncate")
+                        ui.space()
+                        ui.button(icon="star", on_click=lambda i=idea: self.idea_answer([i], True)) \
+                            .props("flat dense round size=sm color=amber-8").tooltip("Keep: it becomes a ⭐ highlight")
+                        ui.button(icon="close", on_click=lambda i=idea: self.idea_answer([i], False)) \
+                            .props("flat dense round size=sm color=grey-7").tooltip("Drop: not a highlight")
+
+    def learn_quietly(self) -> None:
+        try:
+            self.trip.learn_highlights()
+        except Exception:
+            traceback.print_exc()
+
+    async def suggest_highlights(self) -> None:
+        if self.ai_busy:
+            ui.notify("Still busy with the last request.", type="warning")
+            return
+        self.ai_busy = True
+        done = {"share": 0.0, "step": "starting"}
+        note = ui.notification("", spinner=True, timeout=None, multi_line=True)
+        started = time.time()
+
+        def tick() -> None:
+            gone = int(time.time() - started)
+            note.message = (f"⭐ Looking for highlights like yours: {done['step']}, {int(100 * done['share'])}% "
+                            f"({gone // 60}:{gone % 60:02d}). The first time takes longest: the app looks at a frame "
+                            "about every second of each video and remembers it.")
+
+        tick()
+        ticker = ui.timer(1.0, tick)
+        try:
+            ideas = await run.io_bound(self.trip.suggest_highlights,
+                                       lambda share, step: done.update(share=share, step=step))
+            ui.notify(f"⭐ {len(ideas)} suggested highlights, in orange under Step 1b." if ideas else
+                      "No seconds clearly like your highlights in the videos without a ⭐.", multi_line=True)
+        except Exception as exc:
+            traceback.print_exc()
+            ui.notify(f"Couldn't look for highlights: {exc}", type="negative", multi_line=True)
+        finally:
+            self.ai_busy = False
+            ticker.cancel()
+            note.dismiss()
+        self.choose_keep_scroll = True
+        self.refresh_all()
+        self.choose_keep_scroll = False
+
+    async def idea_answer(self, ideas: list[dict], keep: bool) -> None:
+        for idea in list(ideas):
+            await run.io_bound(self.trip.keep_idea if keep else self.trip.drop_idea, idea["path"], idea["t"])
+        if keep:
+            self.stale = True
+        ui.notify(("⭐ Kept: " if keep else "Dropped: ") + f"{len(ideas)} · the app learns from it.", timeout=1500)
+        self.choose_keep_scroll = True
+        self.refresh_all()
+        self.choose_keep_scroll = False
 
     def postit_dialog(self, k: int) -> None:
         videos = [it for it in self.all_items if it["kind"] == "video" and it["chosen"]]
@@ -629,6 +723,7 @@ class Page:
             def done() -> None:
                 dialog.close()
                 self.postit_dialog_open = None
+                background_tasks.create(run.io_bound(self.learn_quietly))  # the app learns your new highlights
                 self.reload()
                 self.refresh_all()
 
@@ -1350,6 +1445,11 @@ class Page:
                               f'left:{100 * (t - full0) / ((full1 - full0) or 1):.2f}%;background:#facc15;'
                               f'box-shadow:0 0 3px #000;pointer-events:none"></div>'
                               for t in [p["t"] for p in it.get("postits") or [] if full0 <= p["t"] <= full1])
+                    + "".join(f'<div class="tm-idea" data-t="{t:.2f}" style="position:absolute;top:0;bottom:0;'
+                              f'width:3px;left:{100 * (t - full0) / ((full1 - full0) or 1):.2f}%;'
+                              f'background:repeating-linear-gradient(#fb923c 0 5px,transparent 5px 9px);'
+                              f'pointer-events:none"></div>'
+                              for t in [i["t"] for i in it.get("ideas") or [] if full0 <= i["t"] <= full1])
                     + '</div>', sanitize=False).classes("w-full")
             if taken:
                 ui.label("Red: parts other shots in your video already use (never shown twice).") \
@@ -1627,6 +1727,8 @@ class Page:
                 old.delete()
 
         def after() -> None:  # when the window closes: the page behind shows what changed, at the same spot
+            if not changed["again"]:  # the app learns your new highlights quietly, for this trip and the next
+                background_tasks.create(run.io_bound(self.learn_quietly))
             if changed["any"] and not changed["again"]:
                 if name == "Make video" and self.auto_update:  # the draft catches up by itself
                     self.update_due = time.time() + self.AUTO_PAUSE
@@ -1726,6 +1828,25 @@ class Page:
                         ui.label(f"⭐ {clock(m['t'])}" + (f" {m['name']}" if m.get("name") else "")).classes("text-xs")
                         ui.button(icon="close", on_click=lambda k=k: unhighlight(k)) \
                             .props("flat dense round size=xs").tooltip("Take this highlight off")
+                for idea in self.trip.highlight_ideas(path):
+                    with ui.row().classes("items-center gap-0 bg-orange-50 border border-orange-400 border-dashed "
+                                          "rounded px-2").tooltip("The app suggests this second: keep or drop it"):
+                        ui.label(f"Suggested {clock(idea['t'])}").classes("text-xs text-orange-800")
+                        ui.button(icon="star", on_click=lambda t=idea["t"]: answer(t, True)) \
+                            .props("flat dense round size=xs color=amber-8").tooltip("Keep: a ⭐ highlight")
+                        ui.button(icon="close", on_click=lambda t=idea["t"]: answer(t, False)) \
+                            .props("flat dense round size=xs").tooltip("Drop: not a highlight")
+
+        async def answer(t: float, keep: bool) -> None:
+            await run.io_bound(self.trip.keep_idea if keep else self.trip.drop_idea, path, t)
+            if keep:
+                history.append((f"highlight {clock(t)}", lambda t=t: drop_highlight_at(t)))
+                ui.run_javascript(f"tmHighlightMark({t:.2f})")
+            mark()
+            ui.run_javascript(f"document.querySelectorAll('.q-dialog .tm-idea[data-t=\"{t:.2f}\"]')"
+                              ".forEach(el => el.remove())")
+            ui.notify(("⭐ Kept" if keep else "Dropped") + ": the app learns from it.", timeout=1500)
+            highlights_row.refresh()
 
         def highlight(t: float) -> None:
             self.trip.add_postit(path, round(t, 2))
@@ -1878,6 +1999,7 @@ class Page:
         length = it["duration"] or 0
         a, b = (shots[-1]["end"], min(length, shots[-1]["end"] + 4)) if shots and shots[-1]["end"] < length - 1 \
             else (length * 0.3, min(length, length * 0.3 + 4))
+        it = it | {"ideas": self.trip.highlight_ideas(path)}  # the app's suggested highlights, in orange
         with self.window_box:
             self.part_dialog(
             it, a, b, f"{Path(path).name} · mark a good part",

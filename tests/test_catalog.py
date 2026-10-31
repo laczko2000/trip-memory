@@ -852,3 +852,47 @@ def test_crop_saves_a_cropped_copy_in_place_of_the_photo(tmp_path, monkeypatch):
         assert p.size == (400, 200)  # your own photo is not changed
     trip.prepare()
     assert copy in {i["path"] for i in trip.items()}
+
+
+def test_highlights_from_one_trip_are_suggested_on_the_next(tmp_path, monkeypatch):
+    from tests.test_render import make_clip
+
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    jump = np.eye(4, dtype=np.float32)[0]
+    calm = np.eye(4, dtype=np.float32)[1]
+    # The picture model stand-in: the frame at 8.5 s of the test clip is the jump (frames every 2 s from 0.5).
+    embed = lambda pictures: np.array([jump if n == 4 else calm for n, _ in enumerate(pictures)])  # noqa: E731
+    first = tmp_path / "first"
+    first.mkdir()
+    make_clip(first / "kite.mp4", "320x180", 12, "2025-07-03T10:00:00Z")
+    trip = catalog.Trip(first)
+    trip.prepare()
+    trip.frame_embedder = embed
+    path = trip.items()[0]["path"]
+    for t in (7.6, 8.0, 8.5, 9.0):
+        trip.add_postit(path, t)
+    assert trip.suggest_highlights() == []  # four is too few to learn from
+    trip.add_postit(path, 9.4)
+    assert trip.highlights_learned() == (5, 0)
+    trip.change_postit(path, 0, remove=True)  # a highlight you take off is forgotten
+    trip.learn_highlights()
+    assert trip.highlights_learned() == (4, 0)
+    trip.add_postit(path, 7.6)
+    trip.learn_highlights()  # (the app does this when you close the window)
+
+    second = tmp_path / "second"
+    second.mkdir()
+    make_clip(second / "surf.mp4", "256x144", 12, "2025-08-03T10:00:00Z")
+    make_clip(second / "beach.mp4", "320x180", 12, "2025-08-04T10:00:00Z", audio=False)
+    new = catalog.Trip(second)
+    new.prepare()
+    new.frame_embedder = embed
+    ideas = new.suggest_highlights()
+    assert len(ideas) == 2 and all(i["t"] == 8.5 for i in ideas)
+    keep, drop = ideas[0]["path"], ideas[1]["path"]
+    new.keep_idea(keep, 8.5)
+    assert [p["t"] for p in new.postits(keep)] == [8.5] and new.highlights_learned() == (6, 0)
+    new.drop_idea(drop, 8.5)
+    assert new.highlight_ideas() == [] and new.highlights_learned() == (6, 1)
+    assert new.suggest_highlights() == []  # the dropped second isn't suggested again
