@@ -3089,7 +3089,7 @@ wheels = [
 
 [[package]]
 name = "trip-memory"
-version = "0.74"
+version = "0.75"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },

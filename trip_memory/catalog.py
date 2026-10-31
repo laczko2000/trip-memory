@@ -701,6 +701,29 @@ class Trip:
         self.fit_length(a, lb)
         self.fit_length(b, la)
 
+    def insert_shot(self, path: str, before: int, photo_seconds: float = 4.0) -> None:
+        """Move a shot in front of the shot now at place `before` (len(board): to the end). Every place keeps its
+        length, so the cuts stay on your pins: the shots that move along take the length of their new place."""
+        board = self._fix_order()
+        order = [r["path"] for r in board]
+        if path not in order:
+            return
+        slots = [self.screen_length(r, photo_seconds) for r in board]
+        rows = {r["path"]: r for r in board}
+        i = order.index(path)
+        j = before - 1 if before > i else before
+        j = max(0, min(len(order) - 1, j))
+        if j == i:
+            return
+        self.checkpoint("moving a shot")
+        order.insert(j, order.pop(i))
+        with self._lock:
+            self.db.executemany("UPDATE items SET position = ? WHERE path = ?", list(enumerate(order)))
+            self.db.commit()
+        for k in range(min(i, j), max(i, j) + 1):
+            if abs(self.screen_length(rows[order[k]], photo_seconds) - slots[k]) > 0.01:
+                self.fit_length(order[k], slots[k])
+
     def replace_shot(self, old: str, new: str, photo_seconds: float = 4.0) -> None:
         """Put another shot in the place of one, as long as it was."""
         board = {r["path"]: (n, r) for n, r in enumerate(self._fix_order())}

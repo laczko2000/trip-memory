@@ -746,3 +746,24 @@ def test_post_its_mark_the_best_bits_and_become_the_videos_picture(tmp_path, mon
     assert trip.items()[0]["thumb"] == found[0]["thumb"] and Path(found[0]["thumb"]).exists()
     trip.change_postit(path, 0, remove=True)
     assert [p["name"] for p in trip.postits(path)] == ["jump"]
+
+
+def test_pasting_a_shot_in_front_keeps_every_cut_in_place(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    for n, colour in enumerate(["red", "green", "blue", "yellow"]):
+        exif = Image.Exif()
+        exif[306] = f"2025:07:03 1{n}:00:00"
+        Image.new("RGB", (160, 90), colour).save(trip_dir / f"p{n}.jpg", exif=exif)
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    paths = [r["path"] for r in trip.items()]
+    for path, seconds in zip(paths, (1.0, 2.0, 3.0, 4.0)):
+        trip.execute("UPDATE items SET seconds = ? WHERE path = ?", (seconds, path))
+    board = lambda: [(Path(r["path"]).name, r["seconds"]) for r in trip.storyboard()]
+    trip.insert_shot(paths[3], 1)  # the last one pasted in front of the second
+    assert board() == [("p0.jpg", 1.0), ("p3.jpg", 2.0), ("p1.jpg", 3.0), ("p2.jpg", 4.0)]
+    trip.insert_shot(paths[0], 4)  # the first one to the end
+    assert board() == [("p3.jpg", 1.0), ("p1.jpg", 2.0), ("p2.jpg", 3.0), ("p0.jpg", 4.0)]
