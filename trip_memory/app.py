@@ -755,11 +755,21 @@ class Page:
         state = {"nav": False}
         box = f"tm-part-{clip_id(row['path'])}"
 
-        def go(to: int) -> None:
+        def go(to: int, old=None) -> None:
+            """The next suggestion. old: this window, closed only once the next one is open (no flicker), unless
+            both show the same video (then this one goes first)."""
             state["nav"] = True
+            same = old is not None and items[to]["row"]["path"] == row["path"]
+            if same:
+                old.close()
+
+            def swap() -> None:
+                self.suggestion_window(items, to, title, keep, drop, done, highlights)
+                if old is not None and not same:
+                    old.close()
+
             with self.window_timers:
-                ui.timer(0.05, lambda: self.suggestion_window(items, to, title, keep, drop, done, highlights),
-                         once=True)
+                ui.timer(0.01 if old is not None else 0.05, swap, once=True)
 
         async def red_or_suggested() -> float:
             try:  # the red line, if you stopped the video somewhere; else the second the app suggested
@@ -811,7 +821,7 @@ class Page:
                 self.highlight_cards(row, box, mine_box)
             for side, step, icon in (("left", -1, "chevron_left"), ("right", 1, "chevron_right")):
                 if 0 <= k + step < len(items):
-                    ui.button(icon=icon, on_click=lambda s=step: (go(k + s), dialog.close())) \
+                    ui.button(icon=icon, on_click=lambda s=step: go(k + s, dialog)) \
                         .props(f"round unelevated color=grey-9 size=xl data-nav={step}") \
                         .style(f"position:fixed;{side}:10px;top:{'28%' if highlights else '50%'};"
                                "transform:translateY(-50%);z-index:20;opacity:.85") \
@@ -1626,7 +1636,7 @@ class Page:
         actions: (label, icon, callback(start, end), props) buttons; a callback returning True closes the window."""
         full0, full1 = kept_part(it) or (0.0, float(it["duration"] or 0))
         part = {"min": round(max(full0, a), 1), "max": round(min(full1, b), 1)}
-        with ui.dialog().props("maximized" if full else "") as dialog, \
+        with ui.dialog().props("maximized transition-show=none transition-hide=none" if full else "") as dialog, \
                 ui.card().classes("w-full h-full gap-1 p-2 tm-bigwin" if full else "w-[60rem] max-w-full gap-2"):
             ui.label(title).classes("text-base font-semibold truncate" if full else "text-lg font-semibold")
             height = video_height or ("100%" if full else "min(60vh,520px)")
@@ -1948,6 +1958,7 @@ class Page:
         path = it["path"]
         changed = changed if changed is not None else {"any": False}
         changed["again"] = False
+        left = {"yes": False}  # this window was swapped for the next one (no closing work for it then)
         history = changed.setdefault("undo", [])  # (what, how to take it back): the Undo button in the window
         # Previous / Next go through the files in the order of the place you opened it from.
         order = self.choose_order() if name == "Choose files" else self.nav_order.get(name) or []
@@ -1959,6 +1970,8 @@ class Page:
                 old.delete()
 
         def after() -> None:  # when the window closes: the page behind shows what changed, at the same spot
+            if left["yes"]:  # (it went on to the next shot, or drew itself again: that window carries on)
+                return
             if not changed["again"]:  # the app learns your new highlights quietly, for this trip and the next
                 background_tasks.create(run.io_bound(self.learn_quietly))
             if name == "Make video" and not changed["again"]:
@@ -2262,12 +2275,18 @@ class Page:
             changed["moved"] = True  # (closing it brings you to this file, not the one you opened first)
             ui.run_javascript(f"if (window.tmShotAnchor) window.tmShotAnchor.sel = "
                               f"'[data-tile=\"{clip_id(target)}\"], [data-shot=\"{clip_id(target)}\"]'")
+            left["yes"] = True
+
+            def swap() -> None:  # the next one opens first, on top; then this one goes: no flicker in between
+                self.shot_window(target, name, changed)
+                dialog.close()
+
             with self.window_timers:
-                ui.timer(0.05, lambda: self.shot_window(target, name, changed), once=True)
-            dialog.close()
+                ui.timer(0.01, swap, once=True)
 
         def again() -> None:  # the same window, drawn again with what changed
             changed["again"] = True
+            left["yes"] = True
             with self.window_timers:
                 ui.timer(0.2, lambda: self.shot_window(path, name, changed), once=True)
 
@@ -2481,7 +2500,7 @@ class Page:
             return True
 
         if it["kind"] != "video":
-            with self.window_box, ui.dialog().props("maximized") as dialog, \
+            with self.window_box, ui.dialog().props("maximized transition-show=none transition-hide=none") as dialog, \
                     ui.card().classes("w-full h-full gap-2 overflow-auto"):
                 ui.label(Path(path).name).classes("text-lg font-semibold")
                 self.photo_editor(it, dialog, mark, lambda d, dialog=dialog: rotate(d, dialog),
