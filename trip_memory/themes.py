@@ -49,11 +49,13 @@ def day_part(taken_at: str) -> str:
     return "morning" if 5 <= hour < 12 else "afternoon" if hour < 17 else "evening" if hour < 21 else "night"
 
 
-def suggest(vectors: np.ndarray, activities: list[dict], confirmed: list[tuple[int, str]]) -> list[tuple[str, float]]:
+def suggest(vectors: np.ndarray, activities: list[dict], confirmed: list[tuple[int, str]],
+            earlier: list[tuple[np.ndarray, str]] = ()) -> list[tuple[str, float]]:
     """For each shot (one CLIP vector per row): the most likely activity and how sure (0..1).
 
     confirmed: (row, activity) for the shots you confirmed. Those keep their activity, and the others are compared
-    with them: a shot that looks like your confirmed boat shots is a boat shot, whatever the words say."""
+    with them: a shot that looks like your confirmed boat shots is a boat shot, whatever the words say.
+    earlier: (vector, activity) of shots you confirmed in earlier trips, which count as examples too."""
     names = [a["name"] for a in activities]
     n = len(vectors)
     if not n or not names:
@@ -69,14 +71,17 @@ def suggest(vectors: np.ndarray, activities: list[dict], confirmed: list[tuple[i
     p = _softmax(words) if np.isfinite(words).any() else np.full((n, len(names)), 1 / len(names))
     # 2. Your examples: the activity whose confirmed shots this picture looks most like. The closer it is to any of
     # them, the more that counts.
-    examples: dict[int, list[int]] = {}
+    examples: dict[int, list[np.ndarray]] = {}
     for row, name in confirmed:
         if name in names and 0 <= row < n:
-            examples.setdefault(names.index(name), []).append(row)
+            examples.setdefault(names.index(name), []).append(vectors[row])
+    for vector, name in earlier:
+        if name in names and len(vector) == vectors.shape[1]:
+            examples.setdefault(names.index(name), []).append(np.asarray(vector, np.float32))
     if examples:
         near = np.full((n, len(names)), -np.inf)
-        for j, rows in examples.items():
-            sims = np.sort(vectors @ vectors[rows].T, axis=1)[:, ::-1][:, :3]
+        for j, shots in examples.items():
+            sims = np.sort(vectors @ np.array(shots).T, axis=1)[:, ::-1][:, :3]
             near[:, j] = sims.mean(axis=1)
         closest = near.max(axis=1, keepdims=True)
         trust = np.clip((closest - LOOKS_LIKE) / (SAME - LOOKS_LIKE), 0, 1)

@@ -6,6 +6,7 @@ Each trip folder gets its own small database (SQLite) plus thumbnail pictures, s
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
@@ -752,12 +753,59 @@ class Trip:
     # ---------- themes ----------
 
     def activities(self) -> list[dict]:
-        """The activities a shot can have (the app's own and the ones you added), with their CLIP vectors."""
+        """The activities a shot can have (the app's own and the ones you added), with their CLIP vectors.
+        A new trip starts with the ones of your last trip (your own, your new names)."""
         rows = self.query("SELECT value FROM meta WHERE key = 'activities'")
-        return json.loads(rows[0]["value"]) if rows else themes.default_activities()
+        if rows:
+            return json.loads(rows[0]["value"])
+        return _learned_themes().get("activities") or themes.default_activities()
 
     def save_activities(self, activities: list[dict]) -> None:
         self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('activities', ?)", (json.dumps(activities),))
+        self._remember_themes()
+
+    LEARNED_TRIPS = 12  # earlier trips whose confirmed shots teach a new trip's themes
+    LEARNED_PER_THEME = 40
+
+    def _remember_themes(self) -> None:
+        """Keep this trip's activities and a few shots of each you confirmed in the app (not only in the trip), so
+        the next trip starts with them and already recognises your kitesurfing."""
+        rows = self.query("SELECT clip, theme FROM items WHERE theme IS NOT NULL AND clip IS NOT NULL "
+                          "AND removed = 0 AND part_of IS NULL ORDER BY taken_at DESC")
+        shots: dict[str, list[str]] = {}
+        for r in rows:
+            if r["theme"] != themes.OTHER and len(shots.setdefault(r["theme"], [])) < self.LEARNED_PER_THEME:
+                vector = np.frombuffer(r["clip"], dtype=np.float32).astype(np.float16)
+                shots[r["theme"]].append(base64.b64encode(vector.tobytes()).decode())
+        learned = _learned_themes()
+        trips = {k: v for k, v in (learned.get("trips") or {}).items() if k != self.dir.name}
+        if shots:
+            trips[self.dir.name] = shots  # the latest trip last; the oldest go first
+        rows = self.query("SELECT value FROM meta WHERE key = 'activities'")
+        learned = {"activities": json.loads(rows[0]["value"]) if rows else learned.get("activities"),
+                   "trips": dict(list(trips.items())[-self.LEARNED_TRIPS:])}
+        try:
+            LEARNED_FILE().write_text(json.dumps(learned))
+        except OSError:
+            pass
+
+    def earlier_trips_learned(self) -> int:
+        return sum(1 for k in (_learned_themes().get("trips") or {}) if k != self.dir.name)
+
+    def _earlier_examples(self, activities: list[dict]) -> list[tuple[np.ndarray, str]]:
+        """(vector, activity) for the shots you confirmed in other trips, under this trip's names."""
+        names = {a["name"] for a in activities}
+        renamed = {a["was"]: a["name"] for a in activities if a.get("was")}
+        out = []
+        for trip, shots in (_learned_themes().get("trips") or {}).items():
+            if trip == self.dir.name:
+                continue
+            for name, vectors in shots.items():
+                name = name if name in names else renamed.get(name)
+                if name:
+                    out += [(np.frombuffer(base64.b64decode(v), dtype=np.float16).astype(np.float32), name)
+                            for v in vectors]
+        return out
 
     def theme_rows(self) -> list[dict]:
         """Your selected shots with their theme: activity (yours if you confirmed it, else the app's suggestion), who,
@@ -782,7 +830,8 @@ class Trip:
         seen = [r for r in rows if r["clip"] is not None]
         vectors = np.array([np.frombuffer(r["clip"], dtype=np.float32) for r in seen]) if seen else np.zeros((0, 512))
         confirmed = [(i, r["theme"]) for i, r in enumerate(seen) if r["theme"] in names]
-        guesses = {r["path"]: g for r, g in zip(seen, themes.suggest(vectors, activities, confirmed))}
+        guesses = {r["path"]: g for r, g in zip(seen, themes.suggest(vectors, activities, confirmed,
+                                                                     self._earlier_examples(activities)))}
         updates = []
         for r in rows:
             if r["path"] in guesses:
@@ -806,12 +855,14 @@ class Trip:
                 self.db.executemany("UPDATE items SET theme = ? WHERE path = ?", [(activity, p) for p in paths])
             self.db.commit()
         self.suggest_themes()
+        self._remember_themes()
 
     def unconfirm_theme(self, paths: list[str]) -> None:
         with self._lock:
             self.db.executemany("UPDATE items SET theme = NULL WHERE path = ?", [(p,) for p in paths])
             self.db.commit()
         self.suggest_themes()
+        self._remember_themes()
 
     def add_activity(self, name: str, vector: list[float] | None) -> None:
         activities = self.activities()
@@ -2408,6 +2459,18 @@ class Trip:
                     group = created[group]
                 self.db.execute("UPDATE faces SET person_id = ? WHERE id = ?", (group, row["id"]))
             self.db.commit()
+
+
+def LEARNED_FILE() -> Path:
+    return app_dir() / "themes-learned.json"
+
+
+def _learned_themes() -> dict:
+    """What earlier trips taught about your themes: {"activities": [...], "trips": {trip: {activity: [vectors]}}}."""
+    try:
+        return json.loads(LEARNED_FILE().read_text())
+    except (OSError, ValueError):
+        return {}
 
 
 def _look_vector(blob: bytes | None) -> np.ndarray | None:

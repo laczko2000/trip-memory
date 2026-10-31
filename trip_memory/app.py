@@ -3158,6 +3158,10 @@ class Page:
             self.theme_counts = [done, len(rows)]
             ui.label("The app suggests the activity; you confirm or change it. Who, where and when are filled in "
                      "for you.").classes("text-sm text-gray-600 flex-1")
+        earlier = self.trip.earlier_trips_learned()
+        if earlier:
+            ui.label(f"🧠 The app remembers {earlier} earlier trip{'s' if earlier > 1 else ''}: your own themes and the "
+                     "shots you confirmed there help it suggest here too.").classes("text-sm text-indigo-700")
         if not self.trip.has_fingerprints():
             ui.label("Tip: run Analyse in Choose files first. The app then judges each picture itself; until then it "
                      "only guesses from tags.").classes("text-sm text-orange-700")

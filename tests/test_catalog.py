@@ -666,3 +666,27 @@ def test_shifting_a_cameras_clock_moves_all_its_files(tmp_path, monkeypatch):
     assert gopro["taken_at"].startswith("2025-07-03T11:30") and gopro["taken_orig"].startswith("2025-07-03T09:00")
     trip.set_time_shift("GoPro", 0)
     assert order()[0] == "GOPR0001.jpg"
+
+
+def test_your_themes_and_what_they_look_like_carry_over_to_the_next_trip(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    kite, food = np.eye(512, dtype=np.float32)[:2]
+    trips = []
+    for name in ("tarifa", "crete"):
+        folder = tmp_path / name
+        folder.mkdir()
+        for n, colour in enumerate(["red", "green"]):
+            Image.new("RGB", (160, 90), colour).save(folder / f"p{n}.jpg")
+        trip = catalog.Trip(folder)
+        trip.prepare()
+        for path, vector in zip([r["path"] for r in trip.items()], (kite, food)):
+            trip.execute("UPDATE items SET clip = ? WHERE path = ?", ((vector + 0.01).tobytes(), path))
+        trips.append(trip)
+    tarifa, crete = trips
+    tarifa.add_activity("Kitesurfing", None)
+    tarifa.set_theme([tarifa.items()[0]["path"]], "Kitesurfing")
+    assert "Kitesurfing" in [a["name"] for a in catalog.Trip(tmp_path / "crete").activities()]
+    crete.suggest_themes()
+    first = next(r for r in crete.theme_rows() if r["path"].endswith("p0.jpg"))
+    assert first["theme"] == "Kitesurfing" and not first["theme_ok"]  # learned in Tarifa, suggested in Crete
