@@ -1608,6 +1608,7 @@ class Page:
         path = it["path"]
         changed = changed if changed is not None else {"any": False}
         changed["again"] = False
+        history = changed.setdefault("undo", [])  # (what, how to take it back): the Undo button in the window
         story = it.get("story")
         for old in list(self.window_box):  # windows closed before
             if isinstance(old, ui.dialog) and not old.value:
@@ -1620,8 +1621,7 @@ class Page:
                 self.choose_keep_scroll = True
                 self.refresh_all()
                 self.choose_keep_scroll = False
-                ui.run_javascript("for (const ms of [150, 450, 900]) setTimeout(() => { if (window.tmShotScroll != "
-                                  "null) window.scrollTo(0, window.tmShotScroll); }, ms)")
+                ui.run_javascript("for (const ms of [150, 450, 900]) setTimeout(tmBackToShot, ms)")
 
         def mark() -> None:
             changed["any"] = True
@@ -1650,6 +1650,10 @@ class Page:
 
                 ui.button("Open in the Library", icon="photo_library", on_click=to_library) \
                     .props("flat dense no-caps size=sm")
+            if history:
+                with ui.row().classes("w-full items-center gap-2 px-2"):
+                    ui.button(f"Undo: {history[-1][0]}", icon="undo", on_click=lambda: undo(dialog)) \
+                        .props("outline dense no-caps")
             if it.get("shot_of"):
                 ui.label("✂ A shot you made from " + Path(it["shot_of"]).name).classes("text-xs text-green-800 px-2")
             if shots:
@@ -1676,6 +1680,16 @@ class Page:
             with self.window_timers:
                 ui.timer(0.2, lambda: self.shot_window(path, name, changed), once=True)
 
+        async def undo(dialog) -> None:
+            what, back = history.pop()
+            done = back()
+            if asyncio.iscoroutine(done):
+                await done
+            mark()
+            ui.notify(f"Undone: {what}", timeout=2000)
+            again()
+            dialog.close()
+
         async def take_back(shot: str, dialog) -> None:
             await run.io_bound(self.trip.drop_shot, shot)
             mark()
@@ -1683,6 +1697,7 @@ class Page:
             dialog.close()
 
         def drop_rest(dialog) -> None:
+            history.append(("drop the rest", lambda: self.trip.set_chosen([path], True)))
             self.trip.set_chosen([path], False)
             mark()
             ui.notify("Only the shots you made go in now.", type="positive")
@@ -1704,7 +1719,9 @@ class Page:
         async def make(a: float, b: float) -> bool:
             n = ui.notification("Making the shot…", spinner=True, timeout=None)
             try:
-                await run.io_bound(self.trip.make_shot, path, a, b)
+                made = await run.io_bound(self.trip.make_shot, path, a, b)
+                history.append((f"shot {fmt_length(a)}–{fmt_length(b)}",
+                                lambda made=made: run.io_bound(self.trip.drop_shot, made)))
             except Exception as exc:
                 traceback.print_exc()
                 n.dismiss()
@@ -1723,15 +1740,21 @@ class Page:
             return False
 
         async def keep(a: float, b: float) -> bool:
+            was = (it.get("keep_start"), it.get("keep_end"))
             await run.io_bound(self.trip.set_keep, path, a, b)
+            history.append(("cut", lambda: run.io_bound(self.trip.set_keep, path, *was)))
             mark()
             ui.notify(f"Cut: only {fmt_length(a)}–{fmt_length(b)} is used.", type="positive")
+            again()  # the window stays open, now showing the part you kept
             return True
 
         def lock(a: float, b: float) -> bool:
+            was = self.trip.locks(path)
             self.trip.add_lock(path, a, b)
+            history.append(("lock", lambda: self.trip.set_locks(path, was, checkpoint=False)))
             mark()
             ui.notify(f"Locked {fmt_length(a)}–{fmt_length(b)}: the video always uses it whole.", type="positive")
+            again()
             return True
 
         shots = self.trip.shots_from(path)
@@ -5721,9 +5744,19 @@ let tmDragY = null, tmDragTimer = null;
 document.addEventListener('dragover', (e) => { tmDragY = e.clientY; });
 // Where you were on the page when you double-clicked a shot (the big window stops the page scrolling, so it is
 // read here, before the window opens): closing the window brings you back to it.
-document.addEventListener('dblclick', () => {
-  if (!document.querySelector('.q-dialog')) window.tmShotScroll = window.scrollY;
+document.addEventListener('dblclick', (e) => {
+  if (document.querySelector('.q-dialog')) return;
+  window.tmShotScroll = window.scrollY;
+  const el = e.target.closest && e.target.closest('[data-tile], .tm-hover, [id]');
+  window.tmShotAnchor = el ? {sel: el.dataset.tile ? `[data-tile="${el.dataset.tile}"]` : `#${CSS.escape(el.id)}`,
+                              top: el.getBoundingClientRect().top} : null;
 }, true);
+// After the shot window closes and the page is drawn again: the shot you opened is back at the same place.
+function tmBackToShot() {
+  const a = window.tmShotAnchor, el = a && document.querySelector(a.sel);
+  if (el) window.scrollBy(0, el.getBoundingClientRect().top - a.top);
+  else if (window.tmShotScroll != null) window.scrollTo(0, window.tmShotScroll);
+}
 document.addEventListener('dragstart', () => {
   clearInterval(tmDragTimer);
   tmDragTimer = setInterval(() => {
