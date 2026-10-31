@@ -628,17 +628,16 @@ class Trip:
             self.db.executemany("UPDATE items SET chosen = ? WHERE path = ?", [(int(chosen), p) for p in paths])
             self.db.commit()
 
-    def move(self, path: str, steps: int) -> None:
-        """Move a file earlier (negative steps) or later in the storyboard."""
+    def move(self, path: str, steps: int, photo_seconds: float = 4.0) -> None:
+        """Move a file earlier (negative steps) or later in the storyboard. Every place keeps its length, so the
+        cuts stay on your pins (the shots that move along take the length of their new place)."""
         order = [r["path"] for r in self.storyboard()]
         if path not in order:
             return
         i = order.index(path)
         j = max(0, min(len(order) - 1, i + steps))
-        order.insert(j, order.pop(i))
-        with self._lock:
-            self.db.executemany("UPDATE items SET position = ? WHERE path = ?", list(enumerate(order)))
-            self.db.commit()
+        if j != i:
+            self.insert_shot(path, j + 1 if j > i else j, photo_seconds)
 
     # ---------- the editor under the video: cuts stay where they are ----------
 

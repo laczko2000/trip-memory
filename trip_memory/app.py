@@ -1702,13 +1702,16 @@ class Page:
                 self.trip.change_postit(path, k, remove=True)
 
         def unhighlight(k: int) -> None:
+            marks = self.trip.postits(path)
+            if not 0 <= k < len(marks):
+                return
+            t = marks[k]["t"]
             self.trip.change_postit(path, k, remove=True)
+            history.append((f"take off highlight {clock(t)}", lambda t=t: self.trip.add_postit(path, t)))
             mark()
-            changed["again"] = True
-            again()
-            for d in list(self.window_box):
-                if isinstance(d, ui.dialog) and d.value:
-                    d.close()
+            ui.notify(f"Highlight at {clock(t)} taken off.", timeout=1500)
+            ui.run_javascript(f"tmHighlightsSet({json.dumps([m['t'] for m in self.trip.postits(path)])})")
+            highlights_row.refresh()
 
         def again() -> None:  # the same window, drawn again with what changed
             changed["again"] = True
@@ -4769,8 +4772,9 @@ class Page:
         self.move(order[src - 1], dst - src)
 
     def move(self, path: str, steps: int) -> None:
-        self.trip.move(path, steps)
+        self.trip.move(path, steps, self.photo_len.value)  # (the cuts stay on your pins)
         self.storyboard_view.refresh()
+        self.editor_card.refresh()
 
     def reset_order(self) -> None:
         self.trip.reset_order()
@@ -5875,6 +5879,10 @@ document.addEventListener('keyup', (e) => {  // (so Space never also presses the
   if (e.code === 'Space' && document.querySelector('.q-dialog [data-shotwin]') &&
       !['INPUT', 'TEXTAREA'].includes(e.target.tagName)) { e.preventDefault(); e.stopPropagation(); }
 }, true);
+function tmHighlightsSet(ts) {  // the yellow lines on the strip, drawn again
+  document.querySelectorAll('.q-dialog .tm-hl').forEach(el => el.remove());
+  ts.forEach(tmHighlightMark);
+}
 function tmHighlightMark(t) {
   const box = document.querySelector('.q-dialog [data-shotwin] .tm-hover');
   const strip = box && document.querySelector(`[data-scrub-for="${box.id}"]`);

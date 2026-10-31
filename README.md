@@ -59,6 +59,7 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **0.79.5:** moving a clip up or down in the *Storyboard* keeps every cut on your pins, the same as in the editor under the draft: each place keeps its length and the clips that move along are fitted to it. The ✕ next to a ⭐ highlight in the shot window now takes it off (Undo puts it back).
 - **0.79.4:** *Remove from the trip* removes the unticked files straight away, with no extra question (*See removed* brings them back).
 - **0.79.3:** in the shot window, **Space** plays and pauses the video, and **Shift** puts a ⭐ **highlight** at that second (a yellow line on the strip). Highlights are always in the video, whatever the shot's length. ✕ takes one off; Undo works too.
 - **0.79.2:** in *Make video*, double-click a clip in the strip under the draft to open it big (theme, cut, lock, split); double-click the picture to go back. A theme you change there is yours, so the next first cut keeps it.

@@ -822,3 +822,7 @@ def test_pasting_a_shot_in_front_keeps_every_cut_in_place(tmp_path, monkeypatch)
     assert board() == [("p0.jpg", 1.0), ("p3.jpg", 2.0), ("p1.jpg", 3.0), ("p2.jpg", 4.0)]
     trip.insert_shot(paths[0], 4)  # the first one to the end
     assert board() == [("p3.jpg", 1.0), ("p1.jpg", 2.0), ("p2.jpg", 3.0), ("p0.jpg", 4.0)]
+    trip.move(paths[2], -1)  # one up in the Storyboard: the cuts stay too
+    assert board() == [("p3.jpg", 1.0), ("p2.jpg", 2.0), ("p1.jpg", 3.0), ("p0.jpg", 4.0)]
+    trip.move(paths[3], 2)  # two down
+    assert board() == [("p2.jpg", 1.0), ("p1.jpg", 2.0), ("p3.jpg", 3.0), ("p0.jpg", 4.0)]
