@@ -39,7 +39,7 @@ from . import taps as song_taps
 from .beats import song_length
 from .autoedit import CUT_ON, shot_value
 from .autoedit import Limits as AutoLimits
-from .render import END_FADE, TRANSITIONS, RenderSettings, clip_range, held, render, shot_times, source_factor, style_between
+from .render import END_FADE, OVERLAP_SHARE, TRANSITIONS, RenderSettings, clip_range, held, render, shot_times, source_factor, style_between
 from .scenes import SCENES, text_vectors
 from .tags import ALL_TAGS, EDITABLE_TAGS, TAG_GROUP
 
@@ -4628,8 +4628,10 @@ class Page:
         done = sum(r["theme_ok"] for r in rows)
         self.theme_summary.set_text(f"{len(rows)} shots · {done} confirmed · {len(rows) - done} to check")
 
-    def theme_menu(self, r: dict) -> None:
-        """A big window: the shot, and every theme as a button. One click moves it there (and confirms it)."""
+    def theme_menu(self, r: dict, on_move=None) -> None:
+        """A big window: the shot, and every theme as a button. One click moves it there (and confirms it).
+        on_move(dialog, name, new): instead of the Themes grid's own move (e.g. on a moment's page)."""
+        move = on_move or (lambda dialog, n, new=False: self.move_one(dialog, r, n, new))
         activities = self.trip.activities()
         with ui.dialog() as dialog, ui.card().classes("w-[760px] max-w-[95vw] gap-3"):
             with ui.row().classes("w-full no-wrap items-start gap-3"):
@@ -4645,12 +4647,12 @@ class Page:
             with ui.element("div").classes("w-full grid gap-2").style("grid-template-columns:repeat(3,minmax(0,1fr))"):
                 for a in activities:
                     now = a["name"] == r["theme"]
-                    ui.button(f"{a['emoji']} {a['name']}", on_click=lambda n=a["name"]: self.move_one(dialog, r, n)) \
+                    ui.button(f"{a['emoji']} {a['name']}", on_click=lambda n=a["name"]: move(dialog, n)) \
                         .props(("unelevated" if now else "outline") + " no-caps").classes("h-12 text-base w-full")
             with ui.row().classes("w-full items-center gap-2"):
                 new = ui.input(placeholder="Or a new theme, e.g. Kitesurfing").props("dense outlined").classes("flex-grow")
                 ui.button("Add and move here", icon="add",
-                          on_click=lambda: self.move_one(dialog, r, " ".join((new.value or "").split())[:30], True)) \
+                          on_click=lambda: move(dialog, " ".join((new.value or "").split())[:30], True)) \
                     .props("outline no-caps")
                 ui.button("Cancel", on_click=dialog.close).props("flat no-caps")
         dialog.open()
@@ -4901,6 +4903,10 @@ class Page:
             self.click_or_double(tile, toggle, lambda: self.shot_window(
                 f["path"], f"the {name} moments", at=f["t"] if f["kind"] == "video" else None,
                 moment={"activity": activity, "name": name, "t": f["t"]}))
+            with ui.element("div").classes("absolute top-2 right-2").on("click.stop", lambda: None):
+                ui.button(icon="swap_horiz", on_click=lambda: self.moment_theme_menu(activity, name, f)) \
+                    .props("round dense size=sm color=white text-color=primary").classes("shadow") \
+                    .tooltip("Wrong theme? Move it to another theme")
             with ui.row().classes("w-full items-center justify-between no-wrap"):
                 when = ui.label("🎬 at " + fmt_length(f["t"]) if f["kind"] == "video" else "📷 photo") \
                     .classes("text-xs text-gray-600 mt-1")
@@ -4924,6 +4930,29 @@ class Page:
                     with ui.element("div").on("click.stop", lambda: None):
                         ui.button(icon="open_in_full", on_click=big).props("flat dense round size=sm") \
                             .tooltip("Watch it big and choose the exact seconds")
+
+    def moment_theme_menu(self, activity: str, name: str, f: dict) -> None:
+        """Move a shot on a moment's page to another theme (it leaves this moment, which belongs to its theme)."""
+        rows = {r["path"]: r for r in self.trip.theme_rows()}
+        r = rows.get(f["path"])
+        if not r:
+            return
+
+        async def move(dialog, new_theme: str, new: bool = False) -> None:
+            if not new_theme:
+                ui.notify("Type the new theme's name first.", type="warning")
+                return
+            dialog.close()
+            if new:
+                await self.add_activity(new_theme, quiet=True)
+            await run.io_bound(self.trip.set_theme, [r["path"]], new_theme)
+            if new_theme != activity and f.get("ticked"):
+                await run.io_bound(self.trip.tick_moment, activity, name, f["path"], f["t"], False)
+            ui.notify(f"Moved to {new_theme}." if new_theme != r["theme"] else f"Confirmed in {new_theme}.",
+                      type="positive")
+            self.themes_view.refresh()
+
+        self.theme_menu(r, move)
 
     def open_moment_big(self, activity: str, name: str, f: dict, group: list[dict]) -> None:
         """Double-click a found moment: it opens big at the very second the app found, with Keep / Not this and
@@ -6500,9 +6529,11 @@ class Page:
         pick = {"name": current, "len": float(a_row.get("transition_len") or
                                               transitions.seconds_of(current, seconds) if current != transitions.HARD_CUT else seconds)}
         a_pic, b_pic = data_url(a_row["thumb"]) if a_row.get("thumb") else "", data_url(b_row["thumb"]) if b_row.get("thumb") else ""
+        times = self.editor_times(board)
+        len_a, len_b = (times[n]["length"], times[n + 1]["length"]) if len(times) > n + 1 else (4.0, 4.0)
 
-        def demo(fam: str, size: str, cls: str = "tm-trdemo") -> str:
-            return (f'<div class="{cls}" data-fam="{fam}" style="position:relative;overflow:hidden;background:#000;'
+        def demo(fam: str, size: str, cls: str = "tm-trdemo", length: float = 0.9) -> str:
+            return (f'<div class="{cls}" data-fam="{fam}" data-len="{length:.2f}" style="position:relative;overflow:hidden;background:#000;'
                     f'border-radius:6px;{size}"><img src="{a_pic}" style="position:absolute;inset:0;width:100%;'
                     f'height:100%;object-fit:cover"><div class="tm-b" style="position:absolute;inset:0">'
                     f'<img src="{b_pic}" style="width:100%;height:100%;object-fit:cover"></div>'
@@ -6516,13 +6547,24 @@ class Page:
                 name = pick["name"]
                 fam = "" if name == transitions.HARD_CUT else transitions.LOOKS.get(name, "fade")
                 with ui.row().classes("w-full items-center gap-4 no-wrap"):
-                    ui.html(demo(fam or "cut", "width:320px;height:180px;flex:none"), sanitize=False)
+                    ui.html(demo(fam or "cut", "width:320px;height:180px;flex:none",
+                                 length=min(pick["len"], OVERLAP_SHARE * min(len_a, len_b))), sanitize=False)
                     with ui.column().classes("gap-1 flex-1"):
                         ui.label(name).classes("text-xl font-semibold")
                         if name != transitions.HARD_CUT and transitions.STYLES.get(name, transitions.Style("fade")).xfade:
-                            ui.label(f"Length: {pick['len']:.1f} s").classes("text-sm")
-                            ui.slider(min=0.2, max=2.0, step=0.1, value=pick["len"]).props("dense label") \
+                            ui.label(f"How long: {pick['len']:g} s").classes("text-sm font-medium")
+                            with ui.row().classes("gap-1"):
+                                for v in (0.3, 0.5, 1.0, 1.5, 2.0, 3.0):
+                                    ui.button(f"{v:g} s", on_click=lambda v=v: (pick.update(len=v), big.refresh())) \
+                                        .props("dense no-caps size=sm " + ("unelevated color=amber-8"
+                                                                           if abs(pick["len"] - v) < 0.01 else "outline"))
+                            ui.slider(min=0.2, max=3.0, step=0.1, value=pick["len"]).props("dense label") \
                                 .classes("w-72").on("change", lambda e: (pick.update(len=float(e.args)), big.refresh()))
+                            most = OVERLAP_SHARE * min(len_a, len_b)
+                            if pick["len"] > most + 0.05:
+                                ui.label(f"Here it lasts {most:.1f} s at most: a transition takes at most half of each "
+                                         f"clip, and these are {len_a:.1f} s and {len_b:.1f} s long. Make the clips "
+                                         "longer (or join pins) for a longer one.").classes("text-xs text-orange-700")
                         else:
                             ui.label("A clean cut, right on the pin." if name == transitions.HARD_CUT else
                                      "A quick effect around a clean cut.").classes("text-sm text-gray-600")
@@ -7670,8 +7712,9 @@ function tmTrDemos() {
   const loop = () => {
     const demos = document.querySelectorAll('.q-dialog .tm-trdemo');
     if (!demos.length) { window.tmTrLoop = null; return; }
-    const t = (performance.now() / 1000) % 2.2, q = Math.max(0, Math.min(1, (t - 0.6) / 0.9));
+    const now = performance.now() / 1000;
     demos.forEach(d => {
+      const len = parseFloat(d.dataset.len) || 0.9, t = now % (len + 1.3), q = Math.max(0, Math.min(1, (t - 0.6) / len));
       const b = d.querySelector('.tm-b'), ov = d.querySelector('.tm-ov');
       if (ov) ov.style.opacity = 0;
       if (d.dataset.fam === 'cut') { tmTrLook(b, 'fade', q > 0 ? 1 : 0, ov); return; }

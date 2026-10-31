@@ -40,6 +40,7 @@ ProgressFn = Callable[[float, str], None]
 
 # Bump when the way clips are prepared changes, so old remembered clips are not reused.
 SEGMENT_VERSION = 7
+OVERLAP_SHARE = 0.5  # a transition takes at most half of either clip around it
 TITLE_SECONDS = 3.0
 FONTS = [
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
@@ -754,7 +755,7 @@ def style_between(name: str | None, k: int, default: str | None, seconds: float,
 
 def overlaps(lengths: list[float], styles: list[tuple[str | None, float]]) -> list[float]:
     """How many seconds each transition overlaps the two clips around it (as shot_times counts it)."""
-    return [(max(1, round(min(sec, lengths[k] * 0.4, lengths[k + 1] * 0.4) * FPS)) if style else 1) / FPS
+    return [(max(1, round(min(sec, lengths[k] * OVERLAP_SHARE, lengths[k + 1] * OVERLAP_SHARE) * FPS)) if style else 1) / FPS
             for k, (style, sec) in enumerate(styles)]
 
 
@@ -833,7 +834,7 @@ def shot_times(lengths: list[float], styles: list[tuple[str | None, float]]) -> 
     for k, length in enumerate(lengths):
         if k:
             style, seconds = styles[k - 1]
-            at -= max(1, round(min(seconds, lengths[k - 1] * 0.4, length * 0.4) * FPS)) if style else 1
+            at -= max(1, round(min(seconds, lengths[k - 1] * OVERLAP_SHARE, length * OVERLAP_SHARE) * FPS)) if style else 1
         out.append({"start": round(at / FPS, 3), "length": round(length, 3)})
         at += round(length * FPS)
     return out
@@ -843,7 +844,7 @@ def _planned_length(lengths: list[float], styles: list[tuple[str | None, float]]
     total = round(lengths[0] * FPS)
     for k in range(1, len(lengths)):
         style, seconds = styles[k - 1]
-        t = max(1, round(min(seconds, lengths[k - 1] * 0.4, lengths[k] * 0.4) * FPS)) if style else 1
+        t = max(1, round(min(seconds, lengths[k - 1] * OVERLAP_SHARE, lengths[k] * OVERLAP_SHARE) * FPS)) if style else 1
         total += round(lengths[k] * FPS) - t
     return total / FPS
 
@@ -906,7 +907,7 @@ def _join_once(
     for k in range(1, n):
         style, seconds = styles[k - 1]
         # A transition is never longer than ~40% of either clip.
-        t_frames = max(1, round(min(seconds, lengths[k - 1] * 0.4, lengths[k] * 0.4) * FPS)) if style else 1
+        t_frames = max(1, round(min(seconds, lengths[k - 1] * OVERLAP_SHARE, lengths[k] * OVERLAP_SHARE) * FPS)) if style else 1
         offset_frames = total_frames - t_frames
         t, offset = t_frames / FPS, offset_frames / FPS
         parts.append(f"[{v_prev}][sv{k}]xfade={xfade_args(style or 'fade')}:duration={t:.6f}:offset={offset:.6f}[v{k}]")
