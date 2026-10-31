@@ -167,6 +167,8 @@ class Page:
         self.filters = {"day": ALL, "theme": ALL, "place": ALL, "scene": ALL, "tag": ALL, "look": ALL, "person": ALL,
                         "show": ALL}
         self.lock_views: dict[str, list[tuple]] = {}  # clip -> the places on screen that show its locked moments
+        self.library_focus: dict | None = None  # one shot opened by double-click: {path, tab, name, scroll}
+        self.pending_click = None  # a single click waiting to see whether it becomes a double-click
         self.page = 1
         self.rendering = {"busy": False, "progress": 0.0, "message": "", "result": None}
         self.ollama_found: tuple[list[str], list[str]] | None = None  # (models that see pictures, all models)
@@ -201,6 +203,8 @@ class Page:
         self.last_refresh = time.time()
 
     def shown(self) -> list[dict]:
+        if self.library_focus:  # only the shot you double-clicked
+            return [it for it in self.all_items if it["path"] == self.library_focus["path"]]
         f = self.filters
         out = []
         for it in self.items:
@@ -425,6 +429,8 @@ class Page:
     def tab_opened(self) -> None:
         # Tabs are only built while open (a big trip would otherwise make the page very slow), so build this one now.
         self.stale = False
+        if self.library_focus and not self.showing("Library"):
+            self.library_focus = None  # you left the Library by its tab: it shows everything again next time
         self.refresh_all()
 
     def showing(self, name: str) -> bool:
@@ -830,7 +836,9 @@ class Page:
         with ui.column().classes("w-36 gap-0" + ("" if it["chosen"] else " opacity-40")) as tile:
             if it["path"] == self.choose_focus_path:
                 self.choose_focus_card = tile
-            self.preview(it, "width:144px;height:96px", start=self.hover_start(it))
+            with ui.element("div").tooltip("Double-click: open it in the Library") as wrap:
+                self.preview(it, "width:144px;height:96px", start=self.hover_start(it))
+            self.click_or_double(wrap, None, lambda p=it["path"]: self.open_in_library(p, "Choose files"))
             with ui.row().classes("items-center gap-0 no-wrap"):
                 box = ui.checkbox(
                     value=bool(it["chosen"]),
@@ -1316,6 +1324,14 @@ class Page:
     def filters_view(self) -> None:
         if not self.items or not self.showing("Library"):
             return
+        if self.library_focus:
+            with ui.row().classes("w-full items-center gap-3 p-2 rounded bg-green-50 border border-green-200"):
+                ui.button(f"Back to {self.library_focus['name']}", icon="arrow_back", on_click=self.library_back) \
+                    .props("color=green unelevated no-caps")
+                ui.label("This is the shot you double-clicked: lock a moment, cut it, change its theme or turn it here. "
+                         "Double-click the picture to go back.").classes("text-sm text-green-900 flex-1")
+                ui.button("Show the whole Library", on_click=self.library_all).props("flat dense no-caps")
+            return
         opts = self.options()
         with ui.row().classes("w-full items-end gap-3"):
             for key, label in (("day", "Day"), ("theme", "Theme"), ("place", "Place"), ("scene", "Scene"), ("tag", "Tag"),
@@ -1326,6 +1342,61 @@ class Page:
         with ui.row().classes("items-center gap-2"):
             ui.button("Put all shown in the video", icon="check_box", on_click=lambda: self.include_shown(True)).props("flat dense")
             ui.button("Leave all shown out", icon="check_box_outline_blank", on_click=lambda: self.include_shown(False)).props("flat dense")
+
+    # ---------- double-click: a shot in the Library, and back ----------
+
+    def click_or_double(self, element, single, double) -> None:
+        """A click waits a moment: a second click turns it into a double-click (and the single one is dropped)."""
+        async def clicked() -> None:
+            if self.pending_click is not None:
+                return  # the second click of a double-click
+            async def later() -> None:
+                await asyncio.sleep(0.3)
+                self.pending_click = None
+                result = single()
+                if asyncio.iscoroutine(result):
+                    await result
+            self.pending_click = asyncio.create_task(later())
+
+        async def doubled() -> None:
+            if self.pending_click is not None:
+                self.pending_click.cancel()
+                self.pending_click = None
+            result = double()
+            if asyncio.iscoroutine(result):
+                await result
+
+        if single is not None:
+            element.on("click", clicked)
+        element.on("dblclick", doubled)
+
+    async def open_in_library(self, path: str, name: str) -> None:
+        """Double-click on a shot anywhere: show just that shot in the Library, with a button back here."""
+        try:
+            scroll = float(await ui.run_javascript("window.scrollY", timeout=2) or 0)
+        except Exception:
+            scroll = 0.0
+        clip = next((it.get("part_of") or it["path"] for it in self.all_items if it["path"] == path), path)
+        self.library_focus = {"path": clip, "tab": self.panels.value, "name": name, "scroll": scroll}
+        self.panels.set_value(self.library_tab)
+        ui.run_javascript("setTimeout(() => window.scrollTo(0, 0), 300)")
+
+    def library_back(self) -> None:
+        focus, self.library_focus = self.library_focus, None
+        if not focus:
+            return
+        if focus["name"] == "Choose files":  # a long list is drawn in parts: draw down to the shot, then show it
+            it = next((x for x in self.all_items if x["path"] == focus["path"]), None)
+            if it:
+                self.choose_focus, self.choose_focus_path = it["story"], it["path"]
+        self.panels.set_value(focus["tab"])
+        if focus["name"] != "Choose files":
+            ui.run_javascript(f"setTimeout(() => window.scrollTo(0, {focus['scroll']}), 700)")
+
+    def library_all(self) -> None:
+        self.library_focus = None
+        self.filters_view.refresh()
+        self.gallery.refresh()
 
     def set_filter(self, key: str, value: str) -> None:
         self.filters[key] = value
@@ -1358,7 +1429,8 @@ class Page:
                       on_change=lambda e: self.set_library_columns(e.value)).props("dense no-caps")
         pages = max(1, -(-len(shown) // PAGE_SIZE))
         self.page = min(self.page, pages)
-        with ui.grid().classes("w-full gap-3").style(f"grid-template-columns:repeat({self.library_columns},minmax(0,1fr))"):
+        columns = 2 if self.library_focus else self.library_columns
+        with ui.grid().classes("w-full gap-3").style(f"grid-template-columns:repeat({columns},minmax(0,1fr))"):
             for it in shown[(self.page - 1) * PAGE_SIZE : self.page * PAGE_SIZE]:
                 self.card(it)
         if pages > 1:
@@ -1377,7 +1449,12 @@ class Page:
         with ui.card().tight().classes("w-full" + ("" if it["included"] else " opacity-50")) as card:
             if it["thumb"]:
                 height = {2: 320, 3: 220}.get(self.library_columns, 150)  # fewer in a row: bigger pictures
-                cut = {"box": self.preview(it, f"width:100%;height:{height}px", start=self.hover_start(it))}
+                if self.library_focus:
+                    height = 420
+                    card.classes("ring-4 ring-green-500")
+                with ui.element("div").classes("w-full").on("dblclick", self.library_back if self.library_focus else
+                                                            lambda it=it: None):
+                    cut = {"box": self.preview(it, f"width:100%;height:{height}px", start=self.hover_start(it))}
                 cut["area"] = ui.column().classes("w-full gap-1")  # the cutting handles, when you press ✂
             else:
                 ui.label("Analysing…").classes("w-full thumb flex items-center justify-center bg-gray-100 text-gray-400")
@@ -2705,7 +2782,12 @@ class Page:
                         show_hint()
 
                     show()
-                    tile.on("click", toggle)
+
+                    async def to_library(path=path) -> None:
+                        done()  # your ticks so far are kept as you leave
+                        await self.open_in_library(path, "My story")
+
+                    self.click_or_double(tile, toggle, to_library)
             show_hint()
 
             def done() -> None:
@@ -3161,7 +3243,9 @@ class Page:
         when = f"{datetime.fromisoformat(r['taken_at']).astimezone():%a %-d %b}, {r['day_part']}"
         with ui.element("div").classes("relative rounded p-1 cursor-pointer border-2 " +
                                        ("border-blue-600 bg-blue-50" if picked else "border-transparent bg-gray-50")) \
-                .on("click", lambda p=r["path"]: self.pick_theme_shot(p)) as tile:
+                as tile:
+            self.click_or_double(tile, lambda p=r["path"]: self.pick_theme_shot(p),
+                                 lambda p=r["path"]: self.open_in_library(p, "Themes"))
             self.theme_tiles[r["path"]] = tile
             if r["kind"] == "video":  # hover plays it (silently) so you can see what happens in it
                 self.preview(r, "width:100%;aspect-ratio:16/10", start=self.hover_start(r), view="theme")
@@ -3477,7 +3561,7 @@ class Page:
                 self.moment_count.set_text(f"{len(saved['shots'])} marked")
 
             show()
-            tile.on("click", toggle)
+            self.click_or_double(tile, toggle, lambda: self.open_in_library(f["path"], f"the {name} moments"))
             with ui.row().classes("w-full items-center justify-between no-wrap"):
                 when = ui.label("🎬 at " + fmt_length(f["t"]) if f["kind"] == "video" else "📷 photo") \
                     .classes("text-xs text-gray-600 mt-1")
@@ -3911,7 +3995,9 @@ class Page:
                 box = None
                 if it["thumb"]:
                     start, end = self.kept_part(it) if it["kind"] == "video" else (0, None)
-                    box = self.preview(it, "width:160px;height:100px;flex:none", start, end, view="story")
+                    with ui.element("div").style("flex:none").tooltip("Double-click: open it in the Library") as wrap:
+                        box = self.preview(it, "width:160px;height:100px;flex:none", start, end, view="story")
+                    self.click_or_double(wrap, None, lambda p=it["path"]: self.open_in_library(p, "the Storyboard"))
                 with ui.column().classes("flex-grow gap-1"):
                     place = ", ".join(x for x in (it["place"], it["country"]) if x)
                     icon = "🎬" if it["kind"] == "video" else "📷"
