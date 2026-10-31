@@ -1049,9 +1049,10 @@ class Trip:
         self._set_meta_json("highlight_ideas", [i for i in self.highlight_ideas()
                                                 if not (i["path"] == path and abs(i["t"] - t) < 0.05)])
 
-    def keep_idea(self, path: str, t: float) -> None:
-        """A suggestion was right: it becomes a ⭐ highlight (and the app learns from it)."""
-        self._forget_idea(path, t)
+    def keep_idea(self, path: str, t: float, suggested: float | None = None) -> None:
+        """A suggestion was right: it becomes a ⭐ highlight (and the app learns from it). suggested: the second
+        the app suggested, when you put the highlight a little before or after it."""
+        self._forget_idea(path, t if suggested is None else suggested)
         self.add_postit(path, t)
         try:
             self.learn_highlights()

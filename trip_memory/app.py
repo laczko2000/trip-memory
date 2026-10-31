@@ -587,14 +587,14 @@ class Page:
                 .props("flat dense no-caps color=grey-8")
         rows = {x["path"]: x for x in self.all_items}
         with ui.element("div").classes("w-full grid gap-2").style("grid-template-columns:repeat(auto-fill,minmax(11rem,1fr))"):
-            for idea in ideas:
+            for n, idea in enumerate(ideas):
                 row = rows[idea["path"]]
                 with ui.column().classes("gap-1 p-1 rounded border-2 border-orange-400 border-dashed bg-white"):
-                    with ui.element("div").classes("w-full").tooltip("Double-click: open it big") as wrap:
+                    with ui.element("div").classes("w-full").tooltip("Double-click: open it big at that very second") as wrap:
                         thumb = self.trip.moment_picture(row, idea["t"])
                         a, b = moments.window(idea["t"], row["duration"] or 0)
                         self.preview(row | {"thumb": thumb}, "width:100%;aspect-ratio:16/10", a, b, view="moment")
-                    self.click_or_double(wrap, None, lambda p=idea["path"]: self.shot_window(p, "Choose files"))
+                    self.click_or_double(wrap, None, lambda n=n: self.open_idea(ideas, n))
                     with ui.row().classes("w-full items-center gap-1 no-wrap"):
                         ui.label(f"{Path(idea['path']).name[:16]} · {clock(idea['t'])}").classes("text-xs truncate")
                         ui.space()
@@ -602,6 +602,92 @@ class Page:
                             .props("flat dense round size=sm color=amber-8").tooltip("Keep: it becomes a ⭐ highlight")
                         ui.button(icon="close", on_click=lambda i=idea: self.idea_answer([i], False)) \
                             .props("flat dense round size=sm color=grey-7").tooltip("Drop: not a highlight")
+
+    def suggestion_window(self, items: list[dict], k: int, title: str, keep, drop, done) -> None:
+        """One suggestion big (a highlight like yours, or a moment the app found): it opens at the very second the
+        app picked, plays the seconds around it again and again (green on the strip, the second itself in orange),
+        and you answer: Keep (at that second, or where you put the red line) or Not this. Then the next one comes,
+        without closing; ← → go back and forth. items: [{"path", "t", "row"}]; keep(item, t) and drop(item) save
+        the answer; done() redraws the page once the window closes."""
+        if not items:
+            done()
+            return
+        k = max(0, min(k, len(items) - 1))
+        f = items[k]
+        row = f["row"]
+        full = kept_part(row) or (0.0, float(row["duration"] or 0))
+        a, b = moments.window(f["t"], row["duration"] or 0, *full)
+        state = {"nav": False}
+        box = f"tm-part-{clip_id(row['path'])}"
+
+        def go(to: int) -> None:
+            state["nav"] = True
+            with self.window_timers:
+                ui.timer(0.05, lambda: self.suggestion_window(items, to, title, keep, drop, done), once=True)
+
+        async def red_or_suggested() -> float:
+            try:  # the red line, if you stopped the video somewhere; else the second the app suggested
+                at = await ui.run_javascript(
+                    f"(() => {{ const b = document.getElementById('{box}'), v = b && b.querySelector('video'); "
+                    f"return v && v.src && v.paused && b.dataset.red ? parseFloat(b.dataset.red) : null; }})()",
+                    timeout=3)
+            except Exception:
+                at = None
+            return round(float(at), 2) if at is not None else f["t"]
+
+        async def kept(lo: float, hi: float) -> bool:
+            t = await red_or_suggested()
+            result = keep(f, t)
+            if asyncio.iscoroutine(result):
+                await result
+            items.pop(k)
+            ui.notify(f"⭐ Kept at {fmt_length(t)}.", timeout=1200, type="positive")
+            if items:
+                go(min(k, len(items) - 1))
+            return True
+
+        async def dropped(lo: float, hi: float) -> bool:
+            result = drop(f)
+            if asyncio.iscoroutine(result):
+                await result
+            items.pop(k)
+            ui.notify("Not this one: the app learns from it.", timeout=1200)
+            if items:
+                go(min(k, len(items) - 1))
+            return True
+
+        def extra(dialog) -> None:
+            for side, step, icon in (("left", -1, "chevron_left"), ("right", 1, "chevron_right")):
+                if 0 <= k + step < len(items):
+                    ui.button(icon=icon, on_click=lambda s=step: (go(k + s), dialog.close())) \
+                        .props(f"round unelevated color=grey-9 size=xl data-nav={step}") \
+                        .style(f"position:fixed;{side}:10px;top:50%;transform:translateY(-50%);z-index:20;opacity:.85") \
+                        .tooltip(("Previous" if step < 0 else "Next") + " suggestion (← →)")
+            ui.label("Orange: the second the app suggests. It plays the seconds around it. Keep puts the ⭐ there, "
+                     "or where you stopped the red line.").classes("text-xs text-orange-800 px-2")
+
+        def hidden() -> None:
+            if not state["nav"]:
+                done()
+
+        self.part_dialog(row | {"ideas": [{"t": f["t"]}]}, a, b,
+                         f"{title}: suggestion {k + 1} of {len(items)} · {Path(row['path']).name} at {clock(f['t'])}",
+                         [("Not this", "close", dropped, "outline no-caps color=grey-8"),
+                          ("Keep", "star", kept, "unelevated no-caps color=orange-8")],
+                         extra=extra, on_hide=hidden, full=True)
+
+    def open_idea(self, ideas: list[dict], k: int) -> None:
+        rows = {x["path"]: x for x in self.all_items}
+        items = [{"path": i["path"], "t": i["t"], "row": rows[i["path"]]} for i in ideas if i["path"] in rows]
+
+        def done() -> None:
+            self.choose_keep_scroll = True
+            self.refresh_all()
+            self.choose_keep_scroll = False
+
+        self.suggestion_window(items, k, "⭐ Highlight like yours",
+                               lambda f, t: run.io_bound(self.trip.keep_idea, f["path"], t, f["t"]),
+                               lambda f: run.io_bound(self.trip.drop_idea, f["path"], f["t"]), done)
 
     def learn_quietly(self) -> None:
         try:
@@ -1208,18 +1294,16 @@ class Page:
         box = cut.get("box") or self.preview(it, "width:100%;height:210px", start, end, view="cut")
         # The clip as a row of pictures (made while you look); the parts you cut off are greyed out.
         shade = "position:absolute;top:0;bottom:0;background:rgba(15,23,42,.65)"
-        # Move the mouse along it and the video follows; click to play from there.
-        ui.html(f'<div data-scrub-for="{box}" style="position:relative;height:40px;margin:4px 10px 0;border-radius:4px;'
-                f'overflow:hidden;background:#e2e8f0;cursor:col-resize">'
+        # Like the editor: press and drag on it and the video follows the red line; a click puts the line there.
+        ui.html(f'<div data-scrub-for="{box}" data-press="1" style="position:relative;height:40px;margin:4px 10px 0;'
+                f'border-radius:4px;overflow:hidden;background:#e2e8f0;cursor:ew-resize;touch-action:none">'
                 f'<img id="{box}-strip" style="width:100%;height:100%;object-fit:fill;display:none;pointer-events:none">'
                 f'<div id="{box}-l" style="{shade};left:0;width:0;pointer-events:none"></div>'
                 f'<div id="{box}-r" style="{shade};right:0;width:0;pointer-events:none"></div>'
-                f'<div id="{box}-head" style="position:absolute;top:0;bottom:0;width:2px;background:#facc15;display:none;'
-                f'pointer-events:none"></div></div>', sanitize=False).classes("w-full")
-        # While you cut, the picture above follows the mouse too (instead of playing by itself).
+                f'{RED_LINE}</div>', sanitize=False).classes("w-full")
         ui.timer(0.1, lambda: ui.run_javascript(
-            f"const b = document.getElementById('{box}'); if (b) {{ b.dataset.scrub = '1'; "
-            f"b.dataset.full0 = {start}; b.dataset.full1 = {end}; }}"), once=True)
+            f"const b = document.getElementById('{box}'); if (b) {{ b.dataset.full0 = {start}; "
+            f"b.dataset.full1 = {end}; }}"), once=True)
         ui.range(min=start, max=end, step=0.1, value=dict(part),
                  on_change=lambda e: moved(e.value["min"], e.value["max"])).props("color=green dense drag-range").classes("w-full px-2")
         label = ui.label().classes("text-xs font-medium text-green-800 px-2")
@@ -1426,14 +1510,14 @@ class Page:
                     holder.on("tmhighlight", lambda e: on_highlight(float(e.args["detail"]["t"])), ["detail"])
                 box = self.preview(it, f"width:100%;height:{height}", part["min"], part["max"], view="part")
             shade = "position:absolute;top:0;bottom:0;background:rgba(15,23,42,.65)"
-            ui.html(f'<div data-scrub-for="{box}" style="position:relative;height:48px;margin:4px 10px 0;'
-                    f'border-radius:4px;overflow:hidden;background:#e2e8f0;cursor:col-resize">'
+            ui.html(f'<div data-scrub-for="{box}" data-press="1" style="position:relative;height:48px;'
+                    f'margin:4px 10px 0;border-radius:4px;overflow:hidden;background:#e2e8f0;cursor:ew-resize;'
+                    f'touch-action:none">'
                     f'<img id="{box}-strip" style="width:100%;height:100%;object-fit:fill;display:none;'
                     f'pointer-events:none">'
                     f'<div id="{box}-l" style="{shade};left:0;width:0;pointer-events:none"></div>'
                     f'<div id="{box}-r" style="{shade};right:0;width:0;pointer-events:none"></div>'
-                    f'<div id="{box}-head" style="position:absolute;top:0;bottom:0;width:2px;background:#facc15;'
-                    f'display:none;pointer-events:none"></div>'
+                    + RED_LINE
                     + "".join(f'<div title="Used by shot {n}" style="position:absolute;top:0;bottom:0;'
                               f'left:{100 * (x - full0) / ((full1 - full0) or 1):.2f}%;'
                               f'width:{100 * (y - x) / ((full1 - full0) or 1):.2f}%;background:rgba(220,38,38,.55);'
@@ -1451,8 +1535,9 @@ class Page:
                               f'box-shadow:0 0 3px #000;pointer-events:none"></div>'
                               for t in [p["t"] for p in it.get("postits") or [] if full0 <= p["t"] <= full1])
                     + "".join(f'<div class="tm-idea" data-t="{t:.2f}" style="position:absolute;top:0;bottom:0;'
-                              f'width:3px;left:{100 * (t - full0) / ((full1 - full0) or 1):.2f}%;'
-                              f'background:repeating-linear-gradient(#fb923c 0 5px,transparent 5px 9px);'
+                              f'width:4px;margin-left:-2px;left:{100 * (t - full0) / ((full1 - full0) or 1):.2f}%;'
+                              f'background:repeating-linear-gradient(#f97316 0 6px,#fff7ed 6px 9px);'
+                              f'box-shadow:0 0 3px #000;'
                               f'pointer-events:none"></div>'
                               for t in [i["t"] for i in it.get("ideas") or [] if full0 <= i["t"] <= full1])
                     + '</div>', sanitize=False).classes("w-full")
@@ -1463,9 +1548,10 @@ class Page:
                      on_change=lambda e: moved(e.value["min"], e.value["max"])).props("color=green dense drag-range") \
                 .classes("w-full px-2")
             label = ui.label().classes("text-sm font-medium text-green-800 px-2")
-            ui.label("Move the mouse along the strip to look through the clip (click plays from there). Drag the "
-                     "green bar's middle to move the same length to another moment, or its ends to make it longer "
-                     "or shorter. Double-click the picture to close.").classes("text-xs text-gray-500 px-2")
+            ui.label("Press and drag on the strip: the red line and the video follow (a click puts the line there). "
+                     "Space or Play plays from the red line. Drag the green bar's middle to move the same length to "
+                     "another moment, or its ends to make it longer or shorter: the video shows that very frame. "
+                     "Double-click the picture to close.").classes("text-xs text-gray-500 px-2")
 
             def show() -> None:
                 label.text = (f"{fmt_length(part['min'])}–{fmt_length(part['max'])} · "
@@ -1511,7 +1597,8 @@ class Page:
 
             with ui.row().classes("w-full items-center justify-end gap-2"):
                 ui.button("Play", icon="play_arrow", on_click=lambda: ui.run_javascript(
-                    f"tmPlayPart('{box}', {part['min']}, {part['max']}, {part['min']})")).props("outline dense no-caps")
+                    f"tmPlayRed('{box}', {part['min']}, {part['max']})")).props("outline dense no-caps") \
+                    .tooltip("From the red line (Space)")
                 ui.space()
                 ui.button("Close", on_click=dialog.close).props("flat no-caps")
                 for text, icon, callback, props in actions:
@@ -4443,13 +4530,13 @@ class Page:
             with ui.element("div").classes("w-full grid gap-2").style(
                     "grid-template-columns:repeat(auto-fill,minmax(170px,1fr))"):
                 for f in group[:room]:
-                    self.moment_tile(activity, name, f)
+                    self.moment_tile(activity, name, f, group)
             shown += min(len(group), room)
         if len(found) > shown:
             ui.button(f"Show more ({len(found) - shown} left)", icon="expand_more",
                       on_click=self.more_themes).props("outline").classes("w-full")
 
-    def moment_tile(self, activity: str, name: str, f: dict) -> None:
+    def moment_tile(self, activity: str, name: str, f: dict, group: list[dict] | None = None) -> None:
         with ui.element("div").classes("relative rounded p-1 border-2 bg-gray-50 cursor-pointer " +
                                        ("border-green-600" if f["ticked"] else "border-transparent")) as tile:
             if f["kind"] == "video" and f.get("row"):  # hover plays the seconds around the moment, again and again
@@ -4481,7 +4568,7 @@ class Page:
                 self.moment_count.set_text(f"{len(saved['shots'])} marked")
 
             show()
-            self.click_or_double(tile, toggle, lambda: self.shot_window(f["path"], f"the {name} moments"))
+            self.click_or_double(tile, toggle, lambda: self.open_moment_big(activity, name, f, group or [f]))
             with ui.row().classes("w-full items-center justify-between no-wrap"):
                 when = ui.label("🎬 at " + fmt_length(f["t"]) if f["kind"] == "video" else "📷 photo") \
                     .classes("text-xs text-gray-600 mt-1")
@@ -4505,6 +4592,27 @@ class Page:
                     with ui.element("div").on("click.stop", lambda: None):
                         ui.button(icon="open_in_full", on_click=big).props("flat dense round size=sm") \
                             .tooltip("Watch it big and choose the exact seconds")
+
+    def open_moment_big(self, activity: str, name: str, f: dict, group: list[dict]) -> None:
+        """Double-click a found moment: it opens big at the very second the app found, with Keep / Not this and
+        the next one of the same row (Marked, Suggested or Probably not). A photo opens in the shot window."""
+        if f["kind"] != "video" or not f.get("row"):
+            self.shot_window(f["path"], f"the {name} moments")
+            return
+        items = [x for x in group if x["kind"] == "video" and x.get("row")]
+
+        async def keep(x: dict, t: float) -> None:
+            x["t"], x["ticked"] = t, True
+            await run.io_bound(self.trip.tick_moment, activity, name, x["path"], t, True)
+
+        async def drop(x: dict) -> None:
+            if x["ticked"]:
+                x["ticked"] = False
+                await run.io_bound(self.trip.tick_moment, activity, name, x["path"], x["t"], False)
+            x["likely"] = False
+
+        self.suggestion_window(list(items), items.index(f) if f in items else 0, f"{name}", keep, drop,
+                               self.themes_view.refresh)
 
     async def tick_all_moment(self, activity: str, name: str, group: list[dict]) -> None:
         for f in group:
@@ -6343,6 +6451,11 @@ class Page:
 
 _served: dict[str, str] = {}
 
+RED_LINE = ('<div class="tm-red" style="position:absolute;top:0;bottom:0;left:0;width:2px;margin-left:-1px;'
+            'background:#ef4444;box-shadow:0 0 4px #ef4444;pointer-events:none;z-index:5"><div style="position:absolute;'
+            'top:-2px;left:-5px;width:12px;height:12px;border-radius:50%;background:#ef4444"></div></div>')
+
+
 # Plays a video preview while the mouse is over it, and stops it when the mouse leaves.
 HOVER_SCRIPT = """
 <script>
@@ -6827,22 +6940,27 @@ document.addEventListener('keydown', (e) => {
     if (b) { e.preventDefault(); b.click(); return; }
   }
   const holder = document.querySelector('.q-dialog [data-shotwin]');
-  const box = holder && holder.querySelector('.tm-hover');
+  const strip = document.querySelector('.q-dialog [data-scrub-for][data-press]');
+  const box = (holder && holder.querySelector('.tm-hover')) || (strip && document.getElementById(strip.dataset.scrubFor));
   if (!box || e.repeat || ['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
   if (e.code === 'Space') {
     e.preventDefault(); e.stopPropagation();
     if (tmPlaying && tmPlaying !== box) tmStop(tmPlaying);
     tmPlaying = box;
     const v = tmVideo(box);
-    if (v.paused) v.play().catch(() => {}); else v.pause();
-  } else if (e.key === 'Shift') {
+    if (v.paused) {  // from the red line
+      const r = parseFloat(box.dataset.red);
+      if (!isNaN(r) && Math.abs(v.currentTime - r) > 0.1) v.currentTime = r;
+      v.play().catch(() => {});
+    } else v.pause();
+  } else if (e.key === 'Shift' && holder) {
     const v = box.querySelector('video');
     const t = v && v.src ? v.currentTime : parseFloat(box.dataset.start || '0');
     box.dispatchEvent(new CustomEvent('tmhighlight', {bubbles: true, detail: {t: t}}));
   }
 }, true);
 document.addEventListener('keyup', (e) => {  // (so Space never also presses the button that has the focus)
-  if (e.code === 'Space' && document.querySelector('.q-dialog [data-shotwin]') &&
+  if (e.code === 'Space' && document.querySelector('.q-dialog [data-shotwin], .q-dialog [data-scrub-for][data-press]') &&
       !['INPUT', 'TEXTAREA'].includes(e.target.tagName)) { e.preventDefault(); e.stopPropagation(); }
 }, true);
 function tmHighlightsSet(ts) {  // the yellow lines on the strip, drawn again
@@ -6868,7 +6986,49 @@ function tmShowAt(id, start, end, at) {
   box.dataset.start = start; box.dataset.end = end;
   const v = tmVideo(box);
   v.pause();
-  if (v.readyState >= 1) v.currentTime = at; else v.addEventListener('loadedmetadata', () => { v.currentTime = at; }, {once: true});
+  tmRedSet(box, at);
+  if (v.readyState >= 1) tmSeekSoft(v, at); else v.addEventListener('loadedmetadata', () => { v.currentTime = at; }, {once: true});
+}
+// The red line on a clip's strip (the big window, cutting a clip), as in the editor: it shows where the video is.
+// Press and drag on the strip and the video follows; a click puts the line there; Space or Play plays from it.
+function tmRedSet(box, t) {
+  const strip = document.querySelector(`[data-scrub-for="${box.id}"]`), red = strip && strip.querySelector('.tm-red');
+  box.dataset.red = t;
+  if (!red) return;
+  const a = parseFloat(box.dataset.full0), b = parseFloat(box.dataset.full1);
+  red.style.left = (100 * Math.max(0, Math.min(1, (t - a) / ((b - a) || 1)))) + '%';
+}
+setInterval(() => {  // (while it plays, the red line moves along)
+  document.querySelectorAll('[data-scrub-for][data-press]').forEach(strip => {
+    const box = document.getElementById(strip.dataset.scrubFor), v = box && box.querySelector('video');
+    if (v && v.src && !v.paused) tmRedSet(box, v.currentTime);
+  });
+}, 50);
+document.addEventListener('pointerdown', (e) => {
+  const strip = e.target.closest && e.target.closest('[data-scrub-for][data-press]');
+  const box = strip && document.getElementById(strip.dataset.scrubFor);
+  if (!box || e.button !== 0) return;
+  e.preventDefault();
+  if (tmPlaying && tmPlaying !== box) tmStop(tmPlaying);
+  tmPlaying = box;
+  const v = tmVideo(box);
+  v.pause();
+  const at = (ev) => {
+    const r = strip.getBoundingClientRect(), a = parseFloat(box.dataset.full0), b = parseFloat(box.dataset.full1);
+    const t = a + Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width)) * (b - a);
+    tmRedSet(box, t);
+    if (v.readyState >= 1) tmSeekSoft(v, t); else v.addEventListener('loadedmetadata', () => { v.currentTime = t; }, {once: true});
+  };
+  at(e);
+  const move = (ev) => at(ev);
+  const up = () => { document.removeEventListener('pointermove', move); document.removeEventListener('pointerup', up); };
+  document.addEventListener('pointermove', move); document.addEventListener('pointerup', up);
+}, true);
+function tmPlayRed(id, start, end) {
+  const box = document.getElementById(id);
+  if (!box) return;
+  const r = parseFloat(box.dataset.red);
+  tmPlayPart(id, start, end, (r >= start && r < end - 0.1) ? r : start);
 }
 // Cutting a clip: the mouse along the picture strip (or across the picture) moves the video to that moment.
 function tmScrubAt(box, frac, play) {
@@ -6885,6 +7045,7 @@ function tmScrubAt(box, frac, play) {
 }
 function tmScrubTarget(e) {
   const strip = e.target.closest && e.target.closest('[data-scrub-for]');
+  if (strip && strip.dataset.press) return [null, null];  // (it has a red line: press and drag, see below)
   if (strip) return [document.getElementById(strip.dataset.scrubFor), strip];
   const box = e.target.closest && e.target.closest('.tm-hover');
   return box && box.dataset.scrub === '1' ? [box, box] : [null, null];
