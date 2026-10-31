@@ -866,88 +866,16 @@ class Page:
         self.refresh_all()
         self.choose_keep_scroll = False
 
+    BEST_BITS = "Mark the best bits"
+
     def postit_dialog(self, k: int) -> None:
-        videos = [it for it in self.all_items if it["kind"] == "video" and it["chosen"]]
+        """Mark the best bits: the chosen videos one after the other in the same big window as everywhere (full
+        screen, the strip to look through with the mouse, Shift for a ⭐, big ‹ › on the sides and ← →)."""
+        videos = [it["path"] for it in self.all_items if it["kind"] == "video" and it["chosen"]]
         if not videos:
             return
-        state = {"k": max(0, min(k, len(videos) - 1))}
-        with ui.dialog().props("persistent") as dialog, ui.card().classes("w-[64rem] max-w-full gap-2"):
-            self.postit_dialog_open = dialog
-
-            @ui.refreshable
-            def body() -> None:
-                it = videos[state["k"]]
-                self.postit_video = it
-                src = self.video_src(Path(it["path"]))
-                start, end = kept_part(it) or (0.0, float(it["duration"] or 0))
-                with ui.row().classes("w-full items-center gap-2"):
-                    ui.label(f"Video {state['k'] + 1} of {len(videos)} · {Path(it['path']).name}") \
-                        .classes("text-lg font-semibold")
-                    ui.label(fmt_time(it["taken_at"])).classes("text-sm text-gray-500")
-                rot = it.get("rotation") or 0
-                turn = f"transform:rotate({rot}deg);" if rot else ""
-                ui.html(f'<video id="tm-pi" src="{src}#t={start:.2f}" controls autoplay muted playsinline '
-                        f'data-start="{start:.2f}" data-end="{end:.2f}" '
-                        f'style="width:100%;height:min(52vh,480px);background:#000;border-radius:6px;{turn}"></video>',
-                        sanitize=False).classes("w-full")
-                notes(it, start, end)
-                with ui.row().classes("w-full items-center"):
-                    ui.button("Previous", icon="chevron_left", on_click=lambda: go(-1)) \
-                        .props("flat no-caps" + (" disable" if state["k"] == 0 else ""))
-                    ui.button("Next video", icon="chevron_right", on_click=lambda: go(1)) \
-                        .props("unelevated no-caps" + (" disable" if state["k"] == len(videos) - 1 else ""))
-                    ui.space()
-                    ui.button("Done", icon="check", on_click=done).props("color=green no-caps")
-
-            @ui.refreshable
-            def notes(it: dict, start: float, end: float) -> None:
-                """The strip with its post-its and the post-its themselves (redrawn without stopping the video)."""
-                found = self.trip.postits(it["path"])
-                strip = ui.html(self.postit_strip_html(it, found, start, end, state.get("strip", {}).get(it["path"])),
-                                sanitize=False).classes("w-full")
-
-                async def fill_strip() -> None:
-                    picture = await run.io_bound(self.trip.filmstrip, it["path"])
-                    state.setdefault("strip", {})[it["path"]] = picture
-                    if picture and not strip.is_deleted:
-                        strip.set_content(self.postit_strip_html(it, found, start, end, picture))
-
-                if it["path"] not in state.get("strip", {}):
-                    background_tasks.create(fill_strip())  # (a timer made inside a redrawn part would never fire)
-                ui.label("Play it, or move the mouse along the strip to look through it. Tap Shift at a great moment: "
-                         "a post-it sticks there. Click a post-it to jump to it.").classes("text-xs text-gray-500")
-                with ui.row().classes("w-full gap-2"):
-                    for n, p in enumerate(found):
-                        with ui.card().classes("p-1 gap-1 w-44 bg-yellow-100"):
-                            ui.image(data_url(p["thumb"])).classes("w-full rounded cursor-pointer") \
-                                .style("aspect-ratio:16/10").props("fit=cover no-spinner") \
-                                .on("click", lambda p=p: ui.run_javascript(
-                                    f"const v = document.getElementById('tm-pi'); v.currentTime = {max(0, p['t'] - 1):.2f}; v.play()"))
-                            ui.label(f"📌 {fmt_length(p['t'])}").classes("text-xs font-semibold")
-                            name = ui.input(value=p["name"], placeholder="name, e.g. jump").props("dense") \
-                                .classes("text-xs")
-                            name.on("blur", lambda e, n=n, f=name: self.trip.change_postit(it["path"], n, name=f.value))
-                            with ui.row().classes("gap-0"):
-                                ui.button(icon="lock", on_click=lambda p=p: self.lock_postit(it, p)) \
-                                    .props("flat dense round size=sm color=amber-9").tooltip("Lock 3 s around it")
-                                ui.button(icon="delete", on_click=lambda n=n: (
-                                    self.trip.change_postit(it["path"], n, remove=True), notes.refresh())) \
-                                    .props("flat dense round size=sm").tooltip("Take this post-it off")
-
-            def go(step: int) -> None:
-                state["k"] = max(0, min(len(videos) - 1, state["k"] + step))
-                body.refresh()
-
-            def done() -> None:
-                dialog.close()
-                self.postit_dialog_open = None
-                background_tasks.create(run.io_bound(self.learn_quietly))  # the app learns your new highlights
-                self.reload()
-                self.refresh_all()
-
-            self.postit_body = notes
-            body()
-        dialog.open()
+        self.nav_order[self.BEST_BITS] = videos
+        self.shot_window(videos[max(0, min(k, len(videos) - 1))], self.BEST_BITS)
 
     def postit_strip_html(self, it: dict, found: list[dict], start: float, end: float, picture) -> str:
         span = max(0.1, end - start)
@@ -2426,8 +2354,10 @@ class Page:
                    + ([{"t": at}] if at is not None and it["kind"] == "video" else [])}
         with self.window_box:
             self.part_dialog(
-            it, a, b, f"{Path(path).name} · " + (f"clip in the video ({slot:.1f} s): set its part" if in_video
-                                                   else "mark a good part"),
+            it, a, b, (f"📌 Video {order.index(path) + 1} of {len(order)} · {Path(path).name} · press and drag "
+                       "along the strip to look through it, tap Shift at a great moment" if name == self.BEST_BITS
+                       else f"{Path(path).name} · " + (f"clip in the video ({slot:.1f} s): set its part" if in_video
+                                                       else "mark a good part")),
             actions,
             made=[(x["start"], x["end"], f"shot {k}") for k, x in enumerate(shots, 1)],
             extra=controls, on_hide=after, full=True, on_highlight=highlight)
