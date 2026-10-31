@@ -5153,8 +5153,10 @@ class Page:
             "ondragstart": f"event.dataTransfer.setData('text/plain','{n}')",
             "ondragover": "tmClipOver(event, this)", "ondragleave": "tmClipLeave(this)",
             "ondrop": f"tmClipDrop(event, this, {n})"})
-        tile.on("click", lambda n=n, start=start: self.pick_draft_clip(n, start))
-        tile.tooltip(f"{n + 1}: {length:.1f} s" + (" · 🔒 locked moment" if locked else ""))
+        self.click_or_double(tile, lambda n=n, start=start: self.pick_draft_clip(n, start),
+                             lambda p=r["path"]: self.shot_window(p, "Make video"))
+        tile.tooltip(f"{n + 1}: {length:.1f} s" + (" · 🔒 locked moment" if locked else "") +
+                     " · double-click: open it big (theme, cut, lock)")
         with tile:
             ui.label(f"{n + 1}" + (" 🔒" if locked else "")).classes(
                 "absolute left-1 top-0 text-[10px] font-bold text-white").style("text-shadow:0 0 3px #000")
@@ -5187,8 +5189,9 @@ class Page:
                 ui.button("Take it out", icon="remove_circle_outline",
                           on_click=lambda: self.draft_take_out(r)).props("outline no-caps color=negative") \
                     .tooltip("The clip before it plays on for its time, so the later cuts stay put")
-                ui.button("Open in the Library", icon="photo_library",
-                          on_click=lambda: self.open_in_library(r["path"], "Make video")).props("flat no-caps")
+                ui.button("Open it big", icon="open_in_full",
+                          on_click=lambda: self.shot_window(r["path"], "Make video")).props("flat no-caps") \
+                    .tooltip("Theme, cut, lock, split (or double-click the clip)")
             if r["kind"] == "video":
                 self.lock_area(r, "story")
 
