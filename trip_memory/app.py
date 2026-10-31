@@ -891,7 +891,7 @@ class Page:
                     self.story_block(number, members)
         self.choose_more = None
         self.more_files_button()
-        if self.choose_focus_card is not None:
+        if self.choose_focus_card is not None and not getattr(self, "choose_keep_scroll", False):
             ui.run_javascript(f"setTimeout(() => getHtmlElement({self.choose_focus_card.id})"
                               f".scrollIntoView({{block: 'center'}}), 300)")
         self.choose_focus = None
@@ -1294,15 +1294,20 @@ class Page:
 
     def part_dialog(self, it: dict, a: float, b: float, title: str, actions: list[tuple],
                     taken: list[tuple[float, float, int]] | None = None,
-                    made: list[tuple[float, float, str]] | None = None, extra=None, on_hide=None) -> None:
+                    made: list[tuple[float, float, str]] | None = None, extra=None, on_hide=None,
+                    full: bool = False) -> None:
         """A big window to choose a part of a video: it plays that part (silently, again and again), the strip below
         shows the whole clip (move the mouse along it to look), and the green handles set the part.
         actions: (label, icon, callback(start, end), props) buttons; a callback returning True closes the window."""
         full0, full1 = kept_part(it) or (0.0, float(it["duration"] or 0))
         part = {"min": round(max(full0, a), 1), "max": round(min(full1, b), 1)}
-        with ui.dialog() as dialog, ui.card().classes("w-[60rem] max-w-full gap-2"):
+        with ui.dialog().props("maximized" if full else "") as dialog, \
+                ui.card().classes("w-full h-full gap-2 overflow-auto" if full else "w-[60rem] max-w-full gap-2"):
             ui.label(title).classes("text-lg font-semibold")
-            box = self.preview(it, "width:100%;height:min(60vh,520px)", part["min"], part["max"], view="part")
+            height = "max(240px,calc(100vh - 360px))" if full else "min(60vh,520px)"
+            with ui.element("div").classes("w-full").on("dblclick", lambda: dialog.close()) \
+                    .tooltip("Double-click: close and go back"):
+                box = self.preview(it, f"width:100%;height:{height}", part["min"], part["max"], view="part")
             shade = "position:absolute;top:0;bottom:0;background:rgba(15,23,42,.65)"
             ui.html(f'<div data-scrub-for="{box}" style="position:relative;height:48px;margin:4px 10px 0;'
                     f'border-radius:4px;overflow:hidden;background:#e2e8f0;cursor:col-resize">'
@@ -1334,7 +1339,7 @@ class Page:
             label = ui.label().classes("text-sm font-medium text-green-800 px-2")
             ui.label("Move the mouse along the strip to look through the clip (click plays from there). Drag the "
                      "green bar's middle to move the same length to another moment, or its ends to make it longer "
-                     "or shorter.").classes("text-xs text-gray-500 px-2")
+                     "or shorter. Double-click the picture to close.").classes("text-xs text-gray-500 px-2")
 
             def show() -> None:
                 label.text = (f"{fmt_length(part['min'])}–{fmt_length(part['max'])} · "
@@ -1579,14 +1584,20 @@ class Page:
         path = it["path"]
         changed = changed if changed is not None else {"any": False}
         changed["again"] = False
+        story = it.get("story")
         for old in list(self.window_box):  # windows closed before
             if isinstance(old, ui.dialog) and not old.value:
                 old.delete()
 
-        def after() -> None:  # when the window closes: the page behind shows what changed
+        def after() -> None:  # when the window closes: the page behind shows what changed, at the same spot
             if changed["any"] and not changed["again"]:
                 self.stale = True
+                self.choose_focus, self.choose_focus_path = story, path  # Choose files draws down to the shot
+                self.choose_keep_scroll = True
                 self.refresh_all()
+                self.choose_keep_scroll = False
+                ui.run_javascript("for (const ms of [150, 450, 900]) setTimeout(() => { if (window.tmShotScroll != "
+                                  "null) window.scrollTo(0, window.tmShotScroll); }, ms)")
 
         def mark() -> None:
             changed["any"] = True
@@ -1655,10 +1666,13 @@ class Page:
             dialog.close()
 
         if it["kind"] != "video":
-            with self.window_box, ui.dialog() as dialog, ui.card().classes("w-[60rem] max-w-full gap-2"):
+            with self.window_box, ui.dialog().props("maximized") as dialog, \
+                    ui.card().classes("w-full h-full gap-2 overflow-auto"):
                 ui.label(Path(path).name).classes("text-lg font-semibold")
-                ui.image(data_url(it["thumb"])).props("fit=contain").style("width:100%;height:min(60vh,520px)") \
-                    .classes("rounded bg-gray-800")
+                ui.image(data_url(it["thumb"])).props("fit=contain") \
+                    .style("width:100%;height:max(240px,calc(100vh - 200px))") \
+                    .classes("rounded bg-gray-800").on("dblclick", lambda: dialog.close()) \
+                    .tooltip("Double-click: close and go back")
                 controls(dialog)
                 with ui.row().classes("w-full justify-end"):
                     ui.button("Close", on_click=dialog.close).props("flat no-caps")
@@ -1710,7 +1724,7 @@ class Page:
              ("Cut: keep only this part", "content_cut", keep, "outline no-caps"),
              ("Make this a shot", "add_box", make_and_reopen, "color=green no-caps")],
             made=[(x["start"], x["end"], f"shot {k}") for k, x in enumerate(shots, 1)],
-            extra=controls, on_hide=after)
+            extra=controls, on_hide=after, full=True)
 
     async def open_in_library(self, path: str, name: str) -> None:
         """Double-click on a shot anywhere: show just that shot in the Library, with a button back here."""
@@ -5618,6 +5632,11 @@ function tmClipDrop(e, el, n) {
 // Dragging a clip or a theme near the top or bottom of the window scrolls the page, faster the closer you get.
 let tmDragY = null, tmDragTimer = null;
 document.addEventListener('dragover', (e) => { tmDragY = e.clientY; });
+// Where you were on the page when you double-clicked a shot (the big window stops the page scrolling, so it is
+// read here, before the window opens): closing the window brings you back to it.
+document.addEventListener('dblclick', () => {
+  if (!document.querySelector('.q-dialog')) window.tmShotScroll = window.scrollY;
+}, true);
 document.addEventListener('dragstart', () => {
   clearInterval(tmDragTimer);
   tmDragTimer = setInterval(() => {
