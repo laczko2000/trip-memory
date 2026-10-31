@@ -1535,6 +1535,18 @@ class Page:
         self.story_page = 1
         self.choose_view.refresh()
 
+    def choose_order(self) -> list[str]:
+        """The files of Choose files in the order they are on the page (story by story, look-alikes together)."""
+        shown = self.choose_shown()
+        out = []
+        for number in sorted({it["story"] or 0 for it in shown}):
+            sets: dict[int, list[str]] = {}
+            for it in shown:
+                if (it["story"] or 0) == number:
+                    sets.setdefault(it["similar_set"] or 0, []).append(it["path"])
+            out += [p for group in sets.values() for p in group]
+        return out
+
     def choose_shown_files(self, chosen: bool) -> None:
         self.trip.set_chosen([it["path"] for it in self.choose_shown()], chosen)
         self.refresh_choose()
@@ -1607,6 +1619,8 @@ class Page:
         changed = changed if changed is not None else {"any": False}
         changed["again"] = False
         history = changed.setdefault("undo", [])  # (what, how to take it back): the Undo button in the window
+        # Previous / Next go through the files in the order of the place you opened it from.
+        order = self.choose_order() if name == "Choose files" else [x["path"] for x in self.all_items]
         story = it.get("story")
         for old in list(self.window_box):  # windows closed before
             if isinstance(old, ui.dialog) and not old.value:
@@ -1626,6 +1640,16 @@ class Page:
 
         def controls(dialog) -> None:
             shots = self.trip.shots_from(path) if it["kind"] == "video" else []
+            if path in order:  # big Previous / Next on the sides: the next file without closing
+                k = order.index(path)
+                for side, step, icon in (("left", -1, "chevron_left"), ("right", 1, "chevron_right")):
+                    target = order[k + step] if 0 <= k + step < len(order) else None
+                    if target is None:
+                        continue
+                    ui.button(icon=icon, on_click=lambda t=target: go(t, dialog)) \
+                        .props(f"round unelevated color=grey-9 size=xl data-nav={step}") \
+                        .style(f"position:fixed;{side}:10px;top:50%;transform:translateY(-50%);z-index:20;opacity:.85") \
+                        .tooltip(("Previous" if step < 0 else "Next") + " (← →)")
             with ui.row().classes("w-full items-center gap-3 px-2"):
                 ui.checkbox("In the video", value=bool(it["chosen"]),
                             on_change=lambda e: (self.trip.set_chosen([path], e.value), mark())).props("dense")
@@ -1712,6 +1736,13 @@ class Page:
             ui.notify(f"Highlight at {clock(t)} taken off.", timeout=1500)
             ui.run_javascript(f"tmHighlightsSet({json.dumps([m['t'] for m in self.trip.postits(path)])})")
             highlights_row.refresh()
+
+        def go(target: str, dialog) -> None:  # the next (or previous) file, in the same window
+            changed["again"] = True
+            ui.run_javascript(f"if (window.tmShotAnchor) window.tmShotAnchor.sel = '[data-tile=\"{clip_id(target)}\"]'")
+            with self.window_timers:
+                ui.timer(0.05, lambda: self.shot_window(target, name, changed), once=True)
+            dialog.close()
 
         def again() -> None:  # the same window, drawn again with what changed
             changed["again"] = True
@@ -5860,6 +5891,11 @@ function tmCropDown(e, box) {
 }
 // The shot window: Space plays and pauses the video, Shift puts a highlight at the second it is at.
 document.addEventListener('keydown', (e) => {
+  if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !e.repeat && !e.target.closest('.q-slider, .q-range')
+      && !['INPUT', 'TEXTAREA'].includes(e.target.tagName)) {
+    const b = document.querySelector(`.q-dialog [data-nav="${e.key === 'ArrowLeft' ? -1 : 1}"]`);
+    if (b) { e.preventDefault(); b.click(); return; }
+  }
   const holder = document.querySelector('.q-dialog [data-shotwin]');
   const box = holder && holder.querySelector('.tm-hover');
   if (!box || e.repeat || ['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
