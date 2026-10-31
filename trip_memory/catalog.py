@@ -385,7 +385,7 @@ class Trip:
                     sound=bool(r["clip_sound"]),  # videos are silent unless you switch their sound on
                     volume=1.0 if r["clip_volume"] is None else r["clip_volume"],
                     speed=r["speed"] or 1.0,
-                    effects=self._with_parts(r["effects"], turned),
+                    effects=self._with_parts(r["effects"], turned, r["path"]),
                     overlay=shown.get(r["path"]),
                     focus=where.get(r["path"]),
                     crop=json.loads(r["crop"]) if r.get("crop") else None,
@@ -394,16 +394,106 @@ class Trip:
             )
         return result
 
-    @staticmethod
-    def _with_parts(effects: str | None, turned: dict[str, int]) -> dict | None:
-        """A shot's effects; a collage also gets how each of its photos is turned."""
+    def _with_parts(self, effects: str | None, turned: dict[str, int], lead: str = "") -> dict | None:
+        """A shot's effects; a collage also gets how each of its photos is turned, how you framed each one in
+        its place, and the layout you chose."""
         if not effects:
             return None
         fx = json.loads(effects)
         for key in ("collage", "side"):
             if fx.get(key):
                 fx["turns"] = [turned.get(p, 0) for p in fx[key]]
+                framed = self.tile_frames()
+                fx["frames"] = [framed.get(p) for p in [lead, *fx[key]]]
+                fx["layout"] = self.collage_layouts().get(lead) or ""
         return fx
+
+    def set_side_start(self, path: str, k: int, start: float) -> None:
+        """Which moment a video plays next to the others (k = its place, 0 = the shot itself): from `start` s on."""
+        rows = self.query("SELECT effects, trim_start, trim_end, duration FROM items WHERE path = ?", (path,))
+        if not rows:
+            return
+        r = rows[0]
+        start = max(0.0, float(start))
+        if k == 0:
+            length = (r["trim_end"] or 0) - (r["trim_start"] or 0)
+            start = min(start, max(0.0, (r["duration"] or 0) - length))
+            self.execute("UPDATE items SET trim_start = ?, trim_end = ? WHERE path = ?",
+                         (round(start, 2), round(start + length, 2), path))
+            return
+        fx = json.loads(r["effects"]) if r["effects"] else {}
+        starts = list(fx.get("starts") or [])
+        if 0 < k <= len(starts):
+            starts[k - 1] = round(start, 2)
+            fx["starts"] = starts
+            self.execute("UPDATE items SET effects = ? WHERE path = ?", (json.dumps(fx), path))
+
+    def tile_frames(self) -> dict[str, dict]:
+        """How you framed each picture in a collage or side by side: {path: {"x", "y" (0-1: where the visible part
+        sits, 0.5 = the middle), "z" (zoom, 1 = just filling its place)}}. Kept through a new Auto-edit."""
+        rows = self.query("SELECT value FROM meta WHERE key = 'tile_frames'")
+        return json.loads(rows[0]["value"]) if rows else {}
+
+    def set_tile_frame(self, path: str, x: float, y: float, z: float) -> None:
+        frames = self.tile_frames()
+        frames[path] = {"x": round(min(1.0, max(0.0, x)), 4), "y": round(min(1.0, max(0.0, y)), 4),
+                        "z": round(min(4.0, max(1.0, z)), 3)}
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('tile_frames', ?)", (json.dumps(frames),))
+
+    def collage_layouts(self) -> dict[str, str]:
+        """The layout you chose for a collage, by its first photo (a key of render.LAYOUTS)."""
+        rows = self.query("SELECT value FROM meta WHERE key = 'collage_layouts'")
+        return json.loads(rows[0]["value"]) if rows else {}
+
+    def set_collage_layout(self, path: str, layout: str) -> None:
+        layouts = self.collage_layouts()
+        layouts[path] = layout
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('collage_layouts', ?)", (json.dumps(layouts),))
+
+    def swap_together(self, path: str, a: int, b: int) -> str:
+        """Swap two places in a collage or side by side (0 = the shot itself). Swapping the first one makes the
+        other the shot: returns the path the cut now goes by."""
+        key, members = self.together(path)
+        if not key:
+            return path
+        order = [path, *members]
+        if not (0 <= a < len(order) and 0 <= b < len(order)) or a == b:
+            return path
+        order[a], order[b] = order[b], order[a]
+        if order[0] == path:
+            self.set_together(path, key, order[1:], keep_order=True)
+            return path
+        return self.replace_lead(path, order[0], key, order[1:])
+
+    def replace_lead(self, old: str, new: str, key: str, members: list[str]) -> str:
+        """The collage's first place goes to another of its pictures: the cut keeps its place and length."""
+        rows = self.query("SELECT * FROM items WHERE path = ?", (old,))
+        if not rows:
+            return old
+        r = rows[0]
+        fx = json.loads(r["effects"]) if r["effects"] else {}
+        was = dict(zip(fx.get(key) or [], fx.get("starts") or []))
+        if key == "side":
+            first_start = r["trim_start"] or 0.0
+            fx = {"side": members, "starts": [first_start if m == old else was.get(m, 0.0) for m in members]}
+            length = (r["trim_end"] or 0) - (r["trim_start"] or 0)
+            start = was.get(new, 0.0)
+            trim = (start, start + length)
+        else:
+            fx = {**fx, "collage": members}
+            trim = (None, None)
+        layouts = self.collage_layouts()
+        if old in layouts:
+            self.set_collage_layout(new, layouts[old])
+        with self._lock:
+            self.db.execute("UPDATE items SET effects = NULL, effects_why = NULL, position = NULL, cut_out = 0 WHERE path = ?",
+                            (old,))
+            self.db.execute("UPDATE items SET effects = ?, effects_why = ?, position = ?, seconds = ?, transition = ?, "
+                            "trim_start = ?, trim_end = ?, cut_out = 0 WHERE path = ?",
+                            (json.dumps(fx), r["effects_why"], r["position"], r["seconds"], r["transition"],
+                             trim[0], trim[1], new))
+            self.db.commit()
+        return new
 
     def split_collage(self, path: str) -> None:
         """Show a collage's photos one after another again, each for the time it popped in for."""
@@ -858,7 +948,7 @@ class Trip:
                 return key, list(fx[key])
         return None, []
 
-    def set_together(self, path: str, key: str, members: list[str]) -> None:
+    def set_together(self, path: str, key: str, members: list[str], keep_order: bool = True) -> None:
         """Change the shots that play on this cut with it (a collage's photos or the videos next to it). The ones
         taken off leave the video; with none left it plays alone."""
         row = self.query("SELECT effects, seconds, trim_start, trim_end FROM items WHERE path = ?", (path,))
@@ -866,7 +956,8 @@ class Trip:
             return
         fx = json.loads(row[0]["effects"]) if row[0]["effects"] else {}
         old = list(fx.get(key) or [])
-        members = [m for m in dict.fromkeys(members) if m != path][: 3 if key == "collage" else 2]
+        # (videos side by side may show other moments of the same clip, even of itself)
+        members = (list(members) if key == "side" else [m for m in dict.fromkeys(members) if m != path])[: 3 if key == "collage" else 2]
         self.checkpoint("changing a collage" if key == "collage" else "changing the videos side by side")
         if key == "collage":
             seconds = row[0]["seconds"] or 2.0

@@ -265,12 +265,18 @@ def _side_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
     graph, prev = [], "0:v"
     clips = [(str(item.path), start, item.rotation, (_hdr_to_sdr() if item.hdr else ""))] + \
             [(p, float(a), int(t or 0), "") for p, a, t in zip(others, starts, turns)]
-    for k, ((path, at, turn, look), (x, y, tw, th)) in enumerate(zip(clips, tiles)):
+    framed = list(fx.get("frames") or [])
+    framed += [None] * (len(clips) - len(framed))
+    for k, ((path, at, turn, look), (x, y, tw, th), frame) in enumerate(zip(clips, tiles, framed)):
         n = inputs.count("-i")
         inputs += ["-ss", f"{at:.3f}", "-t", f"{length:.3f}", "-i", path]
         delay = SIDE_STAGGER * k
+        f = frame or {}
+        z, fx_, fy_ = max(1.0, float(f.get("z") or 1.0)), float(f.get("x", 0.5)), float(f.get("y", 0.5))
+        # (as you framed it: zoomed in, the visible part where you moved it; see frame_crop)
         graph.append(f"[{n}:v]{look}{rotate_filter(turn)}setpts=PTS-STARTPTS+{delay:.3f}/TB,"
-                     f"scale={tw}:{th}:force_original_aspect_ratio=increase,setsar=1,crop={tw}:{th},fps={FPS},"
+                     f"scale={2 * round(tw * z / 2)}:{2 * round(th * z / 2)}:force_original_aspect_ratio=increase,setsar=1,"
+                     f"crop={tw}:{th}:(iw-{tw})*{fx_:.4f}:(ih-{th})*{fy_:.4f},fps={FPS},"
                      f"tpad=stop_mode=clone:stop_duration={length:.3f},format=yuva420p[s{k}]")
         graph.append(f"[{prev}][s{k}]overlay={x}:{y}:eof_action=pass:format=auto[o{k}]")
         prev = f"o{k}"
@@ -431,12 +437,28 @@ RESHUFFLE_FADE = 0.3  # seconds the change of view takes
 COLLAGE_GAP_SHARE = 0.008  # the thin dark line between tiles, as a share of the video's width
 
 
-def collage_tiles(count: int, w: int, h: int) -> list[tuple[int, int, int, int]]:
+# The layouts you can choose for a collage, by how many photos it has ("" = the usual one).
+LAYOUTS = {2: {"": "Side by side", "stack": "One above the other"},
+           3: {"": "Big left, two small", "big-right": "Big right, two small", "row": "Three in a row"},
+           4: {"": "2 × 2 grid", "row": "Four in a row", "big-left": "Big left, three small"}}
+
+
+def collage_tiles(count: int, w: int, h: int, layout: str = "") -> list[tuple[int, int, int, int]]:
     """Where each photo of a collage goes (x, y, width, height): 2 side by side, 3 as one big and two small,
-    4 as a 2x2 grid. An upright (phone) video stacks them instead."""
+    4 as a 2x2 grid (or the layout you chose, see LAYOUTS). An upright (phone) video stacks them instead."""
     g = max(2, round(w * COLLAGE_GAP_SHARE))
     upright = h > w
     half_w, half_h = (w - g) // 2, (h - g) // 2
+    if layout == "row" and count >= 3 and not upright:
+        tw = (w - g * (count - 1)) // count
+        return [(k * (tw + g), 0, tw, h) for k in range(count)]
+    if layout == "stack" and count == 2:
+        return [(0, 0, w, half_h), (0, h - half_h, w, half_h)]
+    if layout == "big-right" and count == 3 and not upright:
+        return [(w - half_w, 0, half_w, h), (0, 0, half_w, half_h), (0, h - half_h, half_w, half_h)]
+    if layout == "big-left" and count == 4 and not upright:
+        third = (h - 2 * g) // 3
+        return [(0, 0, half_w, h)] + [(w - half_w, k * (third + g), half_w, third) for k in range(3)]
     if count == 2:
         return [(0, 0, w, half_h), (0, h - half_h, w, half_h)] if upright else \
             [(0, 0, half_w, h), (w - half_w, 0, half_w, h)]
@@ -448,6 +470,23 @@ def collage_tiles(count: int, w: int, h: int) -> list[tuple[int, int, int, int]]
             (0, h - half_h, half_w, half_h), (w - half_w, h - half_h, half_w, half_h)]
 
 
+def frame_crop(iw: int, ih: int, tw: int, th: int, frame: dict | None) -> tuple[float, float, float, float]:
+    """The part of a picture (iw x ih) that shows in a place (tw x th), as you framed it: zoomed in by "z" (1 = just
+    filling it) with the visible part at "x", "y" (0 = left/top, 0.5 = the middle, 1 = right/bottom), like CSS
+    object-fit: cover with object-position x% y% and scale(z) around that point."""
+    f = frame or {}
+    z = max(1.0, float(f.get("z") or 1.0))
+    x, y = float(f.get("x", 0.5)), float(f.get("y", 0.5))
+    scale = max(tw / iw, th / ih) * z
+    w, h = tw / scale, th / scale
+    left, top = x * (iw - w), y * (ih - h)
+    return left, top, left + w, top + h
+
+
+def fit_frame(img: Image.Image, tw: int, th: int, frame: dict | None) -> np.ndarray:
+    return np.asarray(img.resize((tw, th), Image.LANCZOS, box=frame_crop(img.width, img.height, tw, th, frame)))
+
+
 def _collage_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
     """Several photos on screen together, popping in one after another (on the beats where they'd have been cut)."""
     fx = item.effects or {}
@@ -457,13 +496,15 @@ def _collage_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
     seconds = item.seconds or s.photo_seconds
     w, h = s.width, s.height
     tiles, pictures = [], []
-    places = collage_tiles(len(paths), w, h)
-    for path, turn, (x, y, tw, th) in zip(paths, turns, places):
+    places = collage_tiles(len(paths), w, h, fx.get("layout") or "")
+    framed = list(fx.get("frames") or [])
+    framed += [None] * (len(paths) - len(framed))
+    for path, turn, frame, (x, y, tw, th) in zip(paths, turns, framed, places):
         with Image.open(path) as img:
             img = ImageOps.exif_transpose(img).convert("RGB").rotate(-turn, expand=True)
             img.thumbnail((2400, 2400))
             pictures.append(img.copy())
-            tiles.append((x, y, np.asarray(ImageOps.fit(img, (tw, th), Image.LANCZOS))))
+            tiles.append((x, y, fit_frame(img, tw, th, frame)))
     frames = max(1, round(seconds * FPS))
     # A long collage changes its view now and then: the same photos move round one place (fresh on screen
     # without new photos). Each view is a whole picture; the change is a quick cross-fade.
@@ -478,7 +519,7 @@ def _collage_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
             frame = np.full((h, w, 3), 12, np.uint8)
             for i, pic in enumerate(pictures):
                 x, y, tw, th = places[(i + r) % len(paths)]
-                frame[y:y + th, x:x + tw] = np.asarray(ImageOps.fit(pic, (tw, th), Image.LANCZOS))
+                frame[y:y + th, x:x + tw] = fit_frame(pic, tw, th, framed[i])
             views.append(frame)
         return views[turn % len(paths)]
     layer = np.asarray(titles.draw(item.overlay, w, h)) if item.overlay and (

@@ -430,3 +430,15 @@ def test_a_zoomed_in_video_keeps_just_that_part():
     assert crop_filter(None) == "" and crop_filter({"zoom": 1.0}) == ""
     f = crop_filter({"zoom": 2.0, "x": 0.9, "y": 0.5})  # (the frame can't leave the picture)
     assert "iw/2.0000" in f and "x=iw*0.5000" in f and "y=ih*0.2500" in f
+
+
+def test_a_picture_framed_in_its_collage_place():
+    from trip_memory.render import frame_crop, collage_tiles, LAYOUTS
+    # A wide picture in a tall place: the middle by default, the left edge at x=0, zoomed in twice: half as much.
+    assert frame_crop(400, 100, 100, 100, None) == (150.0, 0.0, 250.0, 100.0)
+    assert frame_crop(400, 100, 100, 100, {"x": 0, "y": 0.5, "z": 1}) == (0.0, 0.0, 100.0, 100.0)
+    left, top, right, bottom = frame_crop(400, 100, 100, 100, {"x": 1, "y": 1, "z": 2})
+    assert (right - left, bottom - top) == (50.0, 50.0) and right == 400.0 and bottom == 100.0
+    for count, layouts in LAYOUTS.items():
+        for name in layouts:
+            assert len(collage_tiles(count, 1920, 1080, name)) == count

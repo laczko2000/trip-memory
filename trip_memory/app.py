@@ -1968,13 +1968,16 @@ class Page:
         element.on("dblclick", doubled)
 
     def shot_window(self, path: str, name: str = "", changed: dict | None = None, at: float | None = None,
-                    moment: dict | None = None) -> None:
+                    moment: dict | None = None, whole: bool = False) -> None:
         """Double-click on a shot anywhere: it opens big, right where you are. Watch it, cut it, make good parts of
         a video shots of their own (and drop the rest), lock a part, tick it, give it a theme.
         at: open it at this second (a suggestion: the seconds around it). moment: {"activity", "name", "t"} when
         opened from a moment's page: This is the moment / Not this, right there."""
         it = next((x for x in self.trip.items(parts=True) if x["path"] == path), None)
         if it is None:
+            return
+        if not whole and name in ("Make video", "the Storyboard") and self.trip.together(path)[0]:
+            self.collage_window(path)  # (a collage or videos side by side: its own window)
             return
         if it.get("part_of"):  # a part Auto-edit made: its video
             it = next((x for x in self.trip.items() if x["path"] == it["part_of"]), it)
@@ -6426,12 +6429,15 @@ class Page:
         items = {it["path"]: it for it in self.items}
         side = bool(fx.get("side"))
         paths = [r["path"], *(fx.get("side") or fx.get("collage") or [])]
-        places = (side_tiles if side else collage_tiles)(len(paths), w, h)
+        places = side_tiles(len(paths), w, h) if side else \
+            collage_tiles(len(paths), w, h, self.trip.collage_layouts().get(r["path"]) or "")
+        framed = self.trip.tile_frames()
         appear = list(fx.get("appear") or [])
         starts = list(fx.get("starts") or [])
         out = []
         for k, (path, (x, y, tw, th)) in enumerate(zip(paths, places)):
-            tile = {"x": round(x / w, 4), "y": round(y / h, 4), "w": round(tw / w, 4), "h": round(th / h, 4)}
+            tile = {"x": round(x / w, 4), "y": round(y / h, 4), "w": round(tw / w, 4), "h": round(th / h, 4),
+                    "f": framed.get(path) or {}}
             if k:
                 it = items.get(path) or {}
                 thumb = data_url(it.get("thumb")) if it.get("thumb") else ""
@@ -7083,7 +7089,7 @@ class Page:
                           on_click=lambda: self.draft_take_out(r)).props("outline no-caps color=negative") \
                     .tooltip("The clip before it plays on for its time, so the later cuts stay put")
                 ui.button("Open it big", icon="open_in_full",
-                          on_click=lambda: self.shot_window(r["path"], "Make video")).props("flat no-caps") \
+                          on_click=lambda: self.shot_window(r["path"], "Make video", whole=True)).props("flat no-caps") \
                     .tooltip("Theme, cut, lock, split (or double-click the clip)")
             self.together_panel(r)
             if r["kind"] == "video":
@@ -7128,8 +7134,190 @@ class Page:
                         .tooltip("Another photo into the collage" if kind == "collage"
                                  else "Another upright video next to this one")
             if key:
+                ui.button("Edit it big", icon="dashboard_customize", on_click=lambda: self.collage_window(r["path"])) \
+                    .props("unelevated dense no-caps size=sm color=purple") \
+                    .tooltip("Move and zoom each picture in its place, swap places, layout (or double-click the clip)")
                 ui.label("The photos pop in one after another on this cut." if key == "collage" else
                          "They play together; the sound is the first one's.").classes("text-xs text-gray-600")
+
+    def collage_window(self, path: str) -> None:
+        """A collage or videos side by side, big, as it will look: move and zoom each picture in its place, swap
+        places, take one out or add one, choose the layout; for videos the moment each one plays, and turn them."""
+        from .render import LAYOUTS, collage_tiles, side_tiles
+
+        key, members = self.trip.together(path)
+        if not key:
+            self.shot_window(path, whole=True)
+            return
+        w, h = RESOLUTIONS[self.resolution.value] if getattr(self, "resolution", None) else (1920, 1080)
+        state = {"path": path, "dirty": False, "n": 0}
+        for old in list(self.window_box):  # (windows closed before)
+            old.delete()
+
+        def close() -> None:
+            dialog.close()
+            if state["dirty"]:
+                self.draft_changed("Collage changed." if key == "collage" else "Videos side by side changed.")
+
+        with self.window_box, ui.dialog().props("maximized transition-show=none transition-hide=none") as dialog, \
+                ui.card().classes("w-full h-full gap-2 p-3 tm-bigwin"):
+
+            @ui.refreshable
+            def body() -> None:
+                nonlocal key, members
+                lead = state["path"]
+                key, members = self.trip.together(lead)
+                if not key:
+                    ui.label("Nothing else on this cut any more.").classes("text-gray-600")
+                    return
+                rows = {it["path"]: it for it in self.trip.items(parts=True)}
+                order = [lead, *members]
+                layouts = LAYOUTS.get(len(order), {}) if key == "collage" else {}
+                layout = self.trip.collage_layouts().get(lead) or ""
+                places = (collage_tiles(len(order), w, h, layout) if key == "collage" else side_tiles(len(order), w, h))
+                framed = self.trip.tile_frames()
+                lead_row = rows.get(lead) or {}
+                fx = json.loads(lead_row.get("effects") or "{}") if lead_row.get("effects") else {}
+                starts = [lead_row.get("trim_start") or 0.0, *(fx.get("starts") or [])]
+                length = max(0.5, (lead_row.get("trim_end") or 0) - (lead_row.get("trim_start") or 0)) \
+                    if key == "side" else 0.0
+                room = (3 if key == "collage" else 2) - len(members)
+                with ui.row().classes("w-full items-center gap-2 no-wrap"):
+                    ui.label(("🧩 Collage: " if key == "collage" else "🎞 Side by side: ")
+                             + f"{len(order)} {'photos' if key == 'collage' else 'videos'}").classes("text-lg font-semibold")
+                    ui.label("Drag a picture to move it · scroll or pinch to zoom · drag ⠿ onto another place to swap")\
+                        .classes("text-sm text-gray-600")
+                    ui.space()
+                    for name, label in layouts.items():
+                        ui.button(label, on_click=lambda n=name: set_layout(n)).props(
+                            "dense no-caps size=sm " + ("unelevated color=purple" if name == layout else "outline color=purple"))
+                    if room > 0:
+                        ui.button("+ Add one", on_click=lambda: self.together_pick(
+                            rows.get(lead) or {"path": lead}, key, members, None, after=added)) \
+                            .props("outline dense no-caps size=sm color=purple")
+                    ui.button("Done", icon="check", on_click=close).props("unelevated no-caps color=primary")
+                state["n"] += 1
+                stage_id = f"tm-cstage-{state['n']}"
+                with ui.element("div").classes("tm-fill w-full flex items-center justify-center").style("min-height:0"):
+                    below = 150 if key == "side" else 100  # (the title row, and the moment sliders for videos)
+                    stage = ui.element("div").props(f"id={stage_id}").style(
+                        f"position:relative;aspect-ratio:{w}/{h};width:min(100%, calc((100vh - {below}px) * {w / h:.4f}));"
+                        "background:#0c0c0c;border-radius:6px;overflow:hidden;flex:none")
+                    with stage:
+                        for k, (p, (x, y, tw, th)) in enumerate(zip(order, places)):
+                            it = rows.get(p) or {}
+                            f = framed.get(p) or {}
+                            video = key == "side"
+                            try:
+                                src = self.video_src(Path(it.get("part_of") or p))
+                            except ValueError:
+                                src = data_url(it.get("thumb")) if it.get("thumb") else ""
+                            if not video and (it.get("rotation") or 0) and it.get("thumb"):
+                                src = data_url(it["thumb"])  # (turned by you: its preview is turned too)
+                            a = float(starts[k]) if video and k < len(starts) else 0.0
+                            tile = ui.element("div").classes("tm-ctile").props(
+                                f'data-k={k} data-x={f.get("x", 0.5)} data-y={f.get("y", 0.5)} data-z={f.get("z", 1)} '
+                                f'data-a={a:.3f} data-len={length:.3f}').style(
+                                f"position:absolute;left:{100 * x / w:.3f}%;top:{100 * y / h:.3f}%;width:{100 * tw / w:.3f}%;"
+                                f"height:{100 * th / h:.3f}%;overflow:hidden;cursor:grab;touch-action:none")
+                            with tile:
+                                turn = it.get("rotation") or 0 if video else 0
+                                rot = f"rotate:{turn}deg;" if turn else ""
+                                if video:
+                                    ui.html(f'<video class="tm-cm" src="{src}" muted playsinline preload="auto" '
+                                            f'style="width:100%;height:100%;object-fit:cover;pointer-events:none;{rot}"></video>')
+                                else:
+                                    ui.html(f'<img class="tm-cm" src="{src}" draggable="false" '
+                                            'style="width:100%;height:100%;object-fit:cover;pointer-events:none">')
+                                with ui.row().classes("tm-cbtn absolute gap-1 items-center").style(
+                                        "top:6px;left:6px;right:6px;z-index:2"):
+                                    ui.html('<span class="tm-chandle" draggable="true" title="Drag onto another place to '
+                                            'swap them" style="cursor:move;background:#fffd;border-radius:4px;'
+                                            'padding:0 6px;font-size:18px">⠿</span>')
+                                    ui.label("first" if k == 0 else f"{k + 1}").classes(
+                                        "text-xs px-1 rounded bg-white/80")
+                                    ui.html('<span class="tm-cz text-xs px-1 rounded empty:hidden" style="background:#fffc"></span>')
+                                    ui.space()
+                                    ui.html('<button data-zoom="0.8" title="Zoom out" style="background:#fffd;'
+                                            'border-radius:4px;width:24px">−</button>')
+                                    ui.html('<button data-zoom="1.25" title="Zoom in" style="background:#fffd;'
+                                            'border-radius:4px;width:24px">+</button>')
+                                    ui.button(icon="center_focus_strong", on_click=lambda p=p: reset(p)) \
+                                        .props("dense round size=xs color=white text-color=black") \
+                                        .tooltip("Back to the middle, not zoomed")
+                                    if video:
+                                        ui.button(icon="rotate_left", on_click=lambda p=p: turn_it(p, -90)) \
+                                            .props("dense round size=xs color=white text-color=black").tooltip("Turn left")
+                                        ui.button(icon="rotate_right", on_click=lambda p=p: turn_it(p, 90)) \
+                                            .props("dense round size=xs color=white text-color=black").tooltip("Turn right")
+                                    if k:
+                                        ui.button(icon="swap_horiz", on_click=lambda p=p: self.together_pick(
+                                            rows.get(lead) or {"path": lead}, key, members, p, after=added)) \
+                                            .props("dense round size=xs color=white text-color=purple") \
+                                            .tooltip("Swap it for another")
+                                        ui.button(icon="close", on_click=lambda k=k: take_off(k)) \
+                                            .props("dense round size=xs color=white text-color=negative") \
+                                            .tooltip("Take it off this cut")
+                    stage.on("tmframe", lambda e, order=order: framed_one(order, e.args.get("detail") or e.args), ["detail"])
+                    stage.on("tmswap", lambda e: swap(e.args.get("detail") or e.args), ["detail"])
+                if key == "side":  # which moment each video plays
+                    with ui.row().classes("w-full gap-4 no-wrap"):
+                        for k, p in enumerate(order):
+                            it = rows.get(p) or {}
+                            top = max(0.0, (it.get("duration") or 0) - length)
+                            with ui.column().classes("gap-0 flex-1"):
+                                ui.label(f"{'First' if k == 0 else f'Video {k + 1}'}: plays from "
+                                         f"{fmt_length(float(starts[k]) if k < len(starts) else 0)}") \
+                                    .classes("text-xs text-gray-600")
+                                ui.slider(min=0, max=round(top, 2) or 0.01, step=0.1,
+                                          value=min(top, float(starts[k]) if k < len(starts) else 0.0)) \
+                                    .props("dense color=purple").classes("w-full") \
+                                    .on("change", lambda e, k=k: moment(k, float(e.args)))
+                ui.run_javascript(f"setTimeout(() => tmCollageEdit('{stage_id}'), 50)")
+
+            def framed_one(order: list[str], d: dict) -> None:
+                k = int(d.get("k", 0))
+                if 0 <= k < len(order):
+                    self.trip.set_tile_frame(order[k], float(d["x"]), float(d["y"]), float(d["z"]))
+                    state["dirty"] = True
+
+            def reset(p: str) -> None:
+                self.trip.set_tile_frame(p, 0.5, 0.5, 1.0)
+                state["dirty"] = True
+                body.refresh()
+
+            def set_layout(name: str) -> None:
+                self.trip.set_collage_layout(state["path"], name)
+                state["dirty"] = True
+                body.refresh()
+
+            def swap(d: dict) -> None:
+                state["path"] = self.trip.swap_together(state["path"], int(d["a"]), int(d["b"]))
+                state["dirty"] = True
+                body.refresh()
+
+            def take_off(k: int) -> None:
+                _, now = self.trip.together(state["path"])
+                self.trip.set_together(state["path"], key, [m for n, m in enumerate(now) if n != k - 1])
+                state["dirty"] = True
+                body.refresh()
+
+            def turn_it(p: str, degrees: int) -> None:
+                self.trip.rotate(p, degrees)
+                state["dirty"] = True
+                body.refresh()
+
+            def moment(k: int, start: float) -> None:
+                self.trip.set_side_start(state["path"], k, start)
+                state["dirty"] = True
+                body.refresh()
+
+            def added() -> None:
+                state["dirty"] = True
+                body.refresh()
+
+            body()
+        dialog.open()
 
     def _upright(self, r: dict) -> bool:
         rows = [dict(r)]
@@ -7140,7 +7328,8 @@ class Page:
         self.trip.set_together(r["path"], key, members)
         self.draft_changed(message)
 
-    def together_pick(self, r: dict, key: str, members: list[str], replacing: str | None) -> None:
+    def together_pick(self, r: dict, key: str, members: list[str], replacing: str | None,
+                      after: Callable[[], None] | None = None) -> None:
         """Choose a shot for this cut's collage (photos) or to play next to it (upright videos): from the same
         story, ones not in the video yet."""
         board = self.trip.storyboard()
@@ -7171,7 +7360,11 @@ class Page:
                     def use(it=it) -> None:
                         dialog.close()
                         new = [it["path"] if m == replacing else m for m in members] if replacing else [*members, it["path"]]
-                        self.together_set(r, key, new, "Swapped." if replacing else "Added to this cut.")
+                        if after:  # (from the collage window: it shows the change itself)
+                            self.trip.set_together(r["path"], key, new)
+                            after()
+                        else:
+                            self.together_set(r, key, new, "Swapped." if replacing else "Added to this cut.")
 
                     tile.on("click", use)
             with ui.row().classes("justify-end w-full"):
@@ -7956,6 +8149,84 @@ function tmSeekRuler(e, el, total) {
 // the keys and the red line work on it as on the draft. Three layers: the clip now, the one before it (while the
 // next one fades in) and the next one getting ready.
 window.tmInst = window.tmInst || {};
+// The collage window: drag a picture to move it in its place, scroll (or pinch) to zoom, drag the ⠿ handle onto
+// another place to swap them. Each change goes to the app as a 'tmframe' or 'tmswap' event on the stage.
+function tmCollageEdit(stageId) {
+  const stage = document.getElementById(stageId);
+  if (!stage || stage._ready) return;
+  stage._ready = true;
+  const send = (name, detail) => stage.dispatchEvent(new CustomEvent(name, {bubbles: false, detail: detail}));
+  const media = (tile) => tile.querySelector('.tm-cm');
+  const show = (tile) => {
+    const m = media(tile), x = +tile.dataset.x, y = +tile.dataset.y, z = +tile.dataset.z;
+    m.style.objectPosition = `${100 * x}% ${100 * y}%`;
+    m.style.transformOrigin = `${100 * x}% ${100 * y}%`;
+    m.style.scale = z;
+    const label = tile.querySelector('.tm-cz'); if (label) label.textContent = z > 1.01 ? `${z.toFixed(1)}×` : '';
+  };
+  const room = (tile) => {  // how far the picture can move (px on screen) left-right and up-down
+    const m = media(tile), tw = tile.clientWidth, th = tile.clientHeight, z = +tile.dataset.z;
+    const nw = m.naturalWidth || m.videoWidth || tw, nh = m.naturalHeight || m.videoHeight || th;
+    const s = Math.max(tw / nw, th / nh);
+    return [nw * s * z - tw, nh * s * z - th];
+  };
+  const save = (tile) => send('tmframe', {k: +tile.dataset.k, x: +tile.dataset.x, y: +tile.dataset.y, z: +tile.dataset.z});
+  stage.querySelectorAll('.tm-ctile').forEach(tile => {
+    show(tile);
+    let drag = null, timer = null;
+    tile.addEventListener('pointerdown', e => {
+      if (e.target.closest('.tm-cbtn') || e.target.closest('.tm-chandle')) return;
+      e.preventDefault(); tile.setPointerCapture(e.pointerId);
+      drag = {x: e.clientX, y: e.clientY, fx: +tile.dataset.x, fy: +tile.dataset.y, room: room(tile)};
+      tile.style.cursor = 'grabbing';
+    });
+    tile.addEventListener('pointermove', e => {
+      if (!drag) return;
+      const [rx, ry] = drag.room;
+      if (rx > 1) tile.dataset.x = Math.min(1, Math.max(0, drag.fx - (e.clientX - drag.x) / rx));
+      if (ry > 1) tile.dataset.y = Math.min(1, Math.max(0, drag.fy - (e.clientY - drag.y) / ry));
+      show(tile);
+    });
+    const end = () => { if (!drag) return; drag = null; tile.style.cursor = 'grab'; save(tile); };
+    tile.addEventListener('pointerup', end); tile.addEventListener('pointercancel', end);
+    tile.addEventListener('wheel', e => {
+      e.preventDefault();
+      const z = Math.min(4, Math.max(1, +tile.dataset.z * Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.002))));
+      tile.dataset.z = z; show(tile);
+      clearTimeout(timer); timer = setTimeout(() => save(tile), 350);
+    }, {passive: false});
+    tile.querySelectorAll('[data-zoom]').forEach(b => b.addEventListener('click', e => {
+      e.stopPropagation();
+      tile.dataset.z = Math.min(4, Math.max(1, +tile.dataset.z * (+b.dataset.zoom))); show(tile); save(tile);
+    }));
+    const handle = tile.querySelector('.tm-chandle');
+    if (handle) handle.addEventListener('dragstart', e => { e.dataTransfer.setData('text/plain', tile.dataset.k); });
+    tile.addEventListener('dragover', e => { e.preventDefault(); tile.style.outline = '3px solid #a855f7'; });
+    tile.addEventListener('dragleave', () => { tile.style.outline = ''; });
+    tile.addEventListener('drop', e => {
+      e.preventDefault(); tile.style.outline = '';
+      const from = +e.dataTransfer.getData('text/plain');
+      if (!isNaN(from) && from !== +tile.dataset.k) send('tmswap', {a: from, b: +tile.dataset.k});
+    });
+    // A video plays its moment over and over.
+    const v = tile.querySelector('video.tm-cm');
+    if (v) {
+      const a = +tile.dataset.a, len = +tile.dataset.len;
+      v.addEventListener('loadedmetadata', () => { v.currentTime = a; v.play().catch(() => {}); show(tile); });
+      v.addEventListener('timeupdate', () => { if (v.currentTime > a + len || v.currentTime < a - 0.3) v.currentTime = a; });
+    }
+    const im = tile.querySelector('img.tm-cm');
+    if (im) im.addEventListener('load', () => show(tile));
+  });
+}
+// How you framed a picture in its place of a collage (see render.frame_crop): the visible part at x% y%,
+// zoomed in z times around that point, cut to its place.
+function tmFrameCss(f) {
+  f = f || {};
+  const x = f.x === undefined ? 0.5 : f.x, y = f.y === undefined ? 0.5 : f.y, z = Math.max(1, f.z || 1), k = 1 - 1 / z;
+  return `object-position:${100 * x}% ${100 * y}%;transform-origin:${100 * x}% ${100 * y}%;scale:${z};` +
+    `clip-path:inset(${100 * y * k}% ${100 * (1 - x) * k}% ${100 * (1 - y) * k}% ${100 * x * k}%);`;
+}
 function tmInstant(id, data, onTime) {
   const el = document.getElementById(id);
   if (window.tmInst[id]) window.tmInst[id].stop();
@@ -8002,10 +8273,10 @@ function tmInstant(id, data, onTime) {
     bg.style.backgroundImage = c.fb ? `url("${c.fb}")` : 'none';
     if (c.tiles) {  // a collage or videos side by side: the first in its place, the others around it
       const t0 = c.tiles[0], box = `left:${100 * t0.x}%;top:${100 * t0.y}%;width:${100 * t0.w}%;height:${100 * t0.h}%;`;
-      [v, im].forEach(m => { const hide = m.style.display; m.style.cssText = 'position:absolute;object-fit:cover;' + box; m.style.display = hide; });
+      [v, im].forEach(m => { const hide = m.style.display; m.style.cssText = 'position:absolute;object-fit:cover;' + box + tmFrameCss(t0.f); m.style.display = hide; });
       c.tiles.slice(1).forEach(t => {
         const el = document.createElement(t.k === 'v' ? 'video' : 'img');
-        el.style.cssText = `position:absolute;left:${100 * t.x}%;top:${100 * t.y}%;width:${100 * t.w}%;height:${100 * t.h}%;object-fit:cover;opacity:0;transition:opacity .15s,transform .18s`;
+        el.style.cssText = `position:absolute;left:${100 * t.x}%;top:${100 * t.y}%;width:${100 * t.w}%;height:${100 * t.h}%;object-fit:cover;opacity:0;transition:opacity .15s` + ';' + tmFrameCss(t.f);
         if (t.rot) el.style.rotate = t.rot + 'deg';
         if (t.k === 'v') { el.muted = true; el.playsInline = true; el.preload = 'auto'; el.onloadedmetadata = () => { el._ready = true; }; }
         el.onerror = () => { el.onerror = null; if (t.fb && t.k !== 'v') el.src = t.fb; };
