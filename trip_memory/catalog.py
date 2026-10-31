@@ -958,6 +958,27 @@ class Trip:
     def _set_meta_json(self, key: str, value) -> None:
         self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, json.dumps(value)))
 
+    def edit_stage(self) -> str:
+        """"rough": you arrange the clips freely (each as long as you made it), nothing snaps to the music yet.
+        "fitted": the cuts sit on your pins, and every change keeps them there (see reflow)."""
+        return "fitted" if self._meta_json("edit_stage", "rough") == "fitted" else "rough"
+
+    def set_edit_stage(self, stage: str) -> None:
+        self._set_meta_json("edit_stage", "fitted" if stage == "fitted" else "rough")
+
+    def fit_to_music(self, pins: list[float], photo_seconds: float = 4.0,
+                     transition_seconds: float = 0.8) -> dict:
+        """The rough cut onto the music: every cut moves to the nearest pin it can reach (see reflow).
+        Returns {"moved": cuts that moved, "gone": clips past the end of the music, "longer"/"shorter": clips}."""
+        self.checkpoint("fitting to the music")
+        before = {r["path"]: self.screen_length(r, photo_seconds) for r in self.storyboard()}
+        gone = self.reflow(pins, None, photo_seconds, transition_seconds)
+        after = {r["path"]: self.screen_length(r, photo_seconds) for r in self.storyboard()}
+        diffs = [after[p] - before[p] for p in after if p in before]
+        self.set_edit_stage("fitted")
+        return {"moved": sum(1 for d in diffs if abs(d) > 0.05), "gone": gone,
+                "longer": sum(1 for d in diffs if d > 0.05), "shorter": sum(1 for d in diffs if d < -0.05)}
+
     @staticmethod
     def _frame_at(frames: dict, path: str, t: float) -> np.ndarray | None:
         times, vectors = frames.get(path, ([], None))

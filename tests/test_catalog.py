@@ -922,3 +922,26 @@ def test_reflow_puts_a_longer_shot_on_the_next_pins_at_normal_speed(tmp_path, mo
     board = [(Path(r["path"]).name, round(r["seconds"], 1)) for r in trip.storyboard()]
     assert gone == 1 and board == [("p0.jpg", 4.0), ("p1.jpg", 2.0), ("p2.jpg", 2.0)]
     assert all((r["speed"] or 1.0) == 1.0 for r in trip.storyboard())
+
+
+def test_rough_cut_snaps_to_the_pins_only_when_fitted_and_the_fit_can_be_undone(tmp_path, monkeypatch):
+    from trip_memory import autoedit
+
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    for n, colour in enumerate(["red", "green", "blue"]):
+        exif = Image.Exif()
+        exif[306] = f"2025:07:03 1{n}:00:00"
+        Image.new("RGB", (160, 90), colour).save(trip_dir / f"p{n}.jpg", exif=exif)
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    for r in trip.items():
+        trip.execute("UPDATE items SET seconds = 2.6, transition = ? WHERE path = ?", (autoedit.HARD_CUT, r["path"]))
+    assert trip.edit_stage() == "rough"
+    result = trip.fit_to_music([2.0, 4.0, 6.0, 8.0])
+    assert trip.edit_stage() == "fitted" and result["moved"] == 3 and result["gone"] == 0
+    assert [round(r["seconds"], 1) for r in trip.storyboard()] == [2.0, 2.0, 2.0]
+    assert trip.undo() == "fitting to the music"
+    assert trip.edit_stage() == "rough" and [round(r["seconds"], 1) for r in trip.storyboard()] == [2.6, 2.6, 2.6]

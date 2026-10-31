@@ -1128,7 +1128,8 @@ class Page:
         thumb = data_url(it["thumb"])
         if it["kind"] != "video" or not self.media_route:
             if thumb:
-                ui.image(thumb).props("fit=contain").style(size).classes("rounded bg-gray-800")
+                ui.image(thumb).props(f'fit=contain data-shot="{clip_id(it["path"])}"').style(size) \
+                    .classes("rounded bg-gray-800")
             return box
         file = Path(it.get("part_of") or it["path"])  # a part of a long clip plays from the clip itself
         src = self.video_src(file)
@@ -1143,7 +1144,7 @@ class Page:
         skim = "" if view in ("part", "cut") else f'data-skim0="{skim0:.2f}" data-skim1="{end:.2f}" '
         length = f"✂ {fmt_length(kept[1] - kept[0])}" if kept else fmt_length(it["duration"])
         ui.html(
-            f'<div id="{box}" class="tm-hover" {skim}data-sound="{int(sound)}" data-start="{start:.2f}" data-end="{end:.2f}" data-rot="{it.get("rotation") or 0}" '
+            f'<div id="{box}" class="tm-hover" data-shot="{clip_id(it["path"])}" {skim}data-sound="{int(sound)}" data-start="{start:.2f}" data-end="{end:.2f}" data-rot="{it.get("rotation") or 0}" '
             f'style="position:relative;overflow:hidden;border-radius:4px;background:#222;{size}">'
             f'<img src="{thumb}" style="width:100%;height:100%;object-fit:contain">'
             f'<video data-src="{src}" {"" if sound else "muted "}playsinline preload="none" '
@@ -1743,8 +1744,6 @@ class Page:
                 if not changed["any"]:
                     self.editor_card.refresh()
             if changed["any"] and not changed["again"]:
-                if name == "Make video" and self.auto_update:  # the draft catches up by itself
-                    self.update_due = time.time() + self.AUTO_PAUSE
                 self.stale = True
                 self.choose_focus, self.choose_focus_path = story, path  # Choose files draws down to the shot
                 self.choose_keep_scroll = True
@@ -1752,6 +1751,8 @@ class Page:
                 self.choose_keep_scroll = False
                 if name != "Make video":
                     ui.run_javascript("for (const ms of [150, 450, 900]) setTimeout(tmBackToShot, ms)")
+            elif changed.get("moved") and not changed["again"] and name != "Make video":
+                ui.run_javascript("for (const ms of [50, 300]) setTimeout(tmBackToShot, ms)")
 
         def back_to_clip() -> None:
             """Back in the editor: on the clip you opened, the red line at its start, the timeline showing it."""
@@ -1912,7 +1913,9 @@ class Page:
 
         def go(target: str, dialog) -> None:  # the next (or previous) file, in the same window
             changed["again"] = True
-            ui.run_javascript(f"if (window.tmShotAnchor) window.tmShotAnchor.sel = '[data-tile=\"{clip_id(target)}\"]'")
+            changed["moved"] = True  # (closing it brings you to this file, not the one you opened first)
+            ui.run_javascript(f"if (window.tmShotAnchor) window.tmShotAnchor.sel = "
+                              f"'[data-tile=\"{clip_id(target)}\"], [data-shot=\"{clip_id(target)}\"]'")
             with self.window_timers:
                 ui.timer(0.05, lambda: self.shot_window(target, name, changed), once=True)
             dialog.close()
@@ -2043,12 +2046,13 @@ class Page:
                     speed_row()
                     sound_row(in_video)
                 with ui.row().classes("w-full items-center gap-2"):
-                    ui.button("Update and show me", icon="play_circle", on_click=update_and_show) \
+                    ui.button("Show me in the video", icon="play_circle", on_click=update_and_show) \
                         .props("unelevated no-caps color=indigo") \
-                        .tooltip("Makes the draft again (only the changed clips) and plays this clip in the video, "
-                                 "with a second before and after it")
+                        .tooltip("Plays this clip in the video straight away, with a second before and after it")
                     ui.label("Clips play at normal speed unless you pick another here. Use this part in the video: "
-                             "the part you set ends on the nearest pin and the clips after it move along."
+                             + ("the part you set ends on the nearest pin and the clips after it move along."
+                                if self.trip.edit_stage() == "fitted" else
+                                "the clip plays that part (rough cut: Fit to the music puts it on a pin later).")
                              if it["kind"] == "video" else
                              "Turn or crop the photo above, then see it in the video here.") \
                         .classes("text-xs text-gray-600 flex-1")
@@ -2077,12 +2081,13 @@ class Page:
             was = (row["trim_start"], row["trim_end"], row.get("speed") or 1.0)
             value = round(max(0.25, min(3.0, value)), 2)
             self.trip.set_speed(in_video["path"], value)
-            self.trip.fit_length(in_video["path"], slot)  # its place, at the speed you chose
+            if self.trip.edit_stage() == "fitted":  # its place, at the speed you chose (rough cut: the same part)
+                self.trip.fit_length(in_video["path"], slot)
             self.reflow_board()
             history.append((f"speed {value:g}×", lambda: (self.trip.set_trim(in_video["path"], was[0], was[1]),
                                                           self.trip.set_speed(in_video["path"], was[2]))))
             mark()
-            ui.notify(f"Plays at {value:g}×. Update and show me to see it.", timeout=2500)
+            ui.notify(f"Plays at {value:g}×. Show me in the video to see it.", timeout=2500)
             speed_row.refresh()
 
         @ui.refreshable
@@ -2090,30 +2095,23 @@ class Page:
             shown = changed.get("preview")
             if not shown:
                 return
-            ui.html(f'<video id="tm-mini" src="/drafts/{shown["file"]}#t={shown["a"]:.2f}" autoplay muted playsinline '
-                    f'controls data-a="{shown["a"]:.2f}" data-b="{shown["b"]:.2f}" '
-                    'ontimeupdate="if (this.currentTime > parseFloat(this.dataset.b)) '
-                    '{ this.currentTime = parseFloat(this.dataset.a); }" '
-                    'style="width:100%;max-height:34vh;background:#000;border-radius:6px"></video>',
+            ui.html(self.instant_html("tm-mini", "width:100%;height:34vh;border-radius:6px"),
                     sanitize=False).classes("w-full")
+            ui.run_javascript(f"setTimeout(() => {{ const m = tmInstant('tm-mini', {json.dumps(shown['data'])}); "
+                              "if (m) m.play(); }, 50)")
             ui.label(f"Your clip in the video ({shown['when']}), with a second before and after, again and again.") \
                 .classes("text-xs text-indigo-900")
 
         async def update_and_show() -> None:
-            n = ui.notification("Making the draft again (only the changed clips)…", spinner=True, timeout=None)
-            try:
-                await self.make_draft()
-            finally:
-                n.dismiss()
-            draft = self.draft_info()
             board = self.trip.storyboard()
             k = next((i for i, r in enumerate(board) if r["path"] == in_video["path"]), None)
-            if not draft or k is None:
+            if k is None:
                 ui.notify("This clip is not in the video now.", type="warning")
                 return
             times = self.editor_times(board)
             start, length = times[k]["start"], times[k]["length"]
-            changed["preview"] = {"file": draft["file"], "a": max(0.0, start - 1.0), "b": start + length + 1.0,
+            loop = (max(0.0, start - 1.0), start + length + 1.0)
+            changed["preview"] = {"data": self.instant_data(board, times, loop),
                                   "when": f"{fmt_length(start)}–{fmt_length(start + length)}"}
             preview_box.refresh()
             ui.run_javascript("setTimeout(() => { const m = document.getElementById('tm-mini'); "
@@ -2126,9 +2124,12 @@ class Page:
             gone = self.reflow_board()  # at its own speed: it ends on the nearest pin, the rest move along
             history.append(("use in the video", lambda: self.trip.undo()))
             mark()
-            ui.notify(f"The video now uses {fmt_length(a)}–{fmt_length(b)} at its own speed, ending on the nearest "
-                      "pin; the clips after it moved along" + (f" ({gone} at the end left the video)" if gone else "")
-                      + ". The draft updates.", type="positive", multi_line=True)
+            fitted = self.trip.edit_stage() == "fitted"
+            ui.notify(f"The video now uses {fmt_length(a)}–{fmt_length(b)} at its own speed"
+                      + (", ending on the nearest pin; the clips after it moved along" if fitted else
+                         "; the clips after it moved along (Fit to the music puts the cuts on your pins)")
+                      + (f" ({gone} at the end left the video)" if gone else "") + ".", type="positive",
+                      multi_line=True)
             return True
 
         if it["kind"] != "video":
@@ -4886,6 +4887,7 @@ class Page:
                   if unused and not short else "")
         ui.notify(f"First cut ready: {len(result.shots)} shots, {fmt_length(result.length)}{on_beat}. "
                   f"Fine-tune it below, then make the video.{short}", type="positive", multi_line=True, timeout=10000)
+        self.trip.set_edit_stage("fitted" if music else "rough")  # Auto-edit already cuts on the pins
         self.story_page = 1
         self.refresh_all()
 
@@ -5278,57 +5280,156 @@ class Page:
         now = self.draft_board()
         changed = bool(draft) and ([tuple(x) for x in draft["board"]] != now
                                    or draft.get("muted", []) != self.trip.muted_titles())
-        if draft and self.editor_full:
-            self.editor_window(draft, board, now, changed)
+        rough = self.trip.edit_stage() != "fitted"
         with ui.card().classes("w-full bg-slate-50"):
             with ui.row().classes("w-full items-center gap-3"):
-                ui.label("Draft, fine-tune, finalize").classes("text-lg font-semibold")
-                if draft:
-                    ui.label("✓ Draft up to date" if not changed else "You changed things since this draft") \
-                        .classes("text-sm " + ("text-green-700" if not changed else "text-orange-700"))
-            ui.label("1. Make a quick draft (small, fast). 2. Open the editor: the whole screen, the draft on top, "
-                     "every clip below as a box as long as it plays. Click a clip to change its speed, part or shot; "
-                     "drag clips to swap them; the cuts stay on your pins and the draft updates by itself. "
-                     "3. Finalize: the full-quality video.").classes("text-sm text-gray-600")
+                ui.label("Edit, fit to the music, finalize").classes("text-lg font-semibold")
+                ui.label("✂ Rough cut" if rough else "♪ Fitted to the music") \
+                    .classes("text-sm " + ("text-orange-700" if rough else "text-green-700"))
+            ui.label("1. Open the editor: the whole screen, every clip below as a box as long as it plays. Changes "
+                     "play straight away. 2. Rough cut: put the clips in order, change their parts and speeds, "
+                     "nothing snaps yet. 3. Fit to the music: one press puts every cut on your pins. "
+                     "4. Finalize: the full-quality video.").classes("text-sm text-gray-600")
             with ui.row().classes("items-center gap-2"):
-                self.draft_button = ui.button("Update the draft" if draft else "Make a draft", icon="bolt",
-                                              on_click=self.make_draft).props("unelevated" if not draft or changed else "outline")
-                if draft:
-                    ui.button("Open the editor", icon="fullscreen", on_click=lambda: self.open_editor(True)) \
-                        .props("unelevated color=indigo no-caps").tooltip("Full screen (Esc or ✕ closes it)")
+                ui.button("Open the editor", icon="fullscreen", on_click=lambda: self.open_editor(True)) \
+                    .props("unelevated color=indigo no-caps").tooltip("Full screen (Esc or ✕ closes it)")
+                self.draft_button = ui.button("Exact preview", icon="bolt", on_click=self.make_draft) \
+                    .props("outline no-caps").tooltip("A small video made like the finished one (with the look and "
+                                                      "the transitions); it takes a while")
                 ui.button("Finalize the video", icon="movie", on_click=self.finalize).props("color=green") \
                     .tooltip("The full-quality video, saved in Movies › Trip Memory (clips the draft made are not reused: "
                              "they are smaller)")
                 self.draft_status = ui.label("").classes("text-sm text-gray-600")
+        if self.editor_full:  # (after the card: its status line and button are the editor's own)
+            self.editor_window(draft, board, now, changed)
 
     ZOOMS = {0: "Whole video", 20: "Wide", 40: "Normal", 80: "Close", 160: "Very close"}  # pixels per second
 
     def open_editor(self, on: bool) -> None:
         self.editor_full = on
         ui.run_javascript(f"document.body.style.overflow = '{'hidden' if on else ''}'")
+        if not on:
+            ui.run_javascript("for (const k in (window.tmInst || {})) window.tmInst[k].stop()")
         self.editor_card.refresh()
 
     def set_zoom(self, value: int) -> None:
         self.editor_zoom = value
         self.editor_card.refresh()
 
-    def editor_window(self, draft: dict, board: list[dict], now: list, changed: bool) -> None:
-        """The editor over the whole screen: the draft and the clip (or title) you picked on top, the timeline
-        below (titles, clips as long as they play, the music with your pins). Only the timeline scrolls."""
+    def set_stage(self, stage: str) -> None:
+        if stage == self.trip.edit_stage():
+            return
+        if stage == "fitted":
+            self.fit_to_music()
+            return
+        self.trip.set_edit_stage("rough")
+        ui.notify("Rough cut: every clip stays as long as you make it. Fit to the music when the order is right.",
+                  type="info")
+        self.editor_card.refresh()
+
+    def fit_to_music(self) -> None:
+        """One press: every cut of the rough cut moves to the nearest of your pins it can reach, at its own
+        speed (see the cut rules in Trip.reflow)."""
+        music = self.music_path()
+        pins = song_taps.final_taps(music, app_dir() / "music-taps") if music else None
+        if not pins:
+            ui.notify("Choose a song and put pins on it first (Music & audio): the cuts go on the pins.",
+                      type="warning", multi_line=True)
+            self.editor_card.refresh()
+            return
+        photo = self.photo_len.value if getattr(self, "photo_len", None) else 4.0
+        seconds = self.t_len.value if getattr(self, "t_len", None) else 0.8
+        result = self.trip.fit_to_music(pins, photo, seconds)
+        parts = [f"Fitted to the music: {result['moved']} cut{'s' if result['moved'] != 1 else ''} moved onto your pins"
+                 if result["moved"] else "Fitted to the music: every cut was on a pin already"]
+        if result["longer"] or result["shorter"]:
+            parts.append(f"{result['longer']} clip{'s' if result['longer'] != 1 else ''} longer, "
+                         f"{result['shorter']} shorter, all at their own speed")
+        if result["gone"]:
+            parts.append(f"{result['gone']} clip{'s' if result['gone'] > 1 else ''} past the end of the song "
+                         "left the video")
+        ui.notify(". ".join(parts) + ". Undo the fit takes it back.", type="positive", multi_line=True, timeout=8000)
+        self.reload()
+        self.storyboard_view.refresh()
+        self.editor_card.refresh()
+
+    def undo_fit(self) -> None:
+        if self.trip.undo_label() != "fitting to the music":
+            return
+        self.trip.undo()
+        ui.notify("Back to your rough cut, as it was before the fit.", type="info")
+        self.reload()
+        self.storyboard_view.refresh()
+        self.editor_card.refresh()
+
+    def instant_html(self, box: str, style: str) -> str:
+        """The instant player: three layers (the clip playing, the one before it fading out, the next one getting
+        ready) and a play button. tmInstant gives it a video's controls."""
+        layer = ('<div class="tm-slot" style="position:absolute;inset:0;opacity:0">'
+                 '<video muted playsinline preload="auto" style="position:absolute;inset:0;width:100%;height:100%;'
+                 'object-fit:contain"></video><img alt="" style="position:absolute;inset:0;width:100%;height:100%;'
+                 'object-fit:contain;display:none"><span class="tm-badge" style="position:absolute;right:6px;top:4px;'
+                 'font-size:11px;color:#fde68a;text-shadow:0 0 3px #000"></span></div>')
+        return (f'<div id="{box}" class="tm-instant" style="position:relative;overflow:hidden;background:#000;'
+                f'isolation:isolate;cursor:pointer;{style}" onclick="tmInstantToggle(event, this)">{layer * 3}'
+                '<div class="tm-iplay" style="position:absolute;left:10px;bottom:10px;z-index:900;width:38px;'
+                'height:38px;border-radius:50%;background:rgba(15,23,42,.75);color:white;display:flex;'
+                'align-items:center;justify-content:center;font-size:18px;pointer-events:none">▶</div></div>')
+
+    def instant_data(self, board: list[dict], times: list[dict], loop: tuple[float, float] | None = None) -> dict:
+        """What the instant player plays: each clip straight from your file (its part, speed, turn, crop, sound),
+        at its place in the video, and the song."""
+        clips = []
+        for r, at in zip(board, times):
+            file = Path(r.get("part_of") or r["path"])
+            thumb = data_url(r["thumb"]) if r.get("thumb") else ""
+            try:
+                src = self.video_src(file)
+            except ValueError:
+                src = ""
+            crop = json.loads(r["crop"]) if r.get("crop") else None
+            clip = {"k": "v" if r["kind"] == "video" else "p", "src": src, "fb": thumb,
+                    "st": round(at["start"], 3), "len": round(at["length"], 3), "rot": r.get("rotation") or 0,
+                    "crop": crop, "rev": bool(r.get("reverse"))}
+            if r["kind"] == "video":
+                clip.update(a=round(r["trim_start"] if r["trim_start"] is not None else (r["keep_start"] or 0.0), 3),
+                            sp=r.get("speed") or 1.0, snd=bool(r.get("clip_sound")),
+                            vol=1.0 if r.get("clip_volume") is None else float(r["clip_volume"]))
+                if not src:
+                    clip.update(k="p", src=thumb)
+            elif file.suffix.lower() not in (".jpg", ".jpeg", ".png", ".webp", ".gif") or not src:
+                clip["src"] = thumb  # (a HEIC photo: the browser shows its preview picture)
+            clips.append(clip)
+        music = self.music_path()
+        total = max([t["start"] + t["length"] for t in times] + [0.1])
+        return {"clips": clips, "total": round(total, 3), "music": serve_song(str(Path(music).expanduser())) if music else "",
+                "mvol": self.music_vol.value if getattr(self, "music_vol", None) else 0.5,
+                "fade": self.t_len.value if getattr(self, "t_len", None) else 0.8,
+                "loop": list(loop) if loop else None}
+
+    def editor_window(self, draft: dict | None, board: list[dict], now: list, changed: bool) -> None:
+        """The editor over the whole screen: the player and the clip (or title) you picked on top, the timeline
+        below (titles, clips as long as they play, the music with your pins). Only the timeline scrolls.
+
+        The player plays your clips straight from the files (instant: no waiting after a change); the exact
+        preview, once made and while nothing changed, plays instead."""
         times = self.board_times(board, draft, changed)
         total = max([t["start"] + t["length"] for t in times] + [1.0])
         w, h = RESOLUTIONS[self.resolution.value] if getattr(self, "resolution", None) else (1920, 1080)
         resume = getattr(self, "draft_resume", 0.0) or 0.0
-        before = [tuple(x) for x in draft["board"]]
+        before = [tuple(x) for x in draft["board"]] if draft else None
+        exact = bool(draft) and not changed
+        rough = self.trip.edit_stage() != "fitted"
         live = "".join(
             f'<img class="tm-live-title" data-id="{b["id"]}" data-start="{b["at"]:.3f}" data-len="{float(b["length"]):.3f}" '
             f'data-fin="{float(b.get("fade_in") or 0):.3f}" data-fout="{float(b.get("fade_out") or 0):.3f}" '
             f'src="{self.live_title_png(b, w, h)}" style="position:absolute;inset:0;width:100%;height:100%;'
-            'opacity:0;pointer-events:none">'
+            'opacity:0;pointer-events:none;z-index:1000">'
             for b in self.title_bars(board, times) if b["kind"] == "timeline")
         music = self.music_path()
         pins = [p for p in (song_taps.final_taps(music, app_dir() / "music-taps") or []) if p <= total + 0.01] \
             if music else []
+        wave = f"/drafts/{draft['file']}" if exact else (serve_song(str(Path(music).expanduser())) if music else "")
         zoom = self.editor_zoom
         width = f"max(100%,{int(total * zoom)}px)" if zoom else "100%"
         with ui.element("div").classes("tm-editor").style(
@@ -5336,15 +5437,26 @@ class Page:
                 "flex-direction:column;padding:10px 14px;gap:8px"):
             with ui.row().classes("w-full items-center gap-3 no-wrap"):
                 ui.label("Editor").classes("text-lg font-semibold text-white")
-                ui.label("✓ Draft up to date" if not changed else
-                         ("Changes waiting: the draft updates by itself in a moment" if self.auto_update else
-                          "You changed things: press Update the draft")) \
-                    .classes("text-sm " + ("text-green-400" if not changed else "text-orange-300"))
+                stage = ui.toggle({"rough": "✂ Rough cut", "fitted": "♪ Fit to the music"},
+                                  value="rough" if rough else "fitted",
+                                  on_change=lambda e: self.set_stage(e.value)) \
+                    .props("dense no-caps toggle-color=orange color=grey-9 text-color=white")
+                stage.tooltip("Rough cut: arrange the clips freely, nothing snaps. Fit to the music: every cut goes "
+                              "on your pins, and stays there while you change things.")
+                if self.trip.undo_label() == "fitting to the music":
+                    ui.button("Undo the fit", icon="undo", on_click=self.undo_fit) \
+                        .props("dense flat no-caps color=orange")
+                ui.label("▶ Exact preview" if exact else "▶ Instant: straight from your files") \
+                    .classes("text-sm " + ("text-green-400" if exact else "text-sky-300")) \
+                    .tooltip("The instant player shows every change at once; the finished video adds the look and "
+                             "the transitions you chose. Exact preview makes a small video like the finished one."
+                             if not exact else "A small video made like the finished one")
                 ui.space()
-                ui.switch("Update by itself", value=self.auto_update, on_change=lambda e: self.set_auto_update(e.value)) \
-                    .props("dense dark color=orange")
-                ui.button("Update the draft", icon="bolt", on_click=self.make_draft) \
-                    .props("dense no-caps " + ("unelevated color=orange" if changed else "outline color=white"))
+                self.draft_status = ui.label("").classes("text-xs text-slate-300")
+                self.draft_button = ui.button("Exact preview", icon="bolt", on_click=self.make_draft) \
+                    .props("dense outline no-caps color=white") \
+                    .tooltip("Makes a small video like the finished one (with the look and transitions); it takes "
+                             "a while. Not needed while editing.")
                 ui.button("Add a title here", icon="title", on_click=self.add_timeline_title) \
                     .props("dense outline no-caps color=white") \
                     .tooltip("A new title on the clip you picked (or where the red line is)")
@@ -5352,12 +5464,15 @@ class Page:
                 ui.button(icon="close", on_click=lambda: self.open_editor(False)) \
                     .props("flat round dense color=white").tooltip("Close the editor (Esc)").classes("tm-editor-close")
             with ui.row().classes("w-full no-wrap gap-3").style("flex:1;min-height:0"):
+                if exact:
+                    player = (f'<video id="tm-draft" src="/drafts/{draft["file"]}#t={resume:.2f}" controls playsinline '
+                              'preload="auto" style="width:100%;height:100%;background:#000;border-radius:6px" '
+                              f'ontimeupdate="tmDraftNow(this.currentTime)" onseeked="tmDraftNow(this.currentTime)" '
+                              f'onloadedmetadata="tmDraftNow(this.currentTime, true)"></video>')
+                else:
+                    player = self.instant_html("tm-draft", "width:100%;height:100%;border-radius:6px")
                 ui.html(f'<div style="position:relative;height:100%;aspect-ratio:{w}/{h};max-width:100%;margin:0 auto">'
-                        f'<video id="tm-draft" src="/drafts/{draft["file"]}#t={resume:.2f}" controls playsinline '
-                        'preload="auto" style="width:100%;height:100%;background:#000;border-radius:6px" '
-                        f'ontimeupdate="tmDraftNow(this.currentTime)" onseeked="tmDraftNow(this.currentTime)" '
-                        f'onloadedmetadata="tmDraftNow(this.currentTime, true)"></video>{live}</div>',
-                        sanitize=False).style("flex:1;min-width:0;height:100%")
+                        f'{player}{live}</div>', sanitize=False).style("flex:1;min-width:0;height:100%")
                 with ui.column().classes("gap-2 no-wrap").style(
                         "width:380px;flex:none;height:100%;overflow-y:auto;background:#f8fafc;color:#0f172a;"
                         "border-radius:8px;padding:10px"):
@@ -5378,7 +5493,8 @@ class Page:
                     .props("dense no-caps size=sm toggle-color=indigo color=grey-9 text-color=white")
                 ui.html('<span id="tm-edclock" style="font:12px monospace;color:#94a3b8"></span>', sanitize=False)
                 ui.space()
-                ui.label("Orange: changed since the draft · ⏩/🐢: faster or slower").classes("text-xs text-slate-400")
+                ui.label(("Green lines: your pins (Fit to the music puts the cuts on them) · " if rough else "") +
+                         "Orange: changed since the exact preview · ⏩/🐢: faster or slower").classes("text-xs text-slate-400")
             with ui.element("div").props('id="tm-tl-scroll" onscroll="window.tmTlScroll = this.scrollLeft"') \
                     .style("flex:none;max-height:42vh;overflow:auto;background:#1e293b;border-radius:8px;padding:6px"):
                 with ui.element("div").style(f"position:relative;width:{width}") \
@@ -5412,10 +5528,14 @@ class Page:
                         for bar in bars:
                             self.title_bar(bar, total)
                     with ui.element("div").style("position:relative;height:80px"):
+                        if rough and pins:  # where Fit to the music will put the cuts
+                            ui.html("".join(f'<i style="position:absolute;top:0;bottom:0;left:{100 * p / total:.3f}%;'
+                                            'width:1px;background:rgba(34,197,94,.55);z-index:4"></i>' for p in pins),
+                                    sanitize=False).style("position:absolute;inset:0;pointer-events:none")
                         for n, r in enumerate(board):
-                            was = before[n] if n < len(before) else None
+                            was = before[n] if before and n < len(before) else None
                             self.draft_tile(n, r, times[n]["length"], times[n]["start"], total,
-                                            changed=was is None or tuple(was) != tuple(now[n]))
+                                            changed=before is not None and (was is None or tuple(was) != tuple(now[n])))
                         end = ui.element("div").classes("absolute rounded border-2 border-dashed border-slate-500 "
                                                          "flex items-center justify-center text-slate-400")
                         end.style("left:100%;top:0;bottom:0;width:22px;margin-left:-24px")
@@ -5434,9 +5554,12 @@ class Page:
                             f'border-radius:4px;overflow:hidden;cursor:ew-resize;touch-action:none" '
                             f'onpointerdown="tmScrubStart(event)" '
                             f'title="The music, with your pins (green): the cuts · drag to scrub">'
-                            f'<canvas id="tm-edwave" data-src="/drafts/{draft["file"]}" '
+                            f'<canvas id="tm-edwave" data-src="{wave}" data-secs="{total:.3f}" '
                             f'style="position:absolute;inset:0;width:100%;height:100%"></canvas>{ticks}</div>',
                             sanitize=False).classes("w-full")
+        if not exact:
+            data = json.dumps(self.instant_data(board, times))
+            ui.run_javascript(f"setTimeout(() => tmInstant('tm-draft', {data}, tmDraftNow), 50)")
         ui.run_javascript("setTimeout(tmEditorReady, 60)")
 
     def editor_times(self, board: list[dict]) -> list[dict]:
@@ -5752,9 +5875,8 @@ class Page:
                 self.lock_area(r, "story")
 
     def sound_changed(self) -> None:
-        """A clip's sound on or off, or louder: the draft is made again by itself when you pause."""
-        if self.auto_update:
-            self.update_due = time.time() + self.AUTO_PAUSE
+        """A clip's sound on or off, or louder: the instant player plays it so straight away."""
+        self.editor_card.refresh()
 
     SPEEDS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
 
@@ -5774,20 +5896,27 @@ class Page:
                 .props("dense label color=indigo").classes("w-full") \
                 .on("change", lambda e: self.draft_set_speed(r, length, float(e.args)))
             ui.label("Only if you want it: every clip plays at normal speed unless you pick another speed here. "
-                     "It keeps its place, so the cuts stay on your pins.").classes("text-xs text-gray-600")
+                     + ("It keeps its place, so the cuts stay on your pins." if self.trip.edit_stage() == "fitted" else
+                        "Rough cut: the same part plays, so the clip gets shorter or longer."))\
+                .classes("text-xs text-gray-600")
 
     def draft_set_speed(self, r: dict, length: float, speed: float) -> None:
         speed = round(max(0.25, min(3.0, speed)), 2)
         self.trip.set_speed(r["path"], speed)
-        self.trip.fit_length(r["path"], length)  # its place, at the speed you chose (shorter if the video ends)
+        if self.trip.edit_stage() == "fitted":  # its place, at the speed you chose (shorter if the video ends)
+            self.trip.fit_length(r["path"], length)  # (in the rough cut the same part plays, faster or slower)
         self.draft_changed(f"Clip {self.draft_pick + 1} plays at {speed:g}×.")
 
     def draft_reverse(self, r: dict, on: bool) -> None:
         self.trip.set_reverse(self.clip_of(r), on)
         self.draft_changed("Clip plays backwards." if on else "Clip plays forwards again.")
 
-    def reflow_board(self) -> int:
-        """The clips back on the music's pins at their own speed (see Trip.reflow): how many no longer fit."""
+    def reflow_board(self, force: bool = False) -> int:
+        """The clips back on the music's pins at their own speed (see Trip.reflow): how many no longer fit.
+        In the rough cut nothing snaps to the music (each clip stays as long as you made it) until you press
+        Fit to the music."""
+        if not force and self.trip.edit_stage() != "fitted":
+            return 0
         music = self.music_path()
         pins = song_taps.final_taps(music, app_dir() / "music-taps") if music else None
         photo = self.photo_len.value if getattr(self, "photo_len", None) else 4.0
@@ -5799,11 +5928,7 @@ class Page:
         if gone:
             message += (f" {gone} clip{'s' if gone > 1 else ''} at the end no longer fit{'' if gone > 1 else 's'} "
                         "the music and left the video.")
-        if self.auto_update:
-            self.update_due = time.time() + self.AUTO_PAUSE
-            ui.notify(message + " The draft updates by itself when you pause.", type="positive")
-        else:
-            ui.notify(message + " Update the draft to see it.", type="positive")
+        ui.notify(message, type="positive")
         self.reload()
         self.storyboard_view.refresh()
         self.editor_card.refresh()
@@ -5871,8 +5996,9 @@ class Page:
             if locked:
                 self.trip.add_lock(self.clip_of(r), a, b)
                 self._locks_changed(self.clip_of(r))
-            self.draft_changed(f"This clip now shows {fmt_length(a)}–{fmt_length(b)}, ending on the nearest pin; "
-                               "the clips after it moved along.")
+            self.draft_changed(f"This clip now shows {fmt_length(a)}–{fmt_length(b)}"
+                               + (", ending on the nearest pin" if self.trip.edit_stage() == "fitted" else "")
+                               + "; the clips after it moved along.")
             return True
 
         self.part_dialog(r, lo, hi, f"Choose the part of clip {self.draft_pick + 1} (now {length:.1f} s; it ends on the nearest pin)",
@@ -6357,14 +6483,16 @@ function tmEditorReady() {
   const draw = (peaks) => {
     const W = cv.width = cv.clientWidth * (window.devicePixelRatio || 1), H = cv.height = cv.clientHeight * (window.devicePixelRatio || 1);
     const g = cv.getContext('2d'); g.fillStyle = '#38bdf8'; g.globalAlpha = 0.75;
+    const secs = parseFloat(cv.dataset.secs), N = secs > 0 ? Math.round(secs / 0.02) : peaks.length;  // (the song: as far as the video goes)
     for (let x = 0; x < W; x++) {
-      const a = Math.floor(peaks.length * x / W), b = Math.max(a + 1, Math.floor(peaks.length * (x + 1) / W));
+      const a = Math.floor(N * x / W), b = Math.max(a + 1, Math.floor(N * (x + 1) / W));
       let m = 0; for (let i = a; i < b && i < peaks.length; i++) if (peaks[i] > m) m = peaks[i];
       g.fillRect(x, H / 2 - m * H / 2, 1, Math.max(1, m * H));
     }
   };
   window.tmWaves = window.tmWaves || {};
   const src = cv.dataset.src;
+  if (!src) return;
   if (window.tmWaves[src]) { draw(window.tmWaves[src]); return; }
   const Off = window.OfflineAudioContext || window.webkitOfflineAudioContext;
   fetch(src).then(r => r.arrayBuffer()).then(buf => new Promise((ok, bad) => {
@@ -6445,6 +6573,151 @@ function tmSeekRuler(e, el, total) {
   const v = document.getElementById('tm-draft'), r = el.getBoundingClientRect();
   if (v) { v.currentTime = total * (e.clientX - r.left) / r.width; tmDraftNow(v.currentTime); }
 }
+// The instant player: plays the clips straight from your files, one after another, with the song. It looks like a
+// video to the rest of the page (currentTime, paused, duration, play, pause, a 'seeked' event), so the scrubbing,
+// the keys and the red line work on it as on the draft. Three layers: the clip now, the one before it (while the
+// next one fades in) and the next one getting ready.
+window.tmInst = window.tmInst || {};
+function tmInstant(id, data, onTime) {
+  const el = document.getElementById(id);
+  if (window.tmInst[id]) window.tmInst[id].stop();
+  if (!el) return null;
+  const clips = data.clips, total = data.total, fade = data.fade || 0, loop = data.loop;
+  const slots = [...el.querySelectorAll('.tm-slot')];
+  slots.forEach(s => { s._i = -1; });
+  let music = null;
+  if (data.music) { music = new Audio(data.music); music.preload = 'auto'; music.volume = Math.min(1, data.mvol || 0.5); }
+  let playing = false, t = loop ? loop[0] : 0, t0 = 0, p0 = 0, raf = 0, dead = false;
+  const now = () => playing ? Math.min(total, t0 + (performance.now() - p0) / 1000) : t;
+  const button = el.querySelector('.tm-iplay');
+  const look = (s, c) => {  // turned and cropped like in the video
+    const m = c.k === 'v' ? s.querySelector('video') : s.querySelector('img');
+    const W = el.clientWidth || 16, H = el.clientHeight || 9;
+    const mw = m.videoWidth || m.naturalWidth || W, mh = m.videoHeight || m.naturalHeight || H;
+    let tf = '';
+    const rot = ((c.rot || 0) % 360 + 360) % 360;
+    if (rot) {
+      const side = rot === 90 || rot === 270;
+      const fit0 = Math.min(W / mw, H / mh), fit1 = side ? Math.min(W / mh, H / mw) : fit0;
+      tf += `rotate(${rot}deg) scale(${fit1 / fit0})`;
+    }
+    if (c.crop && c.crop.zoom > 1) {
+      m.style.transformOrigin = `${100 * c.crop.x}% ${100 * c.crop.y}%`;
+      tf += ` scale(${c.crop.zoom})`;
+    } else m.style.transformOrigin = '50% 50%';
+    return tf;
+  };
+  const place = (s, c, i) => {
+    s._i = i;
+    const v = s.querySelector('video'), im = s.querySelector('img');
+    if (c.k === 'v') {
+      im.style.display = 'none'; v.style.display = '';
+      if (v._src !== c.src) {
+        v._src = c.src; v._ready = false; v.src = c.src;
+        v.onloadedmetadata = () => { v._ready = true; v._tf = null; tick(true); };
+      }
+    } else {
+      v.pause(); v.style.display = 'none'; im.style.display = '';
+      if (im._src !== c.src) {
+        im._src = c.src; im.onerror = () => { im.onerror = null; if (c.fb && im.src !== c.fb) im.src = c.fb; };
+        im.onload = () => tick(true); im.src = c.src;
+      }
+    }
+    s.querySelector('.tm-badge').textContent = c.rev ? '⇆ backwards in the finished video' : '';
+  };
+  let shown = -1;
+  const tick = (hard) => {
+    const T = Math.min(now(), total - 0.02);  // (at the very end: its last picture)
+    for (let i = 0; i < clips.length; i++) {  // who goes on which layer
+      const c = clips[i];
+      if (!(T >= c.st - 2.5 && T < c.st + c.len)) continue;
+      const s = slots[i % slots.length];
+      if (s._i === i) continue;
+      const o = s._i >= 0 ? clips[s._i] : null;
+      if (o && T >= o.st && T < o.st + o.len) continue;  // (still showing: it waits)
+      place(s, c, i);
+    }
+    slots.forEach(s => {
+      const i = s._i;
+      if (i < 0) { s.style.opacity = 0; return; }
+      const c = clips[i], v = s.querySelector('video'), im = s.querySelector('img');
+      const on = T >= c.st && T < c.st + c.len;
+      s.style.opacity = on ? (i > 0 && fade > 0 ? Math.min(1, (T - c.st) / fade) : 1) : 0;
+      s.style.zIndex = i + 1;
+      const local = Math.max(0, Math.min(c.len, T - c.st));
+      if (c.k === 'v') {
+        v.style.transform = look(s, c);
+        const want = c.a + local * c.sp;
+        if (!v._ready) return;
+        if (on && playing) {
+          if (Math.abs(v.playbackRate - c.sp) > 0.001) v.playbackRate = c.sp;
+          v.muted = !c.snd; v.volume = Math.min(1, c.vol);
+          if (Math.abs(v.currentTime - want) > 0.3 && !v.seeking) v.currentTime = want;
+          if (v.paused) v.play().catch(() => {});
+        } else {
+          if (!v.paused) v.pause();
+          const at = on ? want : c.a;
+          if ((hard || Math.abs(v.currentTime - at) > 0.05) && !v.seeking) v.currentTime = at;
+        }
+      } else {
+        im.style.transform = look(s, c) + ` scale(${1 + 0.05 * local / Math.max(0.1, c.len)})`;  // a gentle push in
+      }
+    });
+    if (button) button.textContent = playing ? '❚❚' : '▶';
+    if (onTime && (hard || T !== shown)) onTime(T);
+    shown = T;
+  };
+  const frame = () => {
+    if (dead) return;
+    if (!el.isConnected) { stop(); return; }
+    if (playing) {
+      let T = now();
+      if (loop && T >= loop[1]) { t = loop[0]; t0 = t; p0 = performance.now(); if (music) music.currentTime = t; T = t; }
+      if (T >= total - 0.01) { playing = false; t = total; if (music) music.pause(); }
+      if (music && !music.paused && T < (music.duration || 1e9) && Math.abs(music.currentTime - T) > 0.25) music.currentTime = T;
+    }
+    tick(false);
+    raf = requestAnimationFrame(frame);
+  };
+  const stop = () => {
+    dead = true; cancelAnimationFrame(raf); playing = false;
+    if (music) { music.pause(); music.src = ''; }
+    slots.forEach(s => { const v = s.querySelector('video'); if (v) v.pause(); });
+    if (window.tmInst[id] && window.tmInst[id].el === el) delete window.tmInst[id];
+  };
+  const seek = (x) => {
+    t = Math.max(0, Math.min(total, x));
+    if (playing) { t0 = t; p0 = performance.now(); }
+    if (music && t < (music.duration || 1e9)) music.currentTime = t;
+    tick(true);
+    let done = false;
+    const fire = () => { if (!done) { done = true; el.dispatchEvent(new Event('seeked')); } };
+    const s = slots.find(s => s._i >= 0 && t >= clips[s._i].st && t < clips[s._i].st + clips[s._i].len);
+    const v = s && clips[s._i].k === 'v' ? s.querySelector('video') : null;
+    if (v && v.seeking) v.addEventListener('seeked', fire, {once: true});
+    setTimeout(fire, v && v.seeking ? 250 : 0);
+  };
+  Object.defineProperty(el, 'currentTime', {configurable: true, get: now, set: seek});
+  Object.defineProperty(el, 'paused', {configurable: true, get: () => !playing});
+  Object.defineProperty(el, 'duration', {configurable: true, get: () => total});
+  el.play = () => {
+    if (playing) return Promise.resolve();
+    if (t >= total - 0.05) t = loop ? loop[0] : 0;
+    playing = true; t0 = t; p0 = performance.now();
+    if (music && t < (music.duration || 1e9)) { music.currentTime = t; music.play().catch(() => {}); }
+    tick(true);
+    return Promise.resolve();
+  };
+  el.pause = () => { if (!playing) return; t = now(); playing = false; if (music) music.pause(); tick(true); };
+  window.tmInst[id] = {el: el, stop: stop};
+  if (id === 'tm-draft' && window.tmDraftT !== undefined) t = Math.min(total, window.tmDraftT);  // where you were
+  tick(true);
+  raf = requestAnimationFrame(frame);
+  return el;
+}
+function tmInstantToggle(e, el) {
+  if (el.paused) el.play(); else el.pause();
+}
 function tmClock2(s) { return `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, '0')}`; }
 // Dragging a clip: over its left edge, an arrow shows where it will be pasted in front; over the middle, a swap.
 function tmClipMode(e, el) { return (e.clientX - el.getBoundingClientRect().left) < Math.max(14, el.offsetWidth * 0.3) ? 'insert' : 'swap'; }
@@ -6482,7 +6755,8 @@ document.addEventListener('dblclick', (e) => {
 }, true);
 // After the shot window closes and the page is drawn again: the shot you opened is back at the same place.
 function tmBackToShot() {
-  const a = window.tmShotAnchor, el = a && document.querySelector(a.sel);
+  const a = window.tmShotAnchor;
+  const el = a && [...document.querySelectorAll(a.sel)].find(x => x.offsetParent !== null);  // (the one on show)
   if (el) window.scrollBy(0, el.getBoundingClientRect().top - a.top);
   else if (window.tmShotScroll != null) window.scrollTo(0, window.tmShotScroll);
 }
