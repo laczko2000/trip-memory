@@ -301,7 +301,8 @@ def _story_chapters(story: dict, rows: list[dict], split: set[str]) -> tuple[lis
             else:
                 want = set(whole)
             # (a clip with a moment you locked always comes along)
-            take = [i for i in free if i in want or rows[i]["path"] in keep or rows[i].get("locks")]
+            take = [i for i in free if i in want or rows[i]["path"] in keep or rows[i].get("locks")
+                    or (rows[i].get("kind") != "video" and rows[i].get("postits"))]  # (and a starred photo)
             if not take:
                 continue
             for i in take:

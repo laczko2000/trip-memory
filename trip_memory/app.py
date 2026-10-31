@@ -207,6 +207,7 @@ class Page:
         self.moment_found: dict = {}  # (activity, moment) -> the shots in the order found
         self.theme_selected: set[str] = set()
         self.theme_limit = 60
+        self.nav_order: dict[str, list[str]] = {}  # Previous / Next in the big window: the tiles where you opened it
         self.theme_ticks: dict = {}  # path -> (tick box, its mark, sure): ticking changes only that box
         self.theme_rows_shown: dict = {}
         self.theme_summary = None
@@ -285,6 +286,7 @@ class Page:
         ui.colors(primary="#2563eb")
         ui.on("tm_dictation", self.dictation)
         ui.on("tm_story_drop", self.story_drop)
+        ui.on("tm_theme_drop", self.theme_drop)
         ui.on("tm_board_drop", self.board_drop)
         ui.on("tm_draft_drop", self.draft_drop)
         ui.on("tm_title_move", self.title_move)
@@ -1946,7 +1948,9 @@ class Page:
         changed["again"] = False
         history = changed.setdefault("undo", [])  # (what, how to take it back): the Undo button in the window
         # Previous / Next go through the files in the order of the place you opened it from.
-        order = self.choose_order() if name == "Choose files" else [x["path"] for x in self.all_items]
+        order = self.choose_order() if name == "Choose files" else self.nav_order.get(name) or []
+        if path not in order:
+            order = [x["path"] for x in self.all_items]
         story = it.get("story")
         for old in list(self.window_box):  # windows closed before
             if isinstance(old, ui.dialog) and not old.value:
@@ -2077,6 +2081,8 @@ class Page:
                 in_video_box()
             if it["kind"] == "video":
                 highlights_row()
+            else:
+                star_row()
             if it.get("shot_of"):
                 ui.label(("✂ A shot you made from " if it["kind"] == "video" else "✂ A cropped copy of ")
                          + Path(it["shot_of"]).name).classes("text-xs text-green-800 px-2")
@@ -2098,6 +2104,24 @@ class Page:
                                          "remove the unticked files.")
                         else:
                             ui.label("The rest of the video is dropped (unticked).").classes("text-xs text-gray-500")
+
+        @ui.refreshable
+        def star_row() -> None:  # a photo's ⭐: like a video's highlight, it is always in the video
+            on = self.trip.starred(path)
+            with ui.row().classes("w-full items-center gap-2 px-2"):
+                ui.button("⭐ Highlight: always in the video" if on else "☆ Make it a highlight",
+                          on_click=lambda: star(not on)) \
+                    .props(("unelevated color=amber-8" if on else "outline color=amber-9") + " dense no-caps data-photostar") \
+                    .tooltip("Press Shift for the same. A highlight photo is always used in the video.")
+                ui.label("Shift: highlight on / off").classes("text-xs text-amber-800")
+
+        def star(on: bool) -> None:
+            self.trip.set_star(path, on)
+            history.append(("highlight" if on else "take off highlight", lambda: self.trip.set_star(path, not on)))
+            mark()
+            ui.notify("⭐ Highlight: this photo is always in the video." if on else "Highlight taken off.",
+                      timeout=1500)
+            star_row.refresh()
 
         @ui.refreshable
         def highlights_row() -> None:
@@ -2433,7 +2457,7 @@ class Page:
             frame = ui.html(
                 f'<div id="{key}" onpointerdown="tmCropDown(event, this)" style="position:relative;overflow:hidden;'
                 f'border-radius:6px;background:#1f2937;cursor:grab;touch-action:none;aspect-ratio:{ratio:.4f};'
-                f'height:min(calc(100vh - 230px), calc((100vw - 80px) / {ratio:.4f}));max-width:100%">'
+                f'height:min(calc(100vh - 300px), calc((100vw - 80px) / {ratio:.4f}));max-width:100%">'
                 f'<img src="{sharp}" onerror="this.onerror=null;this.src=\'{data_url(it["thumb"])}\'" draggable="false" style="position:absolute;inset:0;width:100%;'
                 f'height:100%;object-fit:fill;transform-origin:center;pointer-events:none"></div>', sanitize=False)
         frame.on("dblclick", lambda: dialog.close())
@@ -2466,7 +2490,7 @@ class Page:
                 .tooltip("Zoom out")
             slider = ui.slider(min=1.0, max=5.0, step=0.05, value=state["zoom"],
                                on_change=lambda e: (state.update(zoom=float(e.value)), show())) \
-                .classes("w-64").props("dense")
+                .classes("w-64 tm-zoom").props("dense")
             ui.button(icon="zoom_in", on_click=lambda: zoom_to(state["zoom"] * 1.25)).props("flat round dense") \
                 .tooltip("Zoom in")
             ui.button("Whole photo", icon="fit_screen",
@@ -2478,8 +2502,14 @@ class Page:
                     .tooltip("Keep only what you see: saved as a cropped copy, your photo is not changed")
             if on_rotate is not None:
                 ui.separator().props("vertical")
-                rotate_buttons(on_rotate)
-            ui.label("Double-click the photo to close.").classes("text-xs text-gray-500")
+                ui.button("Turn left", icon="rotate_left", on_click=lambda: on_rotate(-90)) \
+                    .props("outline dense no-caps").tooltip("Turn 90° anti-clockwise")
+                ui.button("Turn right", icon="rotate_right", on_click=lambda: on_rotate(90)) \
+                    .props("outline dense no-caps").tooltip("Turn 90° clockwise")
+                ui.button("Upside down", icon="sync", on_click=lambda: on_rotate(180)) \
+                    .props("outline dense no-caps").tooltip("Turn it round (180°)")
+            ui.label("← → next photo (hold to go through) · double-click the photo to close.") \
+                .classes("text-xs text-gray-500")
         ui.timer(0.2, lambda: show(save=False), once=True)
 
     async def open_in_library(self, path: str, name: str) -> None:
@@ -4192,6 +4222,44 @@ class Page:
         self._edit_story(lambda parts: parts.append({"name": f"Part {len(parts) + 1}", "pace": "medium",
                                                      "seconds": None, "entries": []}))
 
+    async def theme_drop(self, e) -> None:
+        """A theme folder dropped in the Themes list: ["t", theme], ["m", theme, sub-theme], or ["new"] (out)."""
+        args = e.args if isinstance(e.args, dict) else {}
+        try:
+            src, dst = json.loads(args.get("src") or "null"), json.loads(args.get("dst") or "null")
+        except ValueError:
+            return
+        if not self.trip or not isinstance(src, list) or not isinstance(dst, list) or src == dst:
+            return
+        if src[0] == "m" and dst[0] == "t":
+            if src[1] == dst[1]:
+                return
+            await run.io_bound(self.trip.move_moment, src[1], src[2], dst[1])
+            ui.notify(f"🔍 {src[2]} is now inside {dst[1]}; its ticked shots went along.", type="positive")
+            self.theme_shown, self.theme_moment = dst[1], None
+        elif src[0] == "m" and dst[0] == "new":
+            vector = None
+            if self.trip.has_fingerprints():
+                try:
+                    v = await run.io_bound(text_vectors, [f"a holiday photo of {src[2].lower()}"],
+                                           app_dir() / "models" / "clip")
+                    vector = [round(float(x), 5) for x in v[0]]
+                except Exception:
+                    traceback.print_exc()
+            made = await run.io_bound(self.trip.moment_to_theme, src[1], src[2], vector)
+            ui.notify(f"{made} is a theme of its own now, with its ticked shots.", type="positive")
+            self.theme_shown, self.theme_moment = made, None
+        elif src[0] == "t" and dst[0] == "t":
+            await run.io_bound(self.trip.theme_to_moment, src[1], dst[1])
+            ui.notify(f"{src[1]} is now a sub-theme inside {dst[1]}: all its shots moved there.", type="positive",
+                      multi_line=True)
+            self.theme_shown, self.theme_moment = dst[1], None
+        else:
+            return
+        self.theme_selected = set()
+        self.stale = True
+        self.themes_view.refresh()
+
     def story_drop(self, e) -> None:
         """A part or a theme dropped somewhere in My story: p:N is a part, e:N:M a theme (M in part N)."""
         args = e.args if isinstance(e.args, dict) else {}
@@ -4312,6 +4380,7 @@ class Page:
         if not self.trip:
             ui.label("Open a trip first.").classes("text-gray-500")
             return
+        self.trip.confirm_moment_shots()  # ticked in a sub-theme: confirmed in its theme too
         rows = self.trip.theme_rows()
         if not rows:
             ui.label("Nothing selected yet: tick files in Choose files first.").classes("text-gray-500")
@@ -4346,6 +4415,21 @@ class Page:
             ui.label("Tip: run Analyse in Choose files first. The app then judges each picture itself; until then it "
                      "only guesses from tags.").classes("text-sm text-orange-700")
         saved_moments = self.trip.moments()
+        # Like folders: drag a sub-theme onto another theme, or out (to the box below) to make it a theme of its
+        # own; drag a theme onto another to put it inside as a sub-theme.
+        drag = "event.dataTransfer.setData('text/plain', this.dataset.k); this.style.opacity=0.5; event.stopPropagation()"
+        over = "event.preventDefault(); this.style.outline='2px dashed #2563eb'"
+        leave = "this.style.outline=''"
+        drop = ("event.preventDefault(); event.stopPropagation(); this.style.outline=''; "
+                "emitEvent('tm_theme_drop', {src: event.dataTransfer.getData('text/plain'), dst: this.dataset.k})")
+
+        def folder(el, key: list, target: bool, movable: bool) -> None:
+            el._props["data-k"] = json.dumps(key)
+            if movable:
+                el._props.update({"draggable": "true", "ondragstart": drag, "ondragend": "this.style.opacity=1"})
+            if target:
+                el._props.update({"ondragover": over, "ondragleave": leave, "ondrop": drop})
+
         with ui.row().classes("w-full no-wrap items-start gap-4"):
             with ui.column().classes("w-56 gap-1 flex-none"):
                 for a in activities:
@@ -4354,7 +4438,8 @@ class Page:
                     on = a["name"] == self.theme_shown
                     with ui.row().classes("w-full items-center no-wrap gap-1 px-2 py-1 rounded cursor-pointer" +
                                           (" bg-blue-100 text-blue-800 font-semibold" if on else " hover:bg-gray-100")) \
-                            .on("click", lambda n=a["name"]: self.show_theme(n)):
+                            .on("click", lambda n=a["name"]: self.show_theme(n)) as line:
+                        folder(line, ["t", a["name"]], True, a["name"] != themes.OTHER)
                         ui.label(f"{a['emoji']} {a['name']}").classes("flex-grow text-sm")
                         ui.label(f"{count}" + (f" · {todo}?" if todo else "")).classes("text-xs text-gray-500")
                     for mo in [m for m in saved_moments if m["activity"] == a["name"]]:
@@ -4362,9 +4447,15 @@ class Page:
                         with ui.row().classes("w-full items-center no-wrap gap-1 pl-6 pr-2 py-0.5 rounded cursor-pointer" +
                                               (" bg-purple-100 text-purple-800 font-semibold" if here
                                                else " hover:bg-gray-100")) \
-                                .on("click", lambda a=a["name"], m=mo["name"]: self.open_moment(a, m)):
+                                .on("click", lambda a=a["name"], m=mo["name"]: self.open_moment(a, m)) as sub:
+                            folder(sub, ["m", a["name"], mo["name"]], False, True)
                             ui.label(f"↳ 🔍 {mo['name']}").classes("flex-grow text-xs")
                             ui.label(f"{len(mo['shots'])} ✓").classes("text-xs text-gray-500")
+                if saved_moments or len(activities) > 2:
+                    out = ui.label("Drag a theme onto another to put it inside · drag a sub-theme here to make it a "
+                                   "theme of its own").classes("w-full text-[11px] text-gray-500 p-2 mt-1 rounded "
+                                                               "border border-dashed border-gray-300")
+                    folder(out, ["new"], True, False)
                 with ui.row().classes("items-center gap-1 mt-2 no-wrap"):
                     new = ui.input(placeholder="Add an activity").props("dense outlined").classes("w-36")
                     new.on("keydown.enter", lambda: self.add_activity(new.value))
@@ -4676,6 +4767,7 @@ class Page:
             return
         # Unsure ones first (they need you), then in the order they were taken.
         shown.sort(key=lambda r: (r["theme_ok"], (r["theme_sure"] or 0) >= themes.SURE, r["taken_at"]))
+        self.nav_order["Themes"] = [r["path"] for r in shown[: self.theme_limit]]
         with ui.element("div").classes("w-full grid gap-2").style("grid-template-columns:repeat(auto-fill,minmax(150px,1fr))"):
             for r in shown[: self.theme_limit]:
                 self.theme_tile(r)
@@ -4716,6 +4808,8 @@ class Page:
             if r["kind"] == "video":
                 with ui.element("div").classes("absolute top-11 right-2").on("click.stop", lambda: None):
                     self.lock_area(r, "compact")
+            elif r.get("postits"):
+                ui.label("⭐").classes("absolute top-11 right-3 text-lg").tooltip("Highlight: always in the video")
             with ui.column().classes("gap-0 text-xs leading-tight mt-1"):
                 ui.label(("🎬 " if r["kind"] == "video" else "") + (who or "—")) \
                     .classes("font-semibold text-gray-800 truncate")
@@ -4953,6 +5047,7 @@ class Page:
         marked = [f for f in found if f["ticked"]]
         suggested = [f for f in found if f["likely"] and not f["ticked"]]
         rest = [f for f in found if not f["likely"] and not f["ticked"]]
+        self.nav_order[f"the {name} moments"] = [f["path"] for f in marked + suggested + rest]
         if marked and not suggested:
             with ui.row().classes("w-full items-center gap-3 p-2 rounded bg-green-50"):
                 ui.label(f"That's all of them: {len(marked)} marked, nothing else looks like “{name}”.") \
@@ -7951,12 +8046,33 @@ function tmCropDown(e, box) {
   };
   box.addEventListener('pointermove', move); box.addEventListener('pointerup', up);
 }
+// ← → walk through the shots in the big window; hold the key to keep going (one shot every 0.35 s).
+function tmNavKey(e) {
+  const all = document.querySelectorAll(`.q-dialog [data-nav="${e.key === 'ArrowLeft' ? -1 : 1}"]`);
+  const b = all[all.length - 1];
+  if (!b) return false;
+  e.preventDefault(); e.stopPropagation();
+  const now = Date.now();
+  if (now - (window.tmNavAt || 0) < (e.repeat ? 350 : 150)) return true;
+  window.tmNavAt = now;
+  b.click();
+  return true;
+}
+// The photo's zoom slider doesn't keep the arrows: they still walk to the next photo.
+document.addEventListener('keydown', (e) => {
+  if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && e.target.closest && e.target.closest('.tm-zoom')) {
+    e.target.blur && e.target.blur();
+    tmNavKey(e);
+  }
+}, true);
 // The shot window: Space plays and pauses the video, Shift puts a highlight at the second it is at.
 document.addEventListener('keydown', (e) => {
-  if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !e.repeat && !e.target.closest('.q-slider, .q-range')
-      && !['INPUT', 'TEXTAREA'].includes(e.target.tagName)) {
-    const b = document.querySelector(`.q-dialog [data-nav="${e.key === 'ArrowLeft' ? -1 : 1}"]`);
-    if (b) { e.preventDefault(); b.click(); return; }
+  if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !e.target.closest('.q-range, .q-slider')
+      && !document.querySelector('.q-menu') && !['INPUT', 'TEXTAREA'].includes(e.target.tagName)
+      && tmNavKey(e)) return;
+  if (e.key === 'Shift' && !e.repeat && !['INPUT', 'TEXTAREA'].includes(e.target.tagName)) {
+    const star = document.querySelector('.q-dialog [data-photostar]');
+    if (star) { star.click(); return; }
   }
   const holder = document.querySelector('.q-dialog [data-shotwin]');
   const strip = document.querySelector('.q-dialog [data-scrub-for][data-press]');

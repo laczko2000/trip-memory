@@ -956,6 +956,8 @@ class Trip:
                 marks = json.loads(marks)
             r["bookmarks"] = sorted(p["t"] - offset for p in marks if 0.0 <= p["t"] - offset <= length) \
                 if r["kind"] == "video" and not r["locks"] else []
+            if r["kind"] != "video" and marks:  # a photo you starred: always in the video
+                r["forced"] = True
         return pool
 
     def locks(self, path: str) -> list[list[float]]:
@@ -1009,6 +1011,15 @@ class Trip:
             clean.append({"t": round(float(p["t"]), 2), "name": (p.get("name") or "").strip(),
                           "thumb": thumb or self.moment_picture(dict(rows[0]), float(p["t"]))})
         self.execute("UPDATE items SET postits = ? WHERE path = ?", (json.dumps(clean) if clean else None, path))
+
+    def starred(self, path: str) -> bool:
+        """A photo you starred: it is always in the video."""
+        return bool(self.postits(path))
+
+    def set_star(self, path: str, on: bool) -> None:
+        """⭐ on a photo: it is always in the video (kept as one post-it at 0 s, like a video's highlight)."""
+        self.execute("UPDATE items SET postits = ? WHERE path = ? AND kind != 'video'",
+                     (json.dumps([{"t": 0.0, "name": "", "thumb": None}]) if on else None, path))
 
     def add_postit(self, path: str, t: float, name: str = "") -> None:
         self.set_postits(path, self.postits(path) + [{"t": t, "name": name}])
@@ -1602,6 +1613,71 @@ class Trip:
     def remove_moment(self, activity: str, name: str) -> None:
         self._save_moments([m for m in self.moments() if not (m["activity"] == activity and m["name"] == name)])
 
+    # ---------- theme folders: drag a sub-theme into another theme, out to a theme of its own, or a theme in ----------
+
+    def move_moment(self, activity: str, name: str, to: str) -> None:
+        """A sub-theme moves under another theme: its ticked shots go along (confirmed in that theme)."""
+        found = self.moments()
+        mo = next((m for m in found if m["activity"] == activity and m["name"] == name), None)
+        if mo is None or activity == to:
+            return
+        found.remove(mo)
+        same = next((m for m in found if m["activity"] == to and m["name"].lower() == name.lower()), None)
+        if same is not None:  # one of that name there already: they become one
+            have = {s["path"] for s in same["shots"]}
+            same["shots"] += [s for s in mo["shots"] if s["path"] not in have]
+        else:
+            found.append(mo | {"activity": to})
+        self.checkpoint("moving a sub-theme")
+        self._save_moments(found)
+        self.set_theme([s["path"] for s in mo["shots"]], to)
+
+    def moment_to_theme(self, activity: str, name: str, vector: list[float] | None = None) -> str:
+        """A sub-theme becomes a theme of its own (dragged out): its ticked shots move to it. Returns its name."""
+        mo = self.moment(activity, name)
+        if mo is None:
+            return ""
+        taken = {a["name"].lower(): a["name"] for a in self.activities()}
+        new = taken.get(mo["name"].lower(), mo["name"])
+        self.checkpoint("making a sub-theme a theme")
+        if new.lower() not in taken:
+            self.add_activity(new, vector)
+        self._save_moments([m for m in self.moments() if m is not None and
+                            not (m["activity"] == activity and m["name"] == mo["name"])])
+        self.set_theme([s["path"] for s in mo["shots"]], new)
+        return new
+
+    def theme_to_moment(self, activity: str, to: str) -> None:
+        """A theme dropped into another theme: it becomes a sub-theme there. All its shots move to that theme and
+        are ticked in the sub-theme (a video at the second you highlighted, else its middle)."""
+        if activity in (to, themes.OTHER) or not any(a["name"] == to for a in self.activities()):
+            return
+        rows = [r for r in self.theme_rows() if r["theme"] == activity]
+        shots = []
+        for r in rows:
+            if r["kind"] == "video":
+                a, b = kept_part(r) or (0.0, r["duration"] or 0.0)
+                marks = [p["t"] for p in r.get("postits") or [] if a <= p["t"] <= b]
+                t = marks[0] if marks else (a + b) / 2
+            else:
+                t = 0.0
+            shots.append({"path": r["path"], "t": round(float(t), 2)})
+        self.checkpoint("putting a theme inside another")
+        found = [m | ({"activity": to} if m["activity"] == activity else {}) for m in self.moments()]
+        same = next((m for m in found if m["activity"] == to and m["name"].lower() == activity.lower()), None)
+        if same is not None:
+            have = {s["path"] for s in same["shots"]}
+            same["shots"] += [s for s in shots if s["path"] not in have]
+        else:
+            found.append({"name": activity, "activity": to, "shots": shots})
+        self._save_moments(found)
+        with self._lock:  # its shots go first, so taking the theme away doesn't send them anywhere else
+            self.db.executemany("UPDATE items SET theme = ? WHERE path = ?", [(to, r["path"]) for r in rows])
+            self.db.commit()
+        self.save_activities([a for a in self.activities() if a["name"] != activity])
+        self.suggest_themes()
+        self._remember_themes()
+
     def tick_moment(self, activity: str, name: str, path: str, t: float, on: bool) -> None:
         """You marked a shot (at that second) as this moment, or took it back."""
         found = self.moments()
@@ -1609,6 +1685,24 @@ class Trip:
             if m["activity"] == activity and m["name"] == name:
                 m["shots"] = [s for s in m["shots"] if s["path"] != path] + ([{"path": path, "t": t}] if on else [])
         self._save_moments(found)
+        if on:
+            self.confirm_moment_shots()
+
+    def confirm_moment_shots(self) -> int:
+        """A shot you ticked in a moment (e.g. a deer under Deer and fish) is confirmed in that theme too: no
+        question mark for it there any more. Returns how many shots it confirmed now."""
+        sure = [(m["activity"], s["path"]) for m in self.moments() for s in m.get("shots") or []]
+        if not sure:
+            return 0
+        with self._lock:
+            before = self.db.total_changes
+            self.db.executemany("UPDATE items SET theme = ? WHERE path = ? AND theme IS NULL "
+                                "AND COALESCE(theme_auto, '') = ?", [(a, p, a) for a, p in sure])
+            self.db.commit()
+            done = self.db.total_changes - before
+        if done:
+            self._remember_themes()
+        return done
 
     def moment_matches(self, activity: str, name: str, words: np.ndarray | None,
                        notify: Callable[[float, str], None] | None = None) -> list[dict]:

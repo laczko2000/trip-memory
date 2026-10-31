@@ -1015,3 +1015,56 @@ def test_fit_to_music_puts_every_cut_exactly_on_a_pin_whatever_the_transitions(t
     times, over = shot_times(lengths, styles), overlaps(lengths, styles)
     cuts = [times[k]["start"] + times[k]["length"] - over[k] / 2 for k in range(len(board) - 1)]
     assert all(min(abs(c - p) for p in pins) < 0.02 for c in cuts), cuts
+
+
+def test_theme_folders_move_like_folders_and_sub_theme_ticks_confirm_the_theme(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    for n, colour in enumerate(["red", "green", "blue", "yellow"]):
+        exif = Image.Exif()
+        exif[306] = f"2025:07:03 1{n}:00:00"
+        Image.new("RGB", (160, 90), colour).save(trip_dir / f"p{n}.jpg", exif=exif)
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    paths = [r["path"] for r in trip.items()]
+    trip.set_chosen(paths, True)
+    trip.add_activity("Deer and fish", None)
+    trip.add_activity("Animals", None)
+    trip.execute("UPDATE items SET theme = NULL, theme_auto = 'Deer and fish'")
+    # A tick in a sub-theme confirms the shot in its theme: no question mark there.
+    trip.add_moment("Deer and fish", "deer")
+    trip.tick_moment("Deer and fish", "deer", paths[0], 0.0, True)
+    ok = {r["path"]: r["theme_ok"] for r in trip.theme_rows()}
+    assert ok[paths[0]] and not ok[paths[1]]
+    # Sub-theme dragged onto another theme: it and its shots move there.
+    trip.move_moment("Deer and fish", "deer", "Animals")
+    assert trip.moment("Animals", "deer") and not trip.moment("Deer and fish", "deer")
+    assert {r["path"]: r["theme"] for r in trip.theme_rows()}[paths[0]] == "Animals"
+    # Dragged out: a theme of its own.
+    assert trip.moment_to_theme("Animals", "deer") == "deer"
+    assert "deer" in [a["name"] for a in trip.activities()] and not trip.moments()
+    assert {r["path"]: r["theme"] for r in trip.theme_rows()}[paths[0]] == "deer"
+    # A theme dropped onto another: a sub-theme there, all its shots moved in and ticked.
+    trip.theme_to_moment("deer", "Animals")
+    assert "deer" not in [a["name"] for a in trip.activities()]
+    assert [s["path"] for s in trip.moment("Animals", "deer")["shots"]] == [paths[0]]
+    assert {r["path"]: r["theme"] for r in trip.theme_rows()}[paths[0]] == "Animals"
+
+
+def test_a_starred_photo_is_always_in_the_video(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    Image.new("RGB", (160, 90), "red").save(trip_dir / "p0.jpg")
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    path = trip.items()[0]["path"]
+    assert not trip.starred(path)
+    trip.set_star(path, True)
+    assert trip.starred(path)
+    assert catalog.Trip._with_locks([trip.items()[0]])[0]["forced"]
+    trip.set_star(path, False)
+    assert not trip.starred(path)
