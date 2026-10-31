@@ -5226,7 +5226,8 @@ class Page:
                 ui.button("Update the draft", icon="bolt", on_click=self.make_draft) \
                     .props("dense no-caps " + ("unelevated color=orange" if changed else "outline color=white"))
                 ui.button("Add a title here", icon="title", on_click=self.add_timeline_title) \
-                    .props("dense outline no-caps color=white").tooltip("A new title where the player is now")
+                    .props("dense outline no-caps color=white") \
+                    .tooltip("A new title on the clip you picked (or where the red line is)")
                 ui.button("Finalize", icon="movie", on_click=self.finalize).props("dense no-caps color=green")
                 ui.button(icon="close", on_click=lambda: self.open_editor(False)) \
                     .props("flat round dense color=white").tooltip("Close the editor (Esc)").classes("tm-editor-close")
@@ -5402,12 +5403,20 @@ class Page:
         except Exception:
             at = 0.0
         board = self.trip.storyboard()
-        times = self.board_times(board, self.draft_info(), True)
-        n = max([k for k, t in enumerate(times) if t["start"] <= at] or [0])
+        draft = self.draft_info()
+        changed = bool(draft) and ([tuple(x) for x in draft["board"]] != self.draft_board())
+        times = self.board_times(board, draft, changed)  # (the draft's own times while it is up to date)
+        if self.draft_pick is not None and self.draft_pick < len(board):  # the clip you picked: on it
+            n, offset = self.draft_pick, 0.0
+        else:  # where the player is
+            n = max([k for k, t in enumerate(times) if t["start"] <= at] or [0])
+            offset = max(0.0, at - times[n]["start"]) if times else 0.0
         new = {"id": f"t{time.time_ns()}", "text": "Your words", "sub": "", "style": "clean", "where": "lower",
                "length": 3.0, "fade_in": titles.FADE_IN, "fade_out": titles.FADE_OUT}
         if board:
-            new |= {"link": board[n]["path"], "offset": round(at - times[n]["start"], 2)}
+            length = times[n]["length"] if n < len(times) else 3.0
+            new |= {"link": board[n]["path"], "offset": round(min(offset, max(0.0, length - 0.5)), 2),
+                    "length": round(min(3.0, max(1.0, length)), 2)}
         else:
             new["start"] = round(at, 2)
         self.trip.save_timeline_titles(self.trip.timeline_titles() + [new])
