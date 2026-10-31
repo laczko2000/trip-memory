@@ -59,6 +59,7 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.05:** **Upright (portrait) videos in a landscape video are never a narrow strip alone any more.** On every cut of 1.4 s or longer, one or two other upright videos play next to them, side by side, also with *Moments per cut: Normal*. It takes upright videos you haven't used first (nearest in time); if every one is already in the video, it uses **another moment** of one of them (never the seconds already shown). In the editor's player, any picture that doesn't fill the screen now has itself, big and blurred, behind it instead of black sides, as in the finished video.
 - **1.04:** **‹ › and ← → in the big window now just change what's shown**: the next shot appears in place, the window no longer closes and opens again in between (no flicker, no page showing behind). The same in the highlight review.
 - **1.03:** **The big window fits your screen**, no scrolling inside it: the video takes whatever room is left after the strip, the buttons and the tools, on any screen size (checked at MacBook Air size for videos from Themes, Mark the best bits, the highlight review and photos). The help line is one short line now.
 - **1.02:** **Big video window: just move the cursor along the picture strip** under the video (no pressing needed): the video shows that very frame and the red line follows. **Space** plays from there, **Space** again stops. If you are outside the green part, it plays on from where you are (no jumping back). Press and drag still works too.

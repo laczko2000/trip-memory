@@ -7848,6 +7848,15 @@ function tmInstant(id, data, onTime) {
     (s._extra || []).forEach(x => { if (x.el.pause) x.el.pause(); x.el.remove(); });
     s._extra = [];
     [v, im].forEach(m => { if (m._css === undefined) m._css = m.style.cssText; });
+    // Behind a picture that doesn't fill the screen (an upright clip): itself, big and blurred, as in the video.
+    let bg = s.querySelector('.tm-bgblur');
+    if (!bg) {
+      bg = document.createElement('div');
+      bg.className = 'tm-bgblur';
+      bg.style.cssText = 'position:absolute;inset:-30px;background:center/cover no-repeat;filter:blur(22px) brightness(.75)';
+      s.insertBefore(bg, s.firstChild);
+    }
+    bg.style.backgroundImage = c.fb ? `url("${c.fb}")` : 'none';
     if (c.tiles) {  // a collage or videos side by side: the first in its place, the others around it
       const t0 = c.tiles[0], box = `left:${100 * t0.x}%;top:${100 * t0.y}%;width:${100 * t0.w}%;height:${100 * t0.h}%;`;
       [v, im].forEach(m => { const hide = m.style.display; m.style.cssText = 'position:absolute;object-fit:cover;' + box; m.style.display = hide; });

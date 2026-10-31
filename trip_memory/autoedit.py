@@ -798,6 +798,34 @@ def _source(path: str) -> str:
     return path.split("#")[0]
 
 
+def _used_windows(shots: list[Shot], rows: dict[str, dict]) -> dict[str, list[tuple[float, float]]]:
+    """The seconds of each video the cut already shows (in the time Auto-edit sees it), side tiles included."""
+    used: dict[str, list[tuple[float, float]]] = {}
+    for s in shots:
+        if s.kind == "video":
+            used.setdefault(_source(s.path), []).append((s.start, s.start + s.seconds * s.speed))
+        for p, a in zip(s.effects.get("side", []), s.effects.get("starts", [])):
+            off = rows.get(p, {}).get("keep_offset") or 0.0
+            used.setdefault(_source(p), []).append((a - off, a - off + s.seconds))
+    return used
+
+
+def _free_part(length: float, seconds: float, used: list[tuple[float, float]], gap: float = 0.5) -> float | None:
+    """Where a part this long fits in a video without touching the seconds already used (the latest such start
+    nearest the middle), or None."""
+    if length < seconds:
+        return None
+    best = None
+    step = 0.25
+    t = 0.0
+    while t + seconds <= length + 1e-6:
+        if all(t + seconds <= a - gap or t >= b + gap for a, b in used):
+            if best is None or abs(t + seconds / 2 - length / 2) < abs(best + seconds / 2 - length / 2):
+                best = t
+        t += step
+    return None if best is None else round(best, 2)
+
+
 def _when(row: dict) -> float:
     try:
         return datetime.fromisoformat(row["taken_at"]).timestamp()
@@ -809,8 +837,9 @@ def pack(shots: list[Shot], candidates: list[dict], limits: Limits, curves: dict
     """More moments on the same cuts: a photo's cut becomes a collage of 2-4 photos from the same part of the
     story (a photo alone becomes rare), and in a landscape video an upright video gets one or two other upright
     videos next to it. They are shots the cut had no room for, nearest in time to the one already there."""
-    if limits.pack not in ("more", "max") or not shots:
+    if not shots:
         return shots
+    photos_too = limits.pack in ("more", "max")  # (upright videos in a landscape video always get company)
     rows = {r["path"]: r for r in candidates}
     taken = {_source(s.path) for s in shots}
     taken |= {_source(p) for s in shots for key in ("collage", "side") for p in s.effects.get(key, [])}
@@ -822,7 +851,7 @@ def pack(shots: list[Shot], candidates: list[dict], limits: Limits, curves: dict
     most = limits.pack == "max"
 
     def photo_ok(shot: Shot) -> bool:
-        return shot.kind == "photo" and not shot.effects and not rows.get(shot.path, {}).get("locked")
+        return photos_too and shot.kind == "photo" and not shot.effects and not rows.get(shot.path, {}).get("locked")
 
     def video_ok(shot: Shot) -> bool:
         r = rows.get(shot.path, {})
@@ -863,19 +892,48 @@ def pack(shots: list[Shot], candidates: list[dict], limits: Limits, curves: dict
             want = (3 if shot.seconds >= 2.5 else 2) if most else 2
             share = -(-len(room) // (ahead[key] + 1)) if room else 0
             extra = min(want - 1, share)
+            when = _when(r)
+            picked: list[tuple[dict, float | None]] = []  # (video, its start; None = choose the best part)
             if extra >= 1:
-                when = _when(r)
                 room.sort(key=lambda x: abs(_when(x) - when))
-                group = room[:extra]
-                spare[key] = [x for x in spare.get(key, []) if x not in group]
+                picked = [(g, None) for g in room[:extra]]
+                spare[key] = [x for x in spare.get(key, []) if x not in room[:extra]]
+            if not picked:
+                # None spare in this part of the story: an upright video not used anywhere else (nearest in time),
+                # else another moment of an upright video already in the video (never the seconds it shows).
+                anywhere = [x for k2, xs in spare.items() if k2[1] == "video" and k2[2] for x in xs
+                            if (x.get("duration") or 0) >= shot.seconds]
+                if anywhere:
+                    g = min(anywhere, key=lambda x: abs(_when(x) - when))
+                    picked = [(g, None)]
+                    for k2 in spare:
+                        if g in spare[k2]:
+                            spare[k2].remove(g)
+                else:
+                    used = _used_windows(out + shots[len(out):], rows)
+                    for g in sorted((x for x in candidates if x.get("upright") and x["kind"] == "video"
+                                     and "#" not in x["path"] and not x.get("locks") and not x.get("locked")
+                                     and _source(x["path"]) != _source(shot.path)),
+                                    key=lambda x: abs(_when(x) - when)):
+                        a = _free_part(g.get("duration") or 0.0, shot.seconds, used.get(_source(g["path"]), []))
+                        if a is not None:
+                            picked = [(g, a)]
+                            used.setdefault(_source(g["path"]), []).append((a, a + shot.seconds))
+                            break
+            group = [g for g, _ in picked]
+            if group:
                 starts = []
-                for g in group:
+                for g, fixed in picked:
                     length = g.get("duration") or shot.seconds
-                    curve = curves.get(g["path"])
-                    a = best_start(curve, length, shot.seconds) if curve is not None else (length - shot.seconds) / 2
-                    a = cover_bookmark(min(max(0.0, a), length - shot.seconds), shot.seconds, length,
-                                       g.get("bookmarks") or [])
+                    if fixed is None:
+                        curve = curves.get(g["path"])
+                        a = best_start(curve, length, shot.seconds) if curve is not None else (length - shot.seconds) / 2
+                        a = cover_bookmark(min(max(0.0, a), length - shot.seconds), shot.seconds, length,
+                                           g.get("bookmarks") or [])
+                    else:
+                        a = fixed
                     starts.append(round(a + (g.get("keep_offset") or 0.0), 2))
+                extra = len(group)
                 shot = replace(shot, effects={"side": [g["path"] for g in group], "starts": starts},
                                effects_why=f"{extra + 1} upright videos side by side: more moments on one cut")
         out.append(shot)

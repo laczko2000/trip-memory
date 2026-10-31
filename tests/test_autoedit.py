@@ -385,7 +385,8 @@ def test_more_moments_pack_spare_photos_into_collages_and_upright_videos_side_by
     shots = [autoedit.Shot(path="p0.jpg", kind="photo", seconds=2.0), autoedit.Shot(path="p5.jpg", kind="photo", seconds=2.0),
              autoedit.Shot(path="v0.mov", kind="video", seconds=3.0), autoedit.Shot(path="w.mov", kind="video", seconds=3.0)]
     normal = autoedit.pack(shots, candidates, autoedit.Limits(pack="normal"), {})
-    assert normal == shots
+    assert [n for k, n in enumerate(normal) if k != 2] == [x for k, x in enumerate(shots) if k != 2]  # photos alone
+    assert normal[2].effects["side"]  # an upright video never alone in a landscape video
 
     more = autoedit.pack(shots, candidates, autoedit.Limits(pack="more"), {})
     first, second, video, landscape = more
@@ -402,3 +403,18 @@ def test_more_moments_pack_spare_photos_into_collages_and_upright_videos_side_by
     assert len(used) == len(set(used))  # each spare shot once
     phone = autoedit.pack(shots, candidates, autoedit.Limits(pack="more", landscape=False), {})
     assert not phone[2].effects  # in a phone video upright videos stay full screen
+
+
+def test_an_upright_video_in_a_landscape_video_always_gets_company():
+    from trip_memory.autoedit import Limits, Shot, pack, _free_part
+    rows = [{"path": f"/v{n}.mp4", "kind": "video", "upright": True, "duration": 10.0, "story": 1,
+             "taken_at": f"2025-07-03T10:0{n}:00"} for n in range(2)]
+    shots = [Shot(path="/v0.mp4", kind="video", start=0.0, seconds=3.0),
+             Shot(path="/v1.mp4", kind="video", start=0.0, seconds=3.0)]
+    # Every upright video is already a shot of its own, even in Normal: another moment of the other one goes next
+    # to it, never the seconds the video already shows.
+    out = pack(shots, rows, Limits(pack="normal", landscape=True), {})
+    assert all(s.effects.get("side") for s in out)
+    first = out[0].effects
+    assert first["side"] == ["/v1.mp4"] and first["starts"][0] >= 3.0 + 0.5
+    assert _free_part(4.0, 3.0, [(0.0, 3.0)]) is None
