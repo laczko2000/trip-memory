@@ -88,3 +88,11 @@ def test_halving_the_pins_keeps_the_ends_and_the_music_changes():
     assert halve(pins, [4.1]) == [1, 3, 4, 6, 8, 9]  # 4 is on a change: kept, and counting starts again
     assert halve([1, 2], []) == [1, 2]
     assert halve(halve(pins, []), []) == [1, 5, 9]
+
+
+def test_double_puts_a_pin_between_every_two_on_the_beat():
+    from trip_memory.taps import double
+
+    assert double([0, 2, 4], []) == [0, 1, 2, 3, 4]
+    assert double([0, 2, 4], [0.9, 2.6, 3.1]) == [0, 0.9, 2, 3.1, 4]  # the nearest beat inside each gap
+    assert double([0, 0.3, 2], []) == [0, 0.3, 1.15, 2]  # too short a gap stays as it is

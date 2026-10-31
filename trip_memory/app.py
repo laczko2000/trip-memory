@@ -2073,6 +2073,9 @@ class Page:
             ui.button("Half the pins", icon="exposure_neg_1", on_click=self.halve_pins).props("outline no-caps") \
                 .tooltip("Take away every second pin, for longer shots. The first and last pins stay, and so do "
                          "pins where the music changes. Press again to halve again")
+            ui.button("Double the pins", icon="exposure_plus_1", on_click=self.double_pins).props("outline no-caps") \
+                .tooltip("A new pin between every two pins, on the nearest beat, for shorter shots. Press again to "
+                         "double again")
         ui.html('<div id="tm-tl" style="position:relative;width:100%;height:150px;background:#f1f5f9;border-radius:8px;'
                 'touch-action:none;user-select:none;cursor:pointer;overflow:hidden"></div>', sanitize=False).classes("w-full")
         ui.html('<div id="tm-trim-info" style="font-size:14px;font-weight:600;color:#15803d"></div>', sanitize=False)
@@ -2340,14 +2343,37 @@ class Page:
         ui.run_javascript(f"tmTapSet({json.dumps(halved)})")  # saved with your pins within 2 seconds
         self.half_row.refresh()
 
+    async def double_pins(self) -> None:
+        music = self.music_path()
+        if not music:
+            return
+        pins = [float(p) for p in await ui.run_javascript("tmTapGet()", timeout=5) or []]
+        if len(pins) < 2:
+            ui.notify("Pin at least two cuts first.", type="info")
+            return
+        song = self.song_maps.get(music)
+        if song is None:
+            song = self.song_maps[music] = await run.io_bound(songmap.analyse, music, app_dir() / "music-maps")
+        doubled = song_taps.double(pins, song.beat_times() if song.clear_beat else [])
+        if len(doubled) == len(pins):
+            ui.notify("The pins are too close together to add more between them.", type="info")
+            return
+        if self.pins_before_half is None:  # Undo goes back to before the first change
+            self.pins_before_half = pins
+        self.pins_halved = len(doubled)
+        ui.run_javascript(f"tmTapSet({json.dumps(doubled)})")  # saved with your pins within 2 seconds
+        self.half_row.refresh()
+
     @ui.refreshable
     def half_row(self) -> None:
         before = getattr(self, "pins_before_half", None)
         if not before:
             return
         with ui.row().classes("items-center gap-2 p-2 rounded bg-sky-50"):
-            ui.label(f"Halved: {len(before)} pins → {self.pins_halved} (the first, the last and those on music "
-                     "changes stayed), so shots are about twice as long.").classes("text-sm text-sky-900")
+            more = self.pins_halved > len(before)
+            ui.label(f"{len(before)} pins → {self.pins_halved}, so shots are "
+                     f"{'shorter' if more else 'longer'}. Undo brings back your {len(before)} pins.") \
+                .classes("text-sm text-sky-900")
             ui.button("Undo", icon="undo", on_click=self.unhalve_pins).props("flat dense no-caps")
 
     def unhalve_pins(self) -> None:

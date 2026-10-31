@@ -239,3 +239,18 @@ def halve(pins: list[float], changes: list[float], reach: float = 0.35) -> list[
             kept.append(p)
             drop_next = True
     return kept + [pins[-1]]
+
+
+def double(pins: list[float], beats=(), least: float = 0.25) -> list[float]:
+    """A new pin halfway between every two pins, for shorter shots. Each new pin moves to the nearest beat when
+    that beat lies well inside the gap (least seconds from both pins); else it stays halfway."""
+    pins = sorted(pins)
+    beats = sorted(float(b) for b in beats)
+    out = []
+    for a, b in zip(pins, pins[1:]):
+        out.append(a)
+        middle = (a + b) / 2
+        near = min((t for t in beats if a + least <= t <= b - least), key=lambda t: abs(t - middle), default=None)
+        if b - a >= 2 * least:
+            out.append(round(near if near is not None else middle, 3))
+    return out + pins[-1:]
