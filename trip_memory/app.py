@@ -1120,18 +1120,27 @@ class Page:
                 + (f" · {removed} removed earlier" if removed else ""))
 
     async def set_look_alike(self, level: str) -> None:
-        if self.trip.look_alike_level() == level:
-            return
-        note = ui.notification("Finding doubles again…", spinner=True, timeout=None)
-        try:
-            await run.io_bound(self.trip.set_look_alike_level, level)
-        finally:
-            note.dismiss()
-        self.reload()
-        sets = len(self.all_items) - len({it["similar_set"] for it in self.all_items})
-        ui.notify(f"{sets} files are now doubles of another shot. Click Keep only the ⭐ of every set to untick them.",
+        """A level of doubles: found at that level, and only they are shown (no scrolling past everything else)."""
+        if self.trip.look_alike_level() != level:
+            note = ui.notification("Finding doubles again…", spinner=True, timeout=None)
+            try:
+                await run.io_bound(self.trip.set_look_alike_level, level)
+            finally:
+                note.dismiss()
+            self.reload()
+        counts: dict = {}
+        for it in self.all_items:
+            counts[it["similar_set"]] = counts.get(it["similar_set"], 0) + 1
+        sets = sum(1 for k, n in counts.items() if k is not None and n > 1)
+        self.choose_filters["show"] = "sets"  # only the doubles of this level, in front
+        self.story_page = 1
+        name = stories.STRICTNESS_NAMES[level].split(" · ")[0]
+        ui.notify(f"{name}: {sets} sets of doubles, shown on their own. Check them, then ✓ Accept all markings." if sets
+                  else f"{name}: no doubles left. Go on to the next level, or Show → Everything.",
                   multi_line=True, timeout=8000)
         self.refresh_all()
+        ui.run_javascript("setTimeout(() => { const e = document.getElementById('tm-step-doubles'); "
+                          "if (e) e.scrollIntoView({behavior: 'smooth', block: 'start'}); }, 300)")
 
     async def confirm_remove(self) -> None:
         """Remove the unticked files at once (no question: See removed brings them back)."""
@@ -1207,6 +1216,20 @@ class Page:
 
         if self.choose_filters["show"] == "removed":
             self.removed_view(shown)
+            return
+        if self.choose_filters["show"] == "sets" and not shown:  # every double of this level sorted out
+            levels = list(stories.STRICTNESS_NAMES)
+            level = self.trip.look_alike_level()
+            later = levels[levels.index(level) + 1:] if level in levels else []
+            with ui.card().classes("w-full items-center p-6 bg-green-50"):
+                ui.label(f"✓ No doubles left at {stories.STRICTNESS_NAMES[level].split(' · ')[0]}.") \
+                    .classes("text-lg font-medium text-green-900")
+                with ui.row().classes("gap-2"):
+                    if later:
+                        ui.button(f"Go on: {stories.STRICTNESS_NAMES[later[0]]}", icon="arrow_forward",
+                                  on_click=lambda k=later[0]: self.set_look_alike(k)).props("unelevated no-caps color=amber-9")
+                    ui.button("Show everything", on_click=lambda: self.set_choose_filter("show", ALL)) \
+                        .props("outline no-caps")
             return
         # One long list. It is drawn TILES_PER_PAGE files at a time: the next part is added by itself as you scroll
         # near the bottom, so even thousands of files stay quick (drawing them all at once makes the page reload).
