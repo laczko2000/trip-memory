@@ -352,3 +352,21 @@ def test_a_locked_moment_plays_whole_and_the_rest_of_the_clip_stays_free():
     assert free == [(0.0, 11.5), (15.5, 30.0)]  # never overlapping the moment
     assert all(by[p]["part_of"] == "/k.mov" for p in by if "#" in p)
     assert "/p.jpg" in by and "/p.jpg" not in parts
+
+
+def test_every_bookmark_is_inside_the_part_used():
+    rows, parts = autoedit.bookmark_parts(
+        [{"path": "/k.mov", "kind": "video", "duration": 60.0, "taken_at": "2025-07-03T10:00:00",
+          "bookmarks": [10.0, 12.0, 40.0]},
+         {"path": "/s.mov", "kind": "video", "duration": 8.0, "taken_at": "2025-07-03T10:02:00", "bookmarks": [6.5]}],
+        {})
+    by = {r["path"]: r for r in rows}
+    # bookmarks far apart: a part of the clip each, split halfway between them; close ones stay together
+    assert parts["/k.mov"] == ("/k.mov", 0.0) and parts["/k.mov#B2"] == ("/k.mov", 26.0)
+    assert by["/k.mov"]["bookmarks"] == [10.0, 12.0] and by["/k.mov#B2"]["bookmarks"] == [14.0]
+    assert by["/k.mov"]["forced"] and by["/k.mov#B2"]["forced"] and "/s.mov" not in parts
+    # whatever length the music gives the shot, the bookmark is in it
+    for used in (1.0, 2.5, 6.0):
+        start = autoedit.cover_bookmark(0.0, used, 8.0, [6.5])
+        assert start <= 6.5 <= start + used and 0 <= start <= 8.0 - used
+    assert autoedit.cover_bookmark(5.0, 3.0, 8.0, [6.5]) == 5.0  # already inside: left alone

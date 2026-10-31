@@ -799,6 +799,8 @@ def test_post_its_mark_the_best_bits_and_become_the_videos_picture(tmp_path, mon
     assert trip.items()[0]["thumb"] == found[0]["thumb"] and Path(found[0]["thumb"]).exists()
     trip.change_postit(path, 0, remove=True)
     assert [p["name"] for p in trip.postits(path)] == ["jump"]
+    trip.set_keep(path, 1.0, 6.0)  # Auto-edit sees the bookmark in the time of the part you kept
+    assert next(r for r in trip.auto_edit_pool() if r["path"] == path)["bookmarks"] == [3.0]
 
 
 def test_pasting_a_shot_in_front_keeps_every_cut_in_place(tmp_path, monkeypatch):

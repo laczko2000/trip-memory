@@ -510,7 +510,8 @@ def split_long(rows: list[dict], curves: dict, short: int) -> tuple[list[dict], 
         for k in range(n):
             path = r["path"] if k == 0 else f"{r['path']}#{k + 1}"
             begin = k * (each + PART_GAP)
-            piece = r | {"path": path, "duration": each, "part_of": r["path"] if k else None}
+            piece = r | {"path": path, "duration": each, "part_of": r["path"] if k else None,
+                         "bookmarks": [t - begin for t in r.get("bookmarks") or [] if begin <= t <= begin + each]}
             if curve is not None and len(curve):
                 curves[path] = curve[int(round(begin * STEPS_PER_SECOND)):int(round((begin + each) * STEPS_PER_SECOND))]
                 _measure(piece, curves[path])
@@ -520,6 +521,53 @@ def split_long(rows: list[dict], curves: dict, short: int) -> tuple[list[dict], 
         short -= n - 1
     result = [p for r in rows for p in split.get(r["path"], [r])]
     return result, parts
+
+
+BOOKMARKS_APART = 8.0  # seconds: bookmarks (post-its) further apart than this in one clip become shots of their own
+
+
+def bookmark_parts(rows: list[dict], curves: dict) -> tuple[list[dict], dict[str, tuple[str, float]]]:
+    """Clips with bookmarks (row["bookmarks"]: seconds in the row's own time) must be in the video, each bookmark
+    inside the part used. Bookmarks far apart (BOOKMARKS_APART) each get a part of the clip of their own, split
+    halfway between them, so every one of them is shown. curves gets each part's own curve."""
+    parts: dict[str, tuple[str, float]] = {}
+    out: list[dict] = []
+    for r in rows:
+        marks = sorted(r.get("bookmarks") or [])
+        if r["kind"] != "video" or not marks:
+            out.append(r)
+            continue
+        groups = [[marks[0]]]
+        for t in marks[1:]:
+            if t - groups[-1][-1] > BOOKMARKS_APART:
+                groups.append([t])
+            else:
+                groups[-1].append(t)
+        length = r["duration"] or 0.0
+        cuts = [0.0] + [(g[-1] + h[0]) / 2 for g, h in zip(groups, groups[1:])] + [length]
+        curve = curves.get(r["path"])
+        for k, group in enumerate(groups):
+            a, b = cuts[k], cuts[k + 1]
+            path = r["path"] if k == 0 else f"{r['path']}#B{k + 1}"
+            piece = r | {"path": path, "duration": b - a, "part_of": r["path"] if k else None, "part_start": a,
+                         "bookmarks": [t - a for t in group], "forced": True}
+            if len(groups) > 1 and curve is not None and len(curve):
+                curves[path] = curve[int(round(a * STEPS_PER_SECOND)):int(round(b * STEPS_PER_SECOND))]
+                _measure(piece, curves[path])
+            if len(groups) > 1:  # (then no further splitting of these parts)
+                parts[path] = (r["path"], a)
+            out.append(piece)
+    return out, parts
+
+
+def cover_bookmark(start: float, used: float, length: float, marks: list[float]) -> float:
+    """Where the used part of a clip starts, moved (if needed) so that a bookmark is inside it: the nearest one
+    then sits a little before the middle of the part."""
+    marks = [t for t in marks if 0.0 <= t <= length]
+    if not marks or any(start <= t <= start + used for t in marks):
+        return start
+    t = min(marks, key=lambda t: abs(t - (start + used / 2)))
+    return min(max(0.0, t - used * 0.4), max(0.0, length - used))
 
 
 LOCK_GAP = 0.5  # seconds kept free on each side of a moment you locked
@@ -855,6 +903,8 @@ def plan_to_music(
     for r in rows:
         _measure(r, curves.get(r["path"]))
     rows, locked_parts = lock_parts(rows, curves)  # moments you locked: shots of their own
+    rows, marked_parts = bookmark_parts(rows, curves)  # bookmarks far apart in a clip: shots of their own
+    locked_parts |= marked_parts
 
     def order(rows: list[dict]) -> list[dict]:
         return by_chapters(rows, chapters) if chapters else arrange(choose(rows), limits.storyline)
@@ -998,6 +1048,7 @@ def plan_to_music(
             start = (longest_start / 2 if c.get("locked") or curve is None  # a locked moment: its middle
                      else best_start(curve, c["duration"], used))
             start = min(max(0.0, start), longest_start)
+            start = cover_bookmark(start, used, c["duration"] or used, c.get("bookmarks") or [])
         transition, why = chosen[k] if k < len(chosen) else (None, None)
         shots.append(Shot(path=c["path"], kind=c["kind"], start=round(start, 2), seconds=seconds, transition=transition,
                           why=why, speed=speed, speed_why=speed_why, effects=effects, effects_why=effects_why))

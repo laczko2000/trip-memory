@@ -184,7 +184,7 @@ class Trip:
             "plan_role TEXT", "plan_pos REAL", "title_text TEXT", "title_sub TEXT", "title_style TEXT", "title_where TEXT",
             "focus_x REAL", "keep_start REAL", "keep_end REAL", "part_of TEXT",
             "theme TEXT", "theme_auto TEXT", "theme_sure REAL", "locks TEXT", "camera TEXT", "taken_orig TEXT", "postits TEXT",
-            "shot_of TEXT",
+            "shot_of TEXT", "crop TEXT",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
@@ -385,6 +385,7 @@ class Trip:
                     effects=self._with_parts(r["effects"], turned),
                     overlay=shown.get(r["path"]),
                     focus=where.get(r["path"]),
+                    crop=json.loads(r["crop"]) if r.get("crop") else None,
                 )
             )
         return result
@@ -816,6 +817,12 @@ class Trip:
             offset, length = r.get("keep_offset") or 0.0, r["duration"] or 0.0
             r["locks"] = [(max(0.0, a - offset), min(length, b - offset)) for a, b in locks
                           if min(length, b - offset) - max(0.0, a - offset) >= 0.3] if r["kind"] == "video" else []
+            # Your bookmarks (post-its): each is always inside the part of the clip the video uses.
+            marks = r.get("postits") or []
+            if isinstance(marks, str):
+                marks = json.loads(marks)
+            r["bookmarks"] = sorted(p["t"] - offset for p in marks if 0.0 <= p["t"] - offset <= length) \
+                if r["kind"] == "video" and not r["locks"] else []
         return pool
 
     def locks(self, path: str) -> list[list[float]]:
@@ -922,8 +929,6 @@ class Trip:
         for r, chapter in zip(rows, where):
             if chapter is None:
                 continue
-            if r.get("moment_at") is None and r.get("postits") and r["kind"] == "video":
-                r = r | {"moment_at": r["postits"][0]["t"]}  # the best bit you marked with a post-it
             if r.get("moment_at") is not None and r["kind"] == "video" and r["duration"] and not r.get("locks"):
                 # a moment you picked (a big jump...): only the seconds around it, inside the part you kept
                 start, end = kept_part(r) or (0.0, r["duration"])
@@ -1474,6 +1479,13 @@ class Trip:
             self.execute("UPDATE items SET thumb = ? WHERE path = ?", (str(self._make_thumb(row)), path))
         except Exception:
             traceback.print_exc()  # the old preview picture stays
+
+    def set_crop(self, path: str, zoom: float, x: float, y: float) -> None:
+        """Zoom in on a photo: the video shows only that part of it (zoom 1: the whole photo again)."""
+        zoom = min(max(float(zoom), 1.0), 5.0)
+        crop = None if zoom <= 1.001 else {"zoom": round(zoom, 3), "x": round(min(max(x, 0.0), 1.0), 4),
+                                            "y": round(min(max(y, 0.0), 1.0), 4)}
+        self.execute("UPDATE items SET crop = ? WHERE path = ?", (json.dumps(crop) if crop else None, path))
 
     @property
     def shots_dir(self) -> Path:

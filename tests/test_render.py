@@ -348,3 +348,15 @@ def test_timeline_titles_show_at_their_time_and_follow_their_shot(tmp_path):
 
     assert brightness(1.8) > brightness(0.6) + 5  # the white title is on screen only from 1 s to 2.5 s
     assert abs(brightness(3.0) - brightness(0.6)) < 3
+
+
+def test_a_zoomed_in_photo_shows_only_that_part():
+    from PIL import Image
+    from trip_memory.render import crop_photo
+
+    img = Image.new("RGB", (400, 200), "red")
+    assert crop_photo(img, None).size == (400, 200)
+    part = crop_photo(img, {"zoom": 2.0, "x": 0.9, "y": 0.5})  # too far right: kept inside the photo
+    assert part.size == (200, 100)
+    img.paste("blue", (200, 0, 400, 200))
+    assert crop_photo(img, {"zoom": 2.0, "x": 0.9, "y": 0.5}).getpixel((10, 50)) == (0, 0, 255)

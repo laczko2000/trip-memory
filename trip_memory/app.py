@@ -791,14 +791,32 @@ class Page:
                 .classes("text-sm")
             with ui.row().classes("justify-end w-full"):
                 ui.button("Cancel", on_click=dialog.close).props("flat")
-                ui.button(f"Remove {n}", icon="delete_sweep", on_click=lambda: (dialog.close(), self.remove_unchosen())) \
+                ui.button(f"Remove {n}", icon="delete_sweep", on_click=lambda: (dialog.close(), self.remove_unchosen())[1]) \
                     .props("color=negative")
         dialog.open()
 
-    def remove_unchosen(self) -> None:
+    async def remove_unchosen(self) -> None:
+        # The first ticked file in view stays exactly where it is on the screen: nothing jumps.
+        try:
+            anchor = await ui.run_javascript(
+                "(() => { const el = [...document.querySelectorAll('[data-tile]')].find(e => "
+                "e.getBoundingClientRect().bottom > 80 && !e.classList.contains('opacity-40')); "
+                "return el ? [el.dataset.tile, el.getBoundingClientRect().top] : null; })()", timeout=3)
+        except Exception:
+            anchor = None
         n = self.trip.remove_unchosen()
         ui.notify(f"Removed {n} files from the trip.", type="positive")
+        it = next((x for x in self.all_items if anchor and clip_id(x["path"]) == anchor[0]), None)
+        if it is None:
+            self.refresh_all()
+            return
+        self.choose_focus, self.choose_focus_path = it["story"], it["path"]  # draw down to it
+        self.choose_keep_scroll = True
         self.refresh_all()
+        self.choose_keep_scroll = False
+        ui.run_javascript(f"for (const ms of [100, 350, 800]) setTimeout(() => {{ const el = document.querySelector("
+                          f"'[data-tile=\"{anchor[0]}\"]'); if (el) window.scrollBy(0, el.getBoundingClientRect().top "
+                          f"- {float(anchor[1])}); }}, ms)")
 
     def restore(self, paths: list[str]) -> None:
         self.trip.restore(paths)
@@ -991,7 +1009,8 @@ class Page:
                                 self.choose_tile(it, in_set=True)
 
     def choose_tile(self, it: dict, in_set: bool) -> None:
-        with ui.column().classes("w-36 gap-0" + ("" if it["chosen"] else " opacity-40")) as tile:
+        with ui.column().classes("w-36 gap-0" + ("" if it["chosen"] else " opacity-40")) \
+                .props(f'data-tile="{clip_id(it["path"])}"') as tile:
             if it["path"] == self.choose_focus_path:
                 self.choose_focus_card = tile
             with ui.element("div").tooltip("Double-click: open it big (cut, split into shots, lock, theme)") as wrap:
@@ -1023,14 +1042,18 @@ class Page:
             return box
         file = Path(it.get("part_of") or it["path"])  # a part of a long clip plays from the clip itself
         src = self.video_src(file)
+        given_end = end is not None
         end = (it["duration"] or 0) if end is None else end
         kept = kept_part(it)
         if kept:  # a clip you cut: only the part you kept plays
             end = min(end, kept[1])
             start = start if kept[0] <= start < end else kept[0]
+        # Skimming: the mouse from left to right goes through the clip (the part you kept, or the part shown).
+        skim0 = start if given_end else (kept[0] if kept else 0.0)
+        skim = "" if view in ("part", "cut") else f'data-skim0="{skim0:.2f}" data-skim1="{end:.2f}" '
         length = f"✂ {fmt_length(kept[1] - kept[0])}" if kept else fmt_length(it["duration"])
         ui.html(
-            f'<div id="{box}" class="tm-hover" data-sound="{int(sound)}" data-start="{start:.2f}" data-end="{end:.2f}" data-rot="{it.get("rotation") or 0}" '
+            f'<div id="{box}" class="tm-hover" {skim}data-sound="{int(sound)}" data-start="{start:.2f}" data-end="{end:.2f}" data-rot="{it.get("rotation") or 0}" '
             f'style="position:relative;overflow:hidden;border-radius:4px;background:#222;{size}">'
             f'<img src="{thumb}" style="width:100%;height:100%;object-fit:contain">'
             f'<video data-src="{src}" {"" if sound else "muted "}playsinline preload="none" '
@@ -1118,11 +1141,11 @@ class Page:
                               f"const e = document.getElementById('{box}-' + s); if (e) e.style.width = w + '%'; }}")
 
         def moved(lo: float, hi: float) -> None:
-            # Show the handle you just moved: its frame, then a moment of what follows (or leads up to the end).
-            at = lo if lo != part["min"] else max(lo, hi - 1.5)
+            # The still frame where the handle you drag is (the start, or the last frame of the part)
+            at = lo if lo != part["min"] or hi == part["max"] else max(lo, hi - 0.05)
             part.update(min=lo, max=hi)
             show()
-            ui.run_javascript(f"tmPlayPart('{box}', {lo}, {hi}, {at})")
+            ui.run_javascript(f"tmShowAt('{box}', {lo}, {hi}, {at})")
 
         async def apply(whole: bool = False) -> None:
             if not whole and part["min"] <= start + 0.05 and part["max"] >= end - 0.05:
@@ -1350,10 +1373,11 @@ class Page:
                                   f"const e = document.getElementById('{box}-' + s); if (e) e.style.width = w + '%'; }}")
 
             def moved(lo: float, hi: float) -> None:
-                at = lo if lo != part["min"] else max(lo, hi - 1.5)
+                # The still frame where the handle you drag is (the start, or the last frame of the part)
+                at = lo if lo != part["min"] or hi == part["max"] else max(lo, hi - 0.05)
                 part.update(min=lo, max=hi)
                 show()
-                ui.run_javascript(f"tmPlayPart('{box}', {lo}, {hi}, {at})")
+                ui.run_javascript(f"tmShowAt('{box}', {lo}, {hi}, {at})")
 
             async def start() -> None:
                 ui.run_javascript(f"const b = document.getElementById('{box}'); if (b) {{ b.dataset.full0 = {full0}; "
@@ -1669,10 +1693,7 @@ class Page:
             with self.window_box, ui.dialog().props("maximized") as dialog, \
                     ui.card().classes("w-full h-full gap-2 overflow-auto"):
                 ui.label(Path(path).name).classes("text-lg font-semibold")
-                ui.image(data_url(it["thumb"])).props("fit=contain") \
-                    .style("width:100%;height:max(240px,calc(100vh - 200px))") \
-                    .classes("rounded bg-gray-800").on("dblclick", lambda: dialog.close()) \
-                    .tooltip("Double-click: close and go back")
+                self.photo_editor(it, dialog, mark)
                 controls(dialog)
                 with ui.row().classes("w-full justify-end"):
                     ui.button("Close", on_click=dialog.close).props("flat no-caps")
@@ -1725,6 +1746,72 @@ class Page:
              ("Make this a shot", "add_box", make_and_reopen, "color=green no-caps")],
             made=[(x["start"], x["end"], f"shot {k}") for k, x in enumerate(shots, 1)],
             extra=controls, on_hide=after, full=True)
+
+    def photo_editor(self, it: dict, dialog, mark) -> None:
+        """Zoom in on a photo and drag it to choose what shows: the video uses exactly that part."""
+        path = it["path"]
+        from PIL import Image
+
+        crop = json.loads(it["crop"]) if it.get("crop") else {}
+        state = {"zoom": float(crop.get("zoom", 1.0)), "x": float(crop.get("x", 0.5)), "y": float(crop.get("y", 0.5))}
+        try:
+            with Image.open(it["thumb"]) as img:
+                ratio = img.width / img.height
+        except (OSError, TypeError):
+            ratio = 1.5
+        key = f"tm-crop-{clip_id(path)}"
+        # Sharp when zoomed in: the photo itself (if the browser can show it and it isn't turned), else its preview.
+        sharp = data_url(it["thumb"])
+        if not it.get("rotation") and self.media_route and Path(path).suffix.lower() in (".jpg", ".jpeg", ".png", ".heic"):
+            try:
+                sharp = self.video_src(Path(path))
+            except ValueError:
+                pass
+        # The photo in a frame of its own shape; zooming and dragging move it inside the frame.
+        with ui.element("div").classes("w-full flex justify-center"):
+            frame = ui.html(
+                f'<div id="{key}" onpointerdown="tmCropDown(event, this)" style="position:relative;overflow:hidden;'
+                f'border-radius:6px;background:#1f2937;cursor:grab;touch-action:none;aspect-ratio:{ratio:.4f};'
+                f'height:min(calc(100vh - 230px), calc((100vw - 80px) / {ratio:.4f}));max-width:100%">'
+                f'<img src="{sharp}" onerror="this.onerror=null;this.src=\'{data_url(it["thumb"])}\'" draggable="false" style="position:absolute;inset:0;width:100%;'
+                f'height:100%;object-fit:fill;transform-origin:center;pointer-events:none"></div>', sanitize=False)
+        frame.on("dblclick", lambda: dialog.close())
+        info = ui.label().classes("text-xs text-gray-600 px-2")
+
+        def show(save: bool = True) -> None:
+            z = state["zoom"]
+            state["x"] = min(max(state["x"], 0.5 / z), 1 - 0.5 / z)
+            state["y"] = min(max(state["y"], 0.5 / z), 1 - 0.5 / z)
+            ui.run_javascript(f"tmCropShow('{key}', {z}, {state['x']}, {state['y']})")
+            info.text = ("The whole photo is shown. Zoom in to show only a part of it." if z <= 1.001 else
+                         f"Zoomed in {z:.1f}×: the video shows just this part. Drag the photo to move it.")
+            if save:
+                self.trip.set_crop(path, z, state["x"], state["y"])
+                mark()
+
+        def dragged(e) -> None:
+            state["x"], state["y"] = float(e.args["detail"]["x"]), float(e.args["detail"]["y"])
+            show()
+
+        frame.on("tmcrop", dragged, ["detail"])
+
+        def zoom_to(value: float) -> None:
+            state["zoom"] = min(max(value, 1.0), 5.0)
+            slider.value = state["zoom"]
+            show()
+
+        with ui.row().classes("w-full items-center gap-2 px-2"):
+            ui.button(icon="zoom_out", on_click=lambda: zoom_to(state["zoom"] / 1.25)).props("flat round dense") \
+                .tooltip("Zoom out")
+            slider = ui.slider(min=1.0, max=5.0, step=0.05, value=state["zoom"],
+                               on_change=lambda e: (state.update(zoom=float(e.value)), show())) \
+                .classes("w-64").props("dense")
+            ui.button(icon="zoom_in", on_click=lambda: zoom_to(state["zoom"] * 1.25)).props("flat round dense") \
+                .tooltip("Zoom in")
+            ui.button("Whole photo", icon="fit_screen",
+                      on_click=lambda: (state.update(x=0.5, y=0.5), zoom_to(1.0))).props("flat dense no-caps")
+            ui.label("Double-click the photo to close.").classes("text-xs text-gray-500")
+        ui.timer(0.2, lambda: show(save=False), once=True)
 
     async def open_in_library(self, path: str, name: str) -> None:
         """Double-click on a shot anywhere: show just that shot in the Library, with a button back here."""
@@ -5668,6 +5755,45 @@ function tmPlayPart(id, start, end, from, sound) {
   if (sound) tmVideo(box).muted = false;  // cutting a clip: hear it
   tmPlayFrom(box, from);
 }
+// The photo editor: the photo zoomed (z) with the point x, y (fractions of it) in the middle; drag to move it.
+function tmCropShow(id, z, x, y) {
+  const box = document.getElementById(id);
+  if (!box) return;
+  const img = box.querySelector('img');
+  box.dataset.z = z; box.dataset.x = x; box.dataset.y = y;
+  img.style.transform = `translate(${(0.5 - x) * box.clientWidth * z}px, ${(0.5 - y) * box.clientHeight * z}px) scale(${z})`;
+}
+function tmCropDown(e, box) {
+  const z = parseFloat(box.dataset.z || '1');
+  if (z <= 1.001) return;
+  const x0 = e.clientX, y0 = e.clientY, sx = parseFloat(box.dataset.x), sy = parseFloat(box.dataset.y);
+  const W = box.clientWidth * z, H = box.clientHeight * z;
+  box.setPointerCapture(e.pointerId);
+  box.style.cursor = 'grabbing';
+  let x = sx, y = sy;
+  const move = (ev) => {
+    x = Math.min(1 - 0.5 / z, Math.max(0.5 / z, sx - (ev.clientX - x0) / W));
+    y = Math.min(1 - 0.5 / z, Math.max(0.5 / z, sy - (ev.clientY - y0) / H));
+    tmCropShow(box.id, z, x, y);
+  };
+  const up = () => {
+    box.removeEventListener('pointermove', move); box.removeEventListener('pointerup', up);
+    box.style.cursor = 'grab';
+    if (x !== sx || y !== sy) box.dispatchEvent(new CustomEvent('tmcrop', {bubbles: true, detail: {x: x, y: y}}));
+  };
+  box.addEventListener('pointermove', move); box.addEventListener('pointerup', up);
+}
+// Dragging a green handle: the video stops and shows the frame where the handle is (Play plays the part).
+function tmShowAt(id, start, end, at) {
+  const box = document.getElementById(id);
+  if (!box) return;
+  if (tmPlaying && tmPlaying !== box) tmStop(tmPlaying);
+  tmPlaying = box;
+  box.dataset.start = start; box.dataset.end = end;
+  const v = tmVideo(box);
+  v.pause();
+  if (v.readyState >= 1) v.currentTime = at; else v.addEventListener('loadedmetadata', () => { v.currentTime = at; }, {once: true});
+}
 // Cutting a clip: the mouse along the picture strip (or across the picture) moves the video to that moment.
 function tmScrubAt(box, frac, play) {
   const a = parseFloat(box.dataset.full0), b = parseFloat(box.dataset.full1);
@@ -5699,6 +5825,37 @@ document.addEventListener('click', (e) => {
   const r = over.getBoundingClientRect();
   tmScrubAt(box, (e.clientX - r.left) / r.width, true);
 });
+// Skimming: moving the mouse left and right over a video goes through it (a thin line shows where); keep the
+// mouse still and it plays from there.
+let tmSkimTimer = null;
+document.addEventListener('mousemove', (e) => {
+  const box = e.target.closest && e.target.closest('.tm-hover');
+  if (!box || box.dataset.skim0 === undefined || box.dataset.scrub === '1') return;
+  const a = parseFloat(box.dataset.skim0), b = parseFloat(box.dataset.skim1);
+  if (!(b > a)) return;
+  const r = box.getBoundingClientRect(), frac = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+  const t = a + frac * (b - a);
+  if (box.dataset.hs === undefined) { box.dataset.hs = box.dataset.start; box.dataset.he = box.dataset.end; }
+  let line = box.querySelector('.tm-skim');
+  if (!line) {
+    line = document.createElement('div');
+    line.className = 'tm-skim';
+    line.style.cssText = 'position:absolute;top:0;bottom:0;width:2px;background:#facc15;box-shadow:0 0 3px #000;pointer-events:none;z-index:3';
+    box.appendChild(line);
+  }
+  line.style.left = (100 * frac) + '%';
+  if (tmPlaying && tmPlaying !== box) tmStop(tmPlaying);
+  tmPlaying = box;
+  const v = tmVideo(box);
+  v.pause();
+  if (v.readyState >= 1) v.currentTime = t; else v.addEventListener('loadedmetadata', () => { v.currentTime = t; }, {once: true});
+  clearTimeout(tmSkimTimer);
+  tmSkimTimer = setTimeout(() => {  // the mouse rests: play on from there (to the end, then from the start)
+    if (tmPlaying !== box) return;
+    box.dataset.start = a; box.dataset.end = b;
+    v.play().catch(() => {});
+  }, 350);
+});
 document.addEventListener('mouseenter', (e) => {
   const box = e.target.closest && e.target.closest('.tm-hover');
   if (!box || e.target !== box || box.dataset.scrub === '1') return;
@@ -5709,6 +5866,13 @@ document.addEventListener('mouseenter', (e) => {
 document.addEventListener('mouseleave', (e) => {
   const box = e.target.closest && e.target.closest('.tm-hover');
   if (!box || e.target !== box || box.dataset.scrub === '1') return;
+  clearTimeout(tmSkimTimer);
+  const line = box.querySelector('.tm-skim');
+  if (line) line.remove();
+  if (box.dataset.hs !== undefined) {  // hovering plays its usual part again next time
+    box.dataset.start = box.dataset.hs; box.dataset.end = box.dataset.he;
+    delete box.dataset.hs; delete box.dataset.he;
+  }
   tmStop(box);
 }, true);
 // Choose files is one long list: when you scroll near its bottom, press "Loading more" for you.

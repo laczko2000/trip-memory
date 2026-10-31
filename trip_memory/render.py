@@ -326,6 +326,7 @@ def _photo_segment(item: MediaItem, s: RenderSettings, out: Path, workdir: Path)
         # Pillow turns the photo the right way up and reads iPhone HEIC files, which FFmpeg may not.
         with Image.open(item.path) as img:
             img = ImageOps.exif_transpose(img).convert("RGB").rotate(-item.rotation, expand=True)
+            img = crop_photo(img, item.crop)
             img.thumbnail((3840, 3840))
             img.save(still, quality=92)
 
@@ -439,6 +440,17 @@ def _pick_move(path, canvas_is_tall: bool) -> str:
     return moves[int(hashlib.sha1(str(path).encode()).hexdigest(), 16) % len(moves)]
 
 
+def crop_photo(img: Image.Image, crop: dict | None) -> Image.Image:
+    """The part of a photo you zoomed in on: crop {"zoom", "x", "y"} (its middle as fractions of the picture)."""
+    zoom = float((crop or {}).get("zoom") or 1.0)
+    if zoom <= 1.001:
+        return img
+    w, h = img.width / zoom, img.height / zoom
+    x = min(max(float(crop.get("x", 0.5)), 0.5 / zoom), 1 - 0.5 / zoom) * img.width
+    y = min(max(float(crop.get("y", 0.5)), 0.5 / zoom), 1 - 0.5 / zoom) * img.height
+    return img.crop((round(x - w / 2), round(y - h / 2), round(x + w / 2), round(y + h / 2)))
+
+
 def _photo_canvas(img: Image.Image, w: int, h: int, focus: float | None = None, fill: bool = False) -> np.ndarray:
     """The photo fitted into the video frame (bigger, for zooming); empty sides filled with a blurred copy.
     fill (a phone video): the photo fills the frame instead, its sides cut off around the people (focus)."""
@@ -504,7 +516,8 @@ def _segment_key(item: MediaItem, s: RenderSettings) -> str:
     parts = [SEGMENT_VERSION, item.kind, item.path, stat.st_mtime, stat.st_size, s.width, s.height, item.rotation,
              sorted((item.overlay or {}).items()), item.focus if tall(s) else None]
     if item.kind == "photo":
-        parts += [item.seconds or s.photo_seconds, sorted((item.effects or {}).items())]
+        parts += [item.seconds or s.photo_seconds, sorted((item.effects or {}).items()),
+                  sorted((item.crop or {}).items())]
     elif item.kind == "title":
         parts += [item.title]
     else:
