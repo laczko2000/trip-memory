@@ -370,3 +370,35 @@ def test_every_bookmark_is_inside_the_part_used():
         start = autoedit.cover_bookmark(0.0, used, 8.0, [6.5])
         assert start <= 6.5 <= start + used and 0 <= start <= 8.0 - used
     assert autoedit.cover_bookmark(5.0, 3.0, 8.0, [6.5]) == 5.0  # already inside: left alone
+
+
+def test_more_moments_pack_spare_photos_into_collages_and_upright_videos_side_by_side():
+    def row(path, kind, minute, story=1, upright=False, duration=0.0):
+        return {"path": path, "kind": kind, "taken_at": f"2026-10-03T10:{minute:02d}:00", "story": story,
+                "upright": upright, "duration": duration}
+
+    photos = [row(f"p{k}.jpg", "photo", k) for k in range(10)]
+    videos = [row(f"v{k}.mov", "video", 20 + k, upright=True, duration=8.0) for k in range(4)]
+    wide = row("w.mov", "video", 30, upright=False, duration=8.0)
+    other = row("o.jpg", "photo", 1, story=2)
+    candidates = photos + videos + [wide, other]
+    shots = [autoedit.Shot(path="p0.jpg", kind="photo", seconds=2.0), autoedit.Shot(path="p5.jpg", kind="photo", seconds=2.0),
+             autoedit.Shot(path="v0.mov", kind="video", seconds=3.0), autoedit.Shot(path="w.mov", kind="video", seconds=3.0)]
+    normal = autoedit.pack(shots, candidates, autoedit.Limits(pack="normal"), {})
+    assert normal == shots
+
+    more = autoedit.pack(shots, candidates, autoedit.Limits(pack="more"), {})
+    first, second, video, landscape = more
+    assert len(first.effects["collage"]) == 2 and len(second.effects["collage"]) == 2  # 3 photos a cut
+    assert set(first.effects["collage"]) == {"p1.jpg", "p2.jpg"}  # the nearest in time to p0
+    assert "o.jpg" not in first.effects["collage"] + second.effects["collage"]  # never from another story
+    assert first.effects["appear"][0] == 0.0 and first.effects["appear"][1] >= autoedit.POP_GAP
+    assert video.effects["side"] == ["v1.mov"] and len(video.effects["starts"]) == 1
+    assert not landscape.effects  # a wide video stays alone
+
+    most = autoedit.pack(shots, candidates, autoedit.Limits(pack="max"), {})
+    assert len(most[0].effects["collage"]) == 3 and len(most[2].effects["side"]) == 2
+    used = [p for s in most for key in ("collage", "side") for p in s.effects.get(key, [])]
+    assert len(used) == len(set(used))  # each spare shot once
+    phone = autoedit.pack(shots, candidates, autoedit.Limits(pack="more", landscape=False), {})
+    assert not phone[2].effects  # in a phone video upright videos stay full screen

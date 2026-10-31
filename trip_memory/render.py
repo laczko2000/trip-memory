@@ -233,6 +233,55 @@ def _video_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
     return length
 
 
+def side_tiles(count: int, w: int, h: int) -> list[tuple[int, int, int, int]]:
+    """Upright videos next to each other (x, y, width, height): side by side across a landscape video,
+    one above the other in a phone video."""
+    g = max(2, round(max(w, h) * COLLAGE_GAP_SHARE))
+    if h > w:
+        th = (h - g * (count - 1)) // count
+        return [(0, k * (th + g), w, th) for k in range(count)]
+    tw = (w - g * (count - 1)) // count
+    return [(k * (tw + g), 0, tw, h) for k in range(count)]
+
+
+SIDE_STAGGER = 0.2  # each video next to the first slides in this much later
+
+
+def _side_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
+    """Two or three upright videos playing next to each other on one cut (the first one's sound)."""
+    fx = item.effects or {}
+    start, end = clip_range(item, s)
+    length = max(0.5, end - start)
+    others = list(fx.get("side") or [])
+    starts = list(fx.get("starts") or [0.0] * len(others))
+    turns = list(fx.get("turns") or [0] * len(others))
+    w, h = s.width, s.height
+    tiles = side_tiles(1 + len(others), w, h)
+    inputs = ["-f", "lavfi", "-t", f"{length:.3f}", "-i", f"color=c=0x0c0c0c:s={w}x{h}:r={FPS}"]
+    graph, prev = [], "0:v"
+    clips = [(str(item.path), start, item.rotation, (_hdr_to_sdr() if item.hdr else ""))] + \
+            [(p, float(a), int(t or 0), "") for p, a, t in zip(others, starts, turns)]
+    for k, ((path, at, turn, look), (x, y, tw, th)) in enumerate(zip(clips, tiles)):
+        n = inputs.count("-i")
+        inputs += ["-ss", f"{at:.3f}", "-t", f"{length:.3f}", "-i", path]
+        delay = SIDE_STAGGER * k
+        graph.append(f"[{n}:v]{look}{rotate_filter(turn)}setpts=PTS-STARTPTS+{delay:.3f}/TB,"
+                     f"scale={tw}:{th}:force_original_aspect_ratio=increase,setsar=1,crop={tw}:{th},fps={FPS},"
+                     f"tpad=stop_mode=clone:stop_duration={length:.3f},format=yuva420p[s{k}]")
+        graph.append(f"[{prev}][s{k}]overlay={x}:{y}:eof_action=pass:format=auto[o{k}]")
+        prev = f"o{k}"
+    graph.append(f"[{prev}]trim=duration={length:.3f},setpts=PTS-STARTPTS,format=yuv420p[v]")
+    if item.has_audio and item.sound and s.keep_clip_sound:
+        level = f"aformat=sample_rates=48000:channel_layouts=stereo,volume={item.volume * s.clip_volume:.2f}"
+        graph.append(f"[1:a]asetpts=PTS-STARTPTS,{level},apad,atrim=0:{length:.3f}[a]")
+    else:
+        n = inputs.count("-i")
+        inputs += ["-f", "lavfi", "-t", f"{length:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
+        graph.append(f"[{n}:a]anull[a]")
+    _encode_segment(inputs, ";".join(graph), length, out, s)
+    return length
+
+
 def _hit_filter(effects: dict, w: int, h: int) -> str:
     """A camera shake with a flash of light on the music's biggest hits (empty when the shot has none)."""
     hits = effects.get("shake") or []
@@ -544,7 +593,9 @@ def _prepare_segment(item: MediaItem, s: RenderSettings, cache_dir: Path, workdi
         os.utime(seg)  # mark as recently used
         return seg
     tmp = workdir / f"{seg.stem}.mp4"
-    if item.kind == "video":
+    if item.kind == "video" and (item.effects or {}).get("side"):
+        _side_segment(item, s, tmp)
+    elif item.kind == "video":
         _video_segment(item, s, tmp)
     elif (item.effects or {}).get("collage"):
         _collage_segment(item, s, tmp)

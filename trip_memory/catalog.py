@@ -20,7 +20,7 @@ import threading
 import traceback
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -329,7 +329,8 @@ class Trip:
                 and (not it["part_of"] or (it["part_of"] in clips and clips[it["part_of"]]["chosen"]
                                            and clips[it["part_of"]]["included"]))]
         # The photos inside a collage show as part of its first photo, not on their own.
-        inside = {p for r in rows if r["effects"] for p in json.loads(r["effects"]).get("collage", [])}
+        inside = {p for r in rows if r["effects"] for key in ("collage", "side")
+                  for p in json.loads(r["effects"]).get(key, [])}
         rows = [r for r in rows if r["path"] not in inside]
 
         def order(r: dict) -> tuple:  # by story, then the story's plan, then time
@@ -398,8 +399,9 @@ class Trip:
         if not effects:
             return None
         fx = json.loads(effects)
-        if fx.get("collage"):
-            fx["turns"] = [turned.get(p, 0) for p in fx["collage"]]
+        for key in ("collage", "side"):
+            if fx.get(key):
+                fx["turns"] = [turned.get(p, 0) for p in fx[key]]
         return fx
 
     def split_collage(self, path: str) -> None:
@@ -825,6 +827,52 @@ class Trip:
                             "trim_end = NULL, speed = 1.0, effects = NULL WHERE path = ?", (n, new))
             self.db.commit()
         self.fit_length(new, length)
+
+    def together(self, path: str) -> tuple[str | None, list[str]]:
+        """The shots that play on this cut with it: ("collage", photos) or ("side", upright videos), or (None, [])."""
+        row = self.query("SELECT effects FROM items WHERE path = ?", (path,))
+        fx = json.loads(row[0]["effects"]) if row and row[0]["effects"] else {}
+        for key in ("collage", "side"):
+            if fx.get(key):
+                return key, list(fx[key])
+        return None, []
+
+    def set_together(self, path: str, key: str, members: list[str]) -> None:
+        """Change the shots that play on this cut with it (a collage's photos or the videos next to it). The ones
+        taken off leave the video; with none left it plays alone."""
+        row = self.query("SELECT effects, seconds, trim_start, trim_end FROM items WHERE path = ?", (path,))
+        if not row:
+            return
+        fx = json.loads(row[0]["effects"]) if row[0]["effects"] else {}
+        old = list(fx.get(key) or [])
+        members = [m for m in dict.fromkeys(members) if m != path][: 3 if key == "collage" else 2]
+        self.checkpoint("changing a collage" if key == "collage" else "changing the videos side by side")
+        if key == "collage":
+            seconds = row[0]["seconds"] or 2.0
+            step = min(0.6, max(autoedit.POP_GAP, seconds * 0.6 / max(1, len(members))))
+            fx = {"collage": members, "appear": [round(k * step, 3) for k in range(len(members) + 1)]} if members else {}
+        else:
+            length = (row[0]["trim_end"] or 0) - (row[0]["trim_start"] or 0)
+            was = dict(zip(old, fx.get("starts") or []))
+            starts = []
+            for m in members:
+                if m in was:
+                    starts.append(was[m])
+                    continue
+                r = self.query("SELECT duration, keep_start, keep_end FROM items WHERE path = ?", (m,))
+                lo, hi = kept_part(dict(r[0])) or (0.0, r[0]["duration"] or 0.0) if r else (0.0, 0.0)
+                starts.append(round(max(lo, lo + (hi - lo - length) / 2), 2))
+            fx = {"side": members, "starts": starts} if members else {}
+        why = (f"Collage of {len(members) + 1} photos" if key == "collage" else f"{len(members) + 1} videos side by side") \
+            if members else None
+        with self._lock:
+            self.db.execute("UPDATE items SET effects = ?, effects_why = ? WHERE path = ?",
+                            (json.dumps(fx) if fx else None, why, path))
+            self.db.executemany("UPDATE items SET cut_out = 1, position = NULL WHERE path = ?",
+                                [(m,) for m in old if m not in members])
+            self.db.executemany("UPDATE items SET included = 1, chosen = 1, cut_out = 0, position = NULL WHERE path = ?",
+                                [(m,) for m in members if m not in old])
+            self.db.commit()
 
     def take_out(self, path: str, photo_seconds: float = 4.0) -> None:
         """Take a shot out of the video; the shot before it plays on for its time, so the later cuts stay put."""
@@ -1612,6 +1660,20 @@ class Trip:
             seen.append((start, end, r))  # a repeat of a repeat is a repeat too
         return out
 
+    @staticmethod
+    def _mark_upright(rows: list[dict]) -> None:
+        """Which shots stand upright (taller than wide, as shown: your turn counts), from their preview."""
+        for r in rows:
+            try:
+                with Image.open(r["thumb"]) as img:
+                    w, h = img.size
+            except (OSError, TypeError, KeyError):
+                r["upright"] = False
+                continue
+            if (r.get("rotation") or 0) % 180 == 90:
+                w, h = h, w
+            r["upright"] = h > w * 1.1
+
     def auto_edit_to_music(
         self,
         song_path: str,
@@ -1627,6 +1689,8 @@ class Trip:
         report = on_progress or (lambda _f, _m: None)
         rows = self.auto_edit_pool()
         self._frame_rates(rows)
+        self._mark_upright(rows)
+        limits = replace(limits, landscape=self.video_size() != "phone")
         scores = self._video_scores(rows, report)
         report(0.95, "Listening to the music")
         song = songmap.analyse(song_path, app_dir() / "music-maps")
@@ -1750,7 +1814,7 @@ class Trip:
                      shot.path),
                 )
             # The photos inside a collage are part of this cut (they show through its first photo).
-            parts = [(p,) for shot in result.shots for p in (shot.effects or {}).get("collage", [])]
+            parts = [(p,) for shot in result.shots for key in ("collage", "side") for p in (shot.effects or {}).get(key, [])]
             self.db.executemany("UPDATE items SET cut_out = 0, position = NULL WHERE path = ?", parts)
             # Left out of this cut, but still in your selection, so the next Auto-edit can use it again.
             self.db.executemany("UPDATE items SET cut_out = 1, position = NULL WHERE path = ?",

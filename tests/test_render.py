@@ -404,3 +404,22 @@ def test_every_transition_in_the_picker_joins(tmp_path):
     settings = RenderSettings(width=96, height=54)
     made = _join_once(segments, lengths, styles, settings, tmp_path / "out.mp4", lambda _f: None)
     assert abs(made - _planned_length(lengths, styles, settings)) < 0.1
+
+
+def test_upright_videos_play_side_by_side(tmp_path):
+    from trip_memory.render import side_tiles
+
+    trip = tmp_path / "trip"
+    trip.mkdir()
+    for n, colour in enumerate(["red", "green", "blue"]):
+        subprocess.run([ffmpeg_paths()[0], "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                        f"color=c={colour}:s=360x640:r=30:d=4", "-f", "lavfi", "-i", "sine=d=4", "-shortest",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", str(trip / f"{n}.mp4")], check=True)
+    first = next(i for i in scan_folder(trip)[0] if i.name == "0.mp4")
+    first.trim_start, first.trim_end = 0.5, 3.0
+    first.effects = {"side": [str(trip / "1.mp4"), str(trip / "2.mp4")], "starts": [1.0, 0.0]}
+    out = render([first], RenderSettings(width=640, height=360), tmp_path / "s.mp4")
+    assert abs(float(probe(str(out))["format"]["duration"]) - 2.5) < 0.1
+    frame = _frame(out, 1.5)
+    centres = [frame[y + th // 2, x + tw // 2].astype(int) for x, y, tw, th in side_tiles(3, 640, 360)]
+    assert centres[0][0] > 150 and centres[1][1] > 100 and centres[2][2] > 150  # red, green, blue next to each other

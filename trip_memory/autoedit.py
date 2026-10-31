@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import subprocess
+from datetime import datetime
 from dataclasses import dataclass, field, replace
 
 import numpy as np
@@ -348,6 +349,8 @@ class Limits:
     storyline: str = "teaser"  # how the shots are arranged: a key of STORYLINES
     speed_effects: bool = False  # slow motion in calm moments, sped-up shots in lively ones (off: normal speed)
     camera_effects: bool = True  # zoom transitions, punch-ins on big hits, slow push-ins, speed ramps
+    pack: str = "more"  # more moments per cut: photo collages, upright videos side by side (a key of PACK)
+    landscape: bool = True  # the video is wider than tall (upright videos can go side by side)
 
 
 @dataclass
@@ -784,6 +787,101 @@ FREEZE = 1.0  # seconds a freeze-frame holds, with the person's name on it
 FREEZE_GAP = 20.0  # at most one freeze-frame in this many seconds
 
 
+# How many moments one cut can hold. Normal: one shot a cut (a run of quick photos sometimes becomes a collage).
+PACK = {"normal": "Normal: one shot a cut", "more": "More moments: collages and videos side by side",
+        "max": "As many as fit"}
+POP_GAP = 0.45  # at least this many seconds between two photos popping into a collage
+SIDE_FROM = 1.4  # upright videos go side by side on cuts at least this long
+
+
+def _source(path: str) -> str:
+    return path.split("#")[0]
+
+
+def _when(row: dict) -> float:
+    try:
+        return datetime.fromisoformat(row["taken_at"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return 0.0
+
+
+def pack(shots: list[Shot], candidates: list[dict], limits: Limits, curves: dict) -> list[Shot]:
+    """More moments on the same cuts: a photo's cut becomes a collage of 2-4 photos from the same part of the
+    story (a photo alone becomes rare), and in a landscape video an upright video gets one or two other upright
+    videos next to it. They are shots the cut had no room for, nearest in time to the one already there."""
+    if limits.pack not in ("more", "max") or not shots:
+        return shots
+    rows = {r["path"]: r for r in candidates}
+    taken = {_source(s.path) for s in shots}
+    taken |= {_source(p) for s in shots for key in ("collage", "side") for p in s.effects.get(key, [])}
+    spare: dict[tuple, list[dict]] = {}
+    for r in candidates:
+        if _source(r["path"]) in taken or "#" in r["path"] or r.get("locks") or r.get("locked"):
+            continue
+        spare.setdefault((_group_of(r), r["kind"], bool(r.get("upright")) if r["kind"] == "video" else None), []).append(r)
+    most = limits.pack == "max"
+
+    def photo_ok(shot: Shot) -> bool:
+        return shot.kind == "photo" and not shot.effects and not rows.get(shot.path, {}).get("locked")
+
+    def video_ok(shot: Shot) -> bool:
+        r = rows.get(shot.path, {})
+        return (limits.landscape and shot.kind == "video" and not shot.effects and abs(shot.speed - 1) < 1e-3
+                and r.get("upright") and not r.get("locked") and "#" not in shot.path and shot.seconds >= SIDE_FROM)
+
+    # (cuts still to come in each group: the spare shots are shared fairly between them)
+    ahead: dict[tuple, int] = {}
+    for shot in shots:
+        r = rows.get(shot.path, {})
+        if photo_ok(shot):
+            ahead[(_group_of(r), "photo", None)] = ahead.get((_group_of(r), "photo", None), 0) + 1
+        elif video_ok(shot):
+            ahead[(_group_of(r), "video", True)] = ahead.get((_group_of(r), "video", True), 0) + 1
+    out = []
+    for shot in shots:
+        r = rows.get(shot.path, {})
+        if photo_ok(shot):
+            key = (_group_of(r), "photo", None)
+            room = spare.get(key, [])
+            ahead[key] -= 1
+            want = (4 if shot.seconds >= 1.4 else 3) if most else (3 if shot.seconds >= 1.8 else 2)
+            want = min(want, 1 + int(shot.seconds * 0.7 / POP_GAP))
+            share = -(-len(room) // (ahead[key] + 1)) if room else 0  # (rounded up)
+            extra = min(want - 1, share)
+            if extra >= 1:
+                when = _when(r)
+                room.sort(key=lambda x: abs(_when(x) - when))
+                group, spare[key] = room[:extra], room[extra:]
+                step = min(0.6, max(POP_GAP, shot.seconds * 0.6 / extra))
+                shot = replace(shot, effects={"collage": [g["path"] for g in group],
+                                              "appear": [round(k * step, 3) for k in range(extra + 1)]},
+                               effects_why=f"Collage of {extra + 1} photos: more moments on one cut")
+        elif video_ok(shot):
+            key = (_group_of(r), "video", True)
+            ahead[key] -= 1
+            room = [x for x in spare.get(key, []) if (x.get("duration") or 0) >= shot.seconds]
+            want = (3 if shot.seconds >= 2.5 else 2) if most else 2
+            share = -(-len(room) // (ahead[key] + 1)) if room else 0
+            extra = min(want - 1, share)
+            if extra >= 1:
+                when = _when(r)
+                room.sort(key=lambda x: abs(_when(x) - when))
+                group = room[:extra]
+                spare[key] = [x for x in spare.get(key, []) if x not in group]
+                starts = []
+                for g in group:
+                    length = g.get("duration") or shot.seconds
+                    curve = curves.get(g["path"])
+                    a = best_start(curve, length, shot.seconds) if curve is not None else (length - shot.seconds) / 2
+                    a = cover_bookmark(min(max(0.0, a), length - shot.seconds), shot.seconds, length,
+                                       g.get("bookmarks") or [])
+                    starts.append(round(a + (g.get("keep_offset") or 0.0), 2))
+                shot = replace(shot, effects={"side": [g["path"] for g in group], "starts": starts},
+                               effects_why=f"{extra + 1} upright videos side by side: more moments on one cut")
+        out.append(shot)
+    return out
+
+
 def freeze_for(row: dict, slot: Slot, seconds: float, introduced: set[str], since: float) -> tuple[dict, str | None]:
     """The first good video of someone you named ends frozen for a moment with their name, like a film
     introducing its cast. Not in the busiest music, and not too often."""
@@ -1052,9 +1150,10 @@ def plan_to_music(
         transition, why = chosen[k] if k < len(chosen) else (None, None)
         shots.append(Shot(path=c["path"], kind=c["kind"], start=round(start, 2), seconds=seconds, transition=transition,
                           why=why, speed=speed, speed_why=speed_why, effects=effects, effects_why=effects_why))
-    if limits.camera_effects:
+    if limits.camera_effects and limits.pack not in ("more", "max"):
         shots = collages(shots, slots, {r["path"]: r for r in candidates}, transition_seconds)
-    used = {s.path for s in shots} | {p for s in shots for p in s.effects.get("collage", [])}
+    shots = pack(shots, candidates, limits, curves)
+    used = {s.path for s in shots} | {p for s in shots for key in ("collage", "side") for p in s.effects.get(key, [])}
     used |= {parts[p][0] for p in used if p in parts}
     length = begin / 30
     pins = sum(1 for k in range(1, len(slots)) if slots[k].tapped or slots[k - 1].tapped)

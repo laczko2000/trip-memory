@@ -99,6 +99,11 @@ def pil_data_url(picture) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(out.getvalue()).decode()
 
 
+def autoedit_pack() -> dict:
+    from .autoedit import PACK
+    return PACK
+
+
 def data_url(path: str | None) -> str:
     """Web address for a thumbnail stored in the app's data folder."""
     if not path:
@@ -3555,6 +3560,14 @@ class Page:
                     ui.switch("Finale: end with the most exciting shots", value=line["finale"],
                               on_change=lambda e: self.set_finale(e.value))
             with ui.row().classes("w-full items-center gap-3"):
+                ui.label("Moments per cut:").classes("text-sm")
+                ui.toggle({"normal": "Normal", "more": "More", "max": "As many as fit"},
+                          value=self.auto_limits.pack if self.auto_limits.pack in autoedit_pack() else "more",
+                          on_change=lambda e: self.set_limit("pack", e.value)).props("dense no-caps") \
+                    .tooltip("More: photos you have no room for become collages of 2–4 on one cut (a photo alone is "
+                             "rare), and upright videos play side by side in a landscape video. As many as fit: up "
+                             "to 4 photos and 3 videos on every cut. Normal: one shot a cut.")
+            with ui.row().classes("w-full items-center gap-3"):
                 ui.button("Make the first cut", icon="auto_fix_high", on_click=self.run_auto_edit) \
                     .tooltip("Replaces the storyboard's order, trims and transitions; Undo brings them back")
                 ui.button("Update the video", icon="published_with_changes", on_click=self.update_video) \
@@ -3988,7 +4001,7 @@ class Page:
             try:
                 prompt = director.story_prompt(director.with_answers(idea, [tuple(a) for a in answers]),
                                                self._story_blocks_info(blocks), before[-4:] or None,
-                                               self.video_seconds())
+                                               self.video_seconds(), packed=self.auto_limits.pack in ("more", "max"))
                 answer = await self._think(ai, ai.story, prompt, "working on your story")
                 if answer is None:
                     ui.notify("Stopped: your story stays as it was. Press Make my story to try again.")
@@ -5860,6 +5873,9 @@ class Page:
                     "fin": round(max(0.0, times[k - 1]["start"] + times[k - 1]["length"] - at["start"]), 3) if k else 0,
                     "tr": transitions.LOOKS.get((board[k - 1].get("transition") or self.transition_name()) if k else "",
                                                 "fade")}
+            fx = json.loads(r["effects"]) if r.get("effects") else {}
+            if fx.get("collage") or fx.get("side"):
+                clip["tiles"] = self.instant_tiles(r, fx)
             if r["kind"] == "video":
                 clip.update(a=round(r["trim_start"] if r["trim_start"] is not None else (r["keep_start"] or 0.0), 3),
                             sp=r.get("speed") or 1.0, snd=bool(r.get("clip_sound")),
@@ -5875,6 +5891,35 @@ class Page:
                 "mvol": self.music_vol.value if getattr(self, "music_vol", None) else 0.5,
                 "fade": self.t_len.value if getattr(self, "t_len", None) else 0.8,
                 "loop": list(loop) if loop else None}
+
+    def instant_tiles(self, r: dict, fx: dict) -> list[dict]:
+        """A collage's photos or the videos side by side, for the instant player: where each goes (shares of the
+        picture), when a photo pops in, where a video starts."""
+        from .render import collage_tiles, side_tiles
+
+        w, h = RESOLUTIONS[self.resolution.value] if getattr(self, "resolution", None) else (1920, 1080)
+        items = {it["path"]: it for it in self.items}
+        side = bool(fx.get("side"))
+        paths = [r["path"], *(fx.get("side") or fx.get("collage") or [])]
+        places = (side_tiles if side else collage_tiles)(len(paths), w, h)
+        appear = list(fx.get("appear") or [])
+        starts = list(fx.get("starts") or [])
+        out = []
+        for k, (path, (x, y, tw, th)) in enumerate(zip(paths, places)):
+            tile = {"x": round(x / w, 4), "y": round(y / h, 4), "w": round(tw / w, 4), "h": round(th / h, 4)}
+            if k:
+                it = items.get(path) or {}
+                thumb = data_url(it.get("thumb")) if it.get("thumb") else ""
+                try:
+                    src = self.video_src(Path(path)) if side or Path(path).suffix.lower() in (
+                        ".jpg", ".jpeg", ".png", ".webp", ".gif") else thumb
+                except ValueError:
+                    src = thumb
+                tile.update(k="v" if side else "p", src=src or thumb, fb=thumb, rot=it.get("rotation") or 0,
+                            at=appear[k] if k < len(appear) else 0.0,
+                            a=float(starts[k - 1]) if side and k - 1 < len(starts) else 0.0)
+            out.append(tile)
+        return out
 
     def editor_window(self, draft: dict | None, board: list[dict], now: list, changed: bool) -> None:
         """The editor over the whole screen: the player and the clip (or title) you picked on top, the timeline
@@ -6318,7 +6363,9 @@ class Page:
             speed = r.get("speed") or 1.0
             pace = "" if r["kind"] != "video" or abs(speed - 1) < 0.01 else \
                 f" {'⏩' if speed > 1 else '🐢'}{speed:g}×"
-            ui.label(f"{n + 1}" + (" 🔒" if locked else "") + (" ⇆" if r.get("reverse") else "") + pace).classes(
+            fx = json.loads(r["effects"]) if r.get("effects") else {}
+            many = f" 🧩{len(fx['collage']) + 1}" if fx.get("collage") else f" 🎞{len(fx['side']) + 1}" if fx.get("side") else ""
+            ui.label(f"{n + 1}" + many + (" 🔒" if locked else "") + (" ⇆" if r.get("reverse") else "") + pace).classes(
                 "absolute left-1 top-0 text-[10px] font-bold text-white whitespace-nowrap").style("text-shadow:0 0 3px #000")
             ui.label(f"{length:.1f}s").classes("absolute left-1 bottom-0 text-[10px] text-white") \
                 .style("text-shadow:0 0 3px #000")
@@ -6500,6 +6547,7 @@ class Page:
                 ui.button("Open it big", icon="open_in_full",
                           on_click=lambda: self.shot_window(r["path"], "Make video")).props("flat no-caps") \
                     .tooltip("Theme, cut, lock, split (or double-click the clip)")
+            self.together_panel(r)
             if r["kind"] == "video":
                 self.sound_control(r, on_change=self.sound_changed)
                 self.draft_speed(r, length)
@@ -6507,6 +6555,90 @@ class Page:
                     ui.switch("⇆ Play backwards", value=bool(r.get("reverse")),
                               on_change=lambda e: self.draft_reverse(r, e.value)).props("dense")
                 self.lock_area(r, "story")
+
+    def together_panel(self, r: dict) -> None:
+        """A collage or videos side by side: every shot on this cut as a box; take one off, swap it or add one."""
+        key, members = self.trip.together(r["path"])
+        if not key and r["kind"] != "photo" and not self._upright(r):
+            return
+        thumbs = {it["path"]: it for it in self.items}
+        room = (3 if key == "collage" or (not key and r["kind"] == "photo") else 2) - len(members)
+        with ui.column().classes("w-full gap-1 p-2 rounded bg-purple-50"):
+            if key:
+                ui.label(("🧩 Collage: " if key == "collage" else "🎞 Side by side: ")
+                         + f"{len(members) + 1} {'photos' if key == 'collage' else 'videos'} on this cut") \
+                    .classes("text-sm font-medium text-purple-900")
+            with ui.row().classes("gap-2 items-start"):
+                for n, path in enumerate([r["path"], *members]):
+                    it = thumbs.get(path) or {}
+                    with ui.column().classes("gap-0 items-center"):
+                        ui.image(data_url(it.get("thumb"))).style("width:64px;height:44px;object-fit:cover;"
+                                                                  "border-radius:4px;border:2px solid #a855f7")
+                        if n:
+                            with ui.row().classes("gap-0"):
+                                ui.button(icon="swap_horiz", on_click=lambda p=path: self.together_pick(r, key, members, p)) \
+                                    .props("flat dense round size=xs color=purple").tooltip("Swap it for another")
+                                ui.button(icon="close", on_click=lambda p=path: self.together_set(
+                                    r, key, [m for m in members if m != p], "Taken off this cut")) \
+                                    .props("flat dense round size=xs color=negative").tooltip("Take it off this cut")
+                        else:
+                            ui.label("first").classes("text-[10px] text-gray-500")
+                if room > 0 and (key or r["kind"] == "photo" or self._upright(r)):
+                    kind = key or ("collage" if r["kind"] == "photo" else "side")
+                    ui.button("+ Add one", on_click=lambda: self.together_pick(r, kind, members, None)) \
+                        .props("outline dense no-caps size=sm color=purple") \
+                        .tooltip("Another photo into the collage" if kind == "collage"
+                                 else "Another upright video next to this one")
+            if key:
+                ui.label("The photos pop in one after another on this cut." if key == "collage" else
+                         "They play together; the sound is the first one's.").classes("text-xs text-gray-600")
+
+    def _upright(self, r: dict) -> bool:
+        rows = [dict(r)]
+        Trip._mark_upright(rows)
+        return bool(rows[0]["upright"]) and self.trip.video_size() != "phone"
+
+    def together_set(self, r: dict, key: str, members: list[str], message: str) -> None:
+        self.trip.set_together(r["path"], key, members)
+        self.draft_changed(message)
+
+    def together_pick(self, r: dict, key: str, members: list[str], replacing: str | None) -> None:
+        """Choose a shot for this cut's collage (photos) or to play next to it (upright videos): from the same
+        story, ones not in the video yet."""
+        board = self.trip.storyboard()
+        busy = {x["part_of"] or x["path"] for x in board}
+        for x in board:
+            busy |= set(self.trip.together(x["path"])[1])
+        theme = self.theme_of(r)
+        others = [it for it in self.items if it["path"] not in busy and it["thumb"] and it["chosen"] and it["included"]
+                  and it["kind"] == ("photo" if key == "collage" else "video")]
+        if key == "side":
+            Trip._mark_upright(others)
+            others = [it for it in others if it["upright"]]
+        others.sort(key=lambda it: (self.theme_of(it) != theme, it.get("story") != r.get("story"),
+                                    abs(datetime.fromisoformat(it["taken_at"]).timestamp()
+                                        - datetime.fromisoformat(r["taken_at"]).timestamp())))
+        with ui.dialog() as dialog, ui.card().classes("w-[56rem] max-w-full"):
+            ui.label(("Swap this photo" if replacing else "Add a photo to the collage") if key == "collage" else
+                     ("Swap this video" if replacing else "Add an upright video next to it")).classes("text-lg font-semibold")
+            ui.label(f"Not in the video yet; {theme} shots and the nearest in time first.").classes("text-sm text-gray-600")
+            if not others:
+                ui.label("Every one is in the video already.").classes("text-sm text-gray-600")
+            with ui.element("div").classes("w-full grid grid-cols-4 gap-2 max-h-[60vh] overflow-auto"):
+                for it in others[:80]:
+                    with ui.element("div").classes("rounded p-1 cursor-pointer hover:bg-purple-50") as tile:
+                        self.preview(it, "width:100%;aspect-ratio:16/10", start=self.hover_start(it), view="swap")
+                        ui.label(f"{self.theme_of(it)} · {fmt_time(it['taken_at'])}").classes("text-xs text-gray-600")
+
+                    def use(it=it) -> None:
+                        dialog.close()
+                        new = [it["path"] if m == replacing else m for m in members] if replacing else [*members, it["path"]]
+                        self.together_set(r, key, new, "Swapped." if replacing else "Added to this cut.")
+
+                    tile.on("click", use)
+            with ui.row().classes("justify-end w-full"):
+                ui.button("Cancel", on_click=dialog.close).props("flat")
+        dialog.open()
 
     def sound_changed(self) -> None:
         """A clip's sound on or off, or louder: the instant player plays it so straight away."""
@@ -7256,6 +7388,25 @@ function tmInstant(id, data, onTime) {
   const place = (s, c, i) => {
     s._i = i;
     const v = s.querySelector('video'), im = s.querySelector('img');
+    (s._extra || []).forEach(x => { if (x.el.pause) x.el.pause(); x.el.remove(); });
+    s._extra = [];
+    [v, im].forEach(m => { if (m._css === undefined) m._css = m.style.cssText; });
+    if (c.tiles) {  // a collage or videos side by side: the first in its place, the others around it
+      const t0 = c.tiles[0], box = `left:${100 * t0.x}%;top:${100 * t0.y}%;width:${100 * t0.w}%;height:${100 * t0.h}%;`;
+      [v, im].forEach(m => { const hide = m.style.display; m.style.cssText = 'position:absolute;object-fit:cover;' + box; m.style.display = hide; });
+      c.tiles.slice(1).forEach(t => {
+        const el = document.createElement(t.k === 'v' ? 'video' : 'img');
+        el.style.cssText = `position:absolute;left:${100 * t.x}%;top:${100 * t.y}%;width:${100 * t.w}%;height:${100 * t.h}%;object-fit:cover;opacity:0;transition:opacity .15s,transform .18s`;
+        if (t.rot) el.style.rotate = t.rot + 'deg';
+        if (t.k === 'v') { el.muted = true; el.playsInline = true; el.preload = 'auto'; el.onloadedmetadata = () => { el._ready = true; }; }
+        el.onerror = () => { el.onerror = null; if (t.fb && t.k !== 'v') el.src = t.fb; };
+        el.src = t.src;
+        s.appendChild(el);
+        s._extra.push({el: el, t: t});
+      });
+    } else {
+      [v, im].forEach(m => { const hide = m.style.display; m.style.cssText = m._css; m.style.display = hide; });
+    }
     if (c.k === 'v') {
       im.style.display = 'none'; v.style.display = '';
       if (v._src !== c.src) {
@@ -7311,6 +7462,24 @@ function tmInstant(id, data, onTime) {
       } else {
         im.style.transform = look(s, c) + ` scale(${1 + 0.05 * local / Math.max(0.1, c.len)})`;  // a gentle push in
       }
+      (s._extra || []).forEach(({el, t}) => {
+        if (t.k === 'v') {
+          el.style.opacity = 1;
+          if (!el._ready) return;
+          const want = t.a + local;
+          if (on && playing) {
+            if (Math.abs(el.currentTime - want) > 0.3 && !el.seeking) el.currentTime = want;
+            if (el.paused) el.play().catch(() => {});
+          } else {
+            if (!el.paused) el.pause();
+            if (Math.abs(el.currentTime - want) > 0.05 && !el.seeking) el.currentTime = want;
+          }
+        } else {
+          const shown = local >= (t.at || 0);
+          el.style.opacity = shown ? 1 : 0;
+          el.style.transform = shown ? 'scale(1)' : 'scale(.82)';
+        }
+      });
     });
     if (button) button.textContent = playing ? '❚❚' : '▶';
     if (onTime && (hard || T !== shown)) onTime(T);
@@ -7331,7 +7500,7 @@ function tmInstant(id, data, onTime) {
   const stop = () => {
     dead = true; cancelAnimationFrame(raf); playing = false;
     if (music) { music.pause(); music.src = ''; }
-    slots.forEach(s => { const v = s.querySelector('video'); if (v) v.pause(); });
+    slots.forEach(s => s.querySelectorAll('video').forEach(v => v.pause()));
     if (window.tmInst[id] && window.tmInst[id].el === el) delete window.tmInst[id];
   };
   const seek = (x) => {

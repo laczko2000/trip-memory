@@ -239,7 +239,7 @@ Rules:
   else" or "the rest". Never put one before what they named first or after what they said to end with.
 - Give each part a length in seconds. All parts together must add up to {seconds} seconds. Give more time to what
   the person cares about most and to themes with many shots; a part needs at least 4 seconds per 2 shots.
-Answer:
+{packing}Answer:
 - title: a short name for this story (2 to 5 words).
 - parts: 2 to 7 parts. Each has:
   - name: a short name for the part (e.g. "Arrival", "Kitesurfing build-up", "Slow breather", "Best jumps").
@@ -360,15 +360,23 @@ STORY_SCHEMA = {
 }
 
 
-def story_prompt(idea: str, blocks: list[dict], before: list[str] | None = None, seconds: float = 180) -> str:
+PACKING = """- More moments fit than there are cuts: the app shows photos as collages of 2 to 4 on one cut (a photo
+  alone is rare) and upright videos side by side. So a theme with many photos needs less time than its count
+  suggests (about 4 seconds per 6 photos); never leave a theme's photos out for lack of time, and prefer pick
+  "all" for photo-rich themes.
+"""
+
+
+def story_prompt(idea: str, blocks: list[dict], before: list[str] | None = None, seconds: float = 180,
+                 packed: bool = False) -> str:
     """blocks: {"name", "count", "days", "places"}. before: titles of stories already offered (for another idea).
-    seconds: how long the video is."""
+    seconds: how long the video is. packed: several moments go on one cut (collages, videos side by side)."""
     lines = [f"{n}. {b['name']} · {b['count']} shots" + (f" · {b['days']}" if b.get("days") else "")
              + (f" · {b['places']}" if b.get("places") else "") for n, b in enumerate(blocks, 1)]
     variation = (f"\nYou already offered: {'; '.join(before)}. Make a clearly different story this time.\n"
                  if before else "")
     return STORY_PROMPT.format(blocks="\n".join(lines), idea=" ".join(idea.split())[:2000] or SURPRISE,
-                               variation=variation, seconds=round(seconds))
+                               variation=variation, seconds=round(seconds), packing=PACKING if packed else "")
 
 
 def clean_story(answer: dict, count: int) -> dict:
