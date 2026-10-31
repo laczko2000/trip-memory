@@ -394,7 +394,7 @@ def test_more_moments_pack_spare_photos_into_collages_and_upright_videos_side_by
     assert set(first.effects["collage"]) == {"p1.jpg", "p2.jpg"}  # the nearest in time to p0
     assert "o.jpg" not in first.effects["collage"] + second.effects["collage"]  # never from another story
     assert first.effects["appear"][0] == 0.0 and first.effects["appear"][1] >= autoedit.POP_GAP
-    assert video.effects["side"] == ["v1.mov"] and len(video.effects["starts"]) == 1
+    assert video.effects["side"] == ["v1.mov", "v2.mov"] and len(video.effects["starts"]) == 2  # three on a 3 s cut
     assert not landscape.effects  # a wide video stays alone
 
     most = autoedit.pack(shots, candidates, autoedit.Limits(pack="max"), {})
@@ -416,5 +416,10 @@ def test_an_upright_video_in_a_landscape_video_always_gets_company():
     out = pack(shots, rows, Limits(pack="normal", landscape=True), {})
     assert all(s.effects.get("side") for s in out)
     first = out[0].effects
-    assert first["side"] == ["/v1.mp4"] and first["starts"][0] >= 3.0 + 0.5
+    assert len(first["side"]) == 2 and "/v0.mp4" in first["side"]  # three moments: one of them its own
+    own = first["starts"][first["side"].index("/v0.mp4")]
+    assert own >= 3.0 + 0.5  # another moment of itself, never the seconds it shows
+    short = pack([Shot(path="/v0.mp4", kind="video", start=0.0, seconds=1.6)], rows[:1],
+                 Limits(pack="normal", landscape=True), {})
+    assert short[0].effects["side"] == ["/v0.mp4"]  # alone in the trip: two of its own moments side by side
     assert _free_part(4.0, 3.0, [(0.0, 3.0)]) is None

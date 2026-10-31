@@ -245,7 +245,7 @@ def side_tiles(count: int, w: int, h: int) -> list[tuple[int, int, int, int]]:
     return [(k * (tw + g), 0, tw, h) for k in range(count)]
 
 
-SIDE_STAGGER = 0.2  # each video next to the first slides in this much later
+SIDE_STAGGER = 0.35  # each video next to the first slides in this much later
 
 
 def _side_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
