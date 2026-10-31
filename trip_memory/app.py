@@ -2690,8 +2690,10 @@ class Page:
                                 .tooltip("See this theme's shots: tick to put one in, untick to keep it out")
                             if entry["pick"] == "moment":
                                 activity = entry["key"].partition("|")[0]
-                                look = ui.input(value=entry.get("moment", ""), placeholder="e.g. kite jump") \
-                                    .props("dense borderless").classes("text-xs w-28")
+                                look = ui.input(value=entry.get("moment", ""), placeholder="e.g. kite jump",
+                                                autocomplete=self.trip.moment_names(activity)) \
+                                    .props("dense borderless").classes("text-xs w-28") \
+                                    .tooltip("Type a few letters: names you used before are offered (Tab takes one)")
                                 look.on("blur", lambda e, n=n, m=m, f=look: self.edit_entry(n, m, moment=f.value))
                                 saved = self.trip.moment(activity, entry.get("moment") or "") \
                                     if entry.get("moment") else None
@@ -3408,7 +3410,13 @@ class Page:
         with ui.dialog() as dialog, ui.card().classes("w-96"):
             ui.label(f"A moment inside {activity}").classes("text-lg font-semibold")
             ui.label("What happens in it? e.g. kite jump, falling in the water, sunset").classes("text-sm text-gray-600")
-            field = ui.input("Moment").props("outlined autofocus").classes("w-full")
+            names = self.trip.moment_names(activity)
+            field = ui.input("Moment", autocomplete=names).props("outlined autofocus").classes("w-full")
+            if names:
+                ui.label("Used before (click one, or type and press Tab):").classes("text-xs text-gray-500")
+                with ui.row().classes("gap-1"):
+                    for name in names[:8]:
+                        ui.chip(name, on_click=lambda name=name: field.set_value(name)).props("dense clickable outline")
 
             def go() -> None:
                 name = " ".join((field.value or "").split())

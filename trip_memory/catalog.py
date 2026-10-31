@@ -782,12 +782,9 @@ class Trip:
         if shots:
             trips[self.dir.name] = shots  # the latest trip last; the oldest go first
         rows = self.query("SELECT value FROM meta WHERE key = 'activities'")
-        learned = {"activities": json.loads(rows[0]["value"]) if rows else learned.get("activities"),
-                   "trips": dict(list(trips.items())[-self.LEARNED_TRIPS:])}
-        try:
-            LEARNED_FILE().write_text(json.dumps(learned))
-        except OSError:
-            pass
+        learned |= {"activities": json.loads(rows[0]["value"]) if rows else learned.get("activities"),
+                    "trips": dict(list(trips.items())[-self.LEARNED_TRIPS:])}
+        _save_learned(learned)
 
     def earlier_trips_learned(self) -> int:
         return sum(1 for k in (_learned_themes().get("trips") or {}) if k != self.dir.name)
@@ -955,6 +952,21 @@ class Trip:
 
     def _save_moments(self, found: list[dict]) -> None:
         self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('moments', ?)", (json.dumps(found),))
+        learned = _learned_themes()  # the names are offered again as you type, in this trip and the next ones
+        names = [m for m in learned.get("moments") or []
+                 if not any(f["name"].lower() == m["name"].lower() and f["activity"] == m["activity"] for f in found)]
+        _save_learned(learned | {"moments": (names + [{"name": f["name"], "activity": f["activity"]}
+                                                      for f in found])[-200:]})
+
+    def moment_names(self, activity: str | None = None) -> list[str]:
+        """Moment names you used before (this trip's and earlier trips'), this activity's first: offered as you type."""
+        seen = self.moments() + [m for m in reversed(_learned_themes().get("moments") or [])]
+        first = [m["name"] for m in seen if m["activity"] == activity]
+        out: list[str] = []
+        for name in first + [m["name"] for m in seen]:
+            if name.lower() not in {n.lower() for n in out}:
+                out.append(name)
+        return out
 
     def moment(self, activity: str, name: str) -> dict | None:
         return next((m for m in self.moments() if m["activity"] == activity and m["name"].lower() == name.lower()),
@@ -2471,6 +2483,13 @@ def _learned_themes() -> dict:
         return json.loads(LEARNED_FILE().read_text())
     except (OSError, ValueError):
         return {}
+
+
+def _save_learned(learned: dict) -> None:
+    try:
+        LEARNED_FILE().write_text(json.dumps(learned))
+    except OSError:
+        pass
 
 
 def _look_vector(blob: bytes | None) -> np.ndarray | None:

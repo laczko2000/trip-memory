@@ -690,3 +690,16 @@ def test_your_themes_and_what_they_look_like_carry_over_to_the_next_trip(tmp_pat
     crete.suggest_themes()
     first = next(r for r in crete.theme_rows() if r["path"].endswith("p0.jpg"))
     assert first["theme"] == "Kitesurfing" and not first["theme_ok"]  # learned in Tarifa, suggested in Crete
+
+
+def test_moment_names_are_offered_again_in_the_next_trip(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+    a = catalog.Trip(tmp_path / "a")
+    a.add_moment("Kitesurfing", "kite jump")
+    a.add_moment("Food & drink", "cheers")
+    b = catalog.Trip(tmp_path / "b")
+    assert b.moment_names("Kitesurfing") == ["kite jump", "cheers"]
+    assert b.moment_names("Food & drink")[0] == "cheers"

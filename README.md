@@ -59,6 +59,7 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **0.71:** moment names are offered as you type (*+ Moment* in Themes and the moment box in *My story*): names you used before, in this trip or earlier ones, appear greyed out; Tab takes one. The *+ Moment* window also shows them as buttons.
 - **0.70:** **your themes carry over to the next trip.** The themes you add or rename (say *Kitesurfing*) and a few of the shots you confirm for each are remembered by the app itself, not only by the trip. A new trip starts with your themes, and its suggestions already know what your kitesurfing looks like (from up to 12 earlier trips). Themes says when it is using what it learned.
 - **0.69:** **double-click a shot to fix it in the Library.** Double-click a picture or video in *Themes*, on a moment page, in the *Storyboard*, in *Choose files* or in the *My story* shot picker: the Library opens with just that shot, big, with everything you can change (lock a moment, cut, theme, turn). The green **Back to …** button, or double-clicking the picture again, takes you back to where you were. A single click still does what it did before (it now waits a split second to see whether a second click follows).
 - **0.68:** **Half the pins** in *Music & audio*: one press takes away every second pin, so every shot is about twice as long. The first and last pins stay, and so do pins where the music changes. Press again to halve again; *Undo* brings all your pins back.
