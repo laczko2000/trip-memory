@@ -21,6 +21,7 @@ from nicegui import app, background_tasks, run, ui
 
 from .catalog import Trip, app_dir, kept_part
 from .media import MediaItem
+from . import transitions
 from . import themefinder
 from . import director
 from . import looks
@@ -582,6 +583,9 @@ class Page:
             ui.label(f"Suggested ({len(ideas)}): keep the right ones, drop the wrong ones. Both teach the app.") \
                 .classes("text-sm font-medium text-orange-800")
             ui.space()
+            ui.button("Review one by one", icon="slideshow", on_click=lambda: self.open_idea(ideas, 0)) \
+                .props("flat dense no-caps color=orange-9") \
+                .tooltip("Each suggestion big at its second: Keep or Not this, then the next one")
             ui.button("Keep all", icon="done_all", on_click=lambda: self.idea_answer(ideas, True)) \
                 .props("flat dense no-caps color=orange-9")
             ui.button("Drop all", icon="clear_all", on_click=lambda: self.idea_answer(ideas, False)) \
@@ -595,7 +599,8 @@ class Page:
                         thumb = self.trip.moment_picture(row, idea["t"])
                         a, b = moments.window(idea["t"], row["duration"] or 0)
                         self.preview(row | {"thumb": thumb}, "width:100%;aspect-ratio:16/10", a, b, view="moment")
-                    self.click_or_double(wrap, None, lambda n=n: self.open_idea(ideas, n))
+                    self.click_or_double(wrap, None, lambda i=idea: self.shot_window(i["path"], "Choose files",
+                                                                                     at=i["t"]))
                     with ui.row().classes("w-full items-center gap-1 no-wrap"):
                         ui.label(f"{Path(idea['path']).name[:16]} · {clock(idea['t'])}").classes("text-xs truncate")
                         ui.space()
@@ -1805,9 +1810,12 @@ class Page:
             element.on("click", clicked)
         element.on("dblclick", doubled)
 
-    def shot_window(self, path: str, name: str = "", changed: dict | None = None) -> None:
+    def shot_window(self, path: str, name: str = "", changed: dict | None = None, at: float | None = None,
+                    moment: dict | None = None) -> None:
         """Double-click on a shot anywhere: it opens big, right where you are. Watch it, cut it, make good parts of
-        a video shots of their own (and drop the rest), lock a part, tick it, give it a theme."""
+        a video shots of their own (and drop the rest), lock a part, tick it, give it a theme.
+        at: open it at this second (a suggestion: the seconds around it). moment: {"activity", "name", "t"} when
+        opened from a moment's page: This is the moment / Not this, right there."""
         it = next((x for x in self.trip.items(parts=True) if x["path"] == path), None)
         if it is None:
             return
@@ -1865,7 +1873,36 @@ class Page:
         def mark() -> None:
             changed["any"] = True
 
+        async def moment_answer(on: bool) -> None:
+            t = moment["t"]
+            if on:
+                try:  # where you stopped the red line, else the second the app found
+                    red = await ui.run_javascript(
+                        f"(() => {{ const b = document.getElementById('tm-part-{clip_id(path)}'), "
+                        "v = b && b.querySelector('video'); return v && v.src && v.paused && b.dataset.red ? "
+                        "parseFloat(b.dataset.red) : null; })()", timeout=3)
+                    t = round(float(red), 2) if red is not None else t
+                except Exception:
+                    pass
+            await run.io_bound(self.trip.tick_moment, moment["activity"], moment["name"], path, t, on)
+            mark()
+            ui.notify(f"🔍 {moment['name']}: " + (f"this is it, at {fmt_length(t)}." if on else "not this one."),
+                      type="positive" if on else "info", timeout=1800)
+
+        def moment_row() -> None:
+            if not moment:
+                return
+            with ui.row().classes("w-full items-center gap-2 px-2 py-1 rounded bg-purple-50"):
+                ui.label(f"🔍 {moment['name']}: found at {fmt_length(moment['t'])} (orange on the strip).") \
+                    .classes("text-sm text-purple-900")
+                ui.button("This is the moment", icon="check", on_click=lambda: moment_answer(True)) \
+                    .props("dense unelevated no-caps color=purple").tooltip("At the red line if you stopped it, "
+                                                                            "else at the second found")
+                ui.button("Not this", icon="close", on_click=lambda: moment_answer(False)) \
+                    .props("dense outline no-caps color=grey-8")
+
         def controls(dialog) -> None:
+            moment_row()
             shots = self.trip.shots_from(path) if it["kind"] == "video" else []
             if path in order:  # big Previous / Next on the sides: the next file without closing
                 k = order.index(path)
@@ -2126,6 +2163,8 @@ class Page:
             else (length * 0.3, min(length, length * 0.3 + 4))
         if in_video and in_video.get("trim_start") is not None and in_video.get("trim_end") is not None:
             a, b = float(in_video["trim_start"]), float(in_video["trim_end"])
+        if at is not None and it["kind"] == "video":  # a suggested second: the seconds around it
+            a, b = moments.window(at, length, *(kept_part(it) or (0.0, length)))
 
         def in_video_box() -> None:
             """Opened from the editor: this clip's speed in the video, and the draft made again right here."""
@@ -2239,7 +2278,8 @@ class Page:
         if in_video:
             actions.append(("Use this part in the video", "published_with_changes", use_in_video,
                             "unelevated no-caps color=deep-orange"))
-        it = it | {"ideas": self.trip.highlight_ideas(path)}  # the app's suggested highlights, in orange
+        it = it | {"ideas": self.trip.highlight_ideas(path)  # the app's suggested highlights, in orange
+                   + ([{"t": at}] if at is not None and it["kind"] == "video" else [])}
         with self.window_box:
             self.part_dialog(
             it, a, b, f"{Path(path).name} · " + (f"clip in the video ({slot:.1f} s): set its part" if in_video
@@ -4701,6 +4741,11 @@ class Page:
                 continue
             with ui.row().classes("w-full items-center gap-2 mt-2"):
                 ui.label(title).classes("font-semibold text-gray-700")
+                if group is not marked and any(f["kind"] == "video" and f.get("row") for f in group):
+                    ui.button("Review one by one", icon="slideshow",
+                              on_click=lambda g=group: self.open_moment_big(activity, name, g[0], g)) \
+                        .props("dense flat no-caps color=purple") \
+                        .tooltip("Each one big at the second found: This is it or Not this, then the next one")
                 if group is suggested:
                     ui.button("Tick all suggested", icon="done_all",
                               on_click=lambda g=group: self.tick_all_moment(activity, name, g)).props("dense no-caps")
@@ -4746,7 +4791,9 @@ class Page:
                 self.moment_count.set_text(f"{len(saved['shots'])} marked")
 
             show()
-            self.click_or_double(tile, toggle, lambda: self.open_moment_big(activity, name, f, group or [f]))
+            self.click_or_double(tile, toggle, lambda: self.shot_window(
+                f["path"], f"the {name} moments", at=f["t"] if f["kind"] == "video" else None,
+                moment={"activity": activity, "name": name, "t": f["t"]}))
             with ui.row().classes("w-full items-center justify-between no-wrap"):
                 when = ui.label("🎬 at " + fmt_length(f["t"]) if f["kind"] == "video" else "📷 photo") \
                     .classes("text-xs text-gray-600 mt-1")
@@ -5554,7 +5601,7 @@ class Page:
         # (with what changes how a shot looks: turned, played backwards, cropped, its part)
         return [(r["path"], round(Trip.screen_length(r, photo), 2),
                  f"{r.get('rotation') or 0}|{r.get('reverse') or 0}|{r.get('crop') or ''}|{r.get('trim_start')}|{r.get('speed') or 1}"
-                 f"|{r.get('clip_sound') or 0}|{r.get('clip_volume')}")
+                 f"|{r.get('clip_sound') or 0}|{r.get('clip_volume')}|{r.get('transition')}|{r.get('transition_len')}")
                 for r in self.trip.storyboard()]
 
     @ui.refreshable
@@ -5658,6 +5705,7 @@ class Page:
                  'font-size:11px;color:#fde68a;text-shadow:0 0 3px #000"></span></div>')
         return (f'<div id="{box}" class="tm-instant" style="position:relative;overflow:hidden;background:#000;'
                 f'isolation:isolate;cursor:pointer;{style}" onclick="tmInstantToggle(event, this)">{layer * 3}'
+                '<div class="tm-ov" style="position:absolute;inset:0;z-index:890;opacity:0;pointer-events:none"></div>'
                 '<div class="tm-iplay" style="position:absolute;left:10px;bottom:10px;z-index:900;width:38px;'
                 'height:38px;border-radius:50%;background:rgba(15,23,42,.75);color:white;display:flex;'
                 'align-items:center;justify-content:center;font-size:18px;pointer-events:none">▶</div></div>')
@@ -5678,7 +5726,9 @@ class Page:
                     "st": round(at["start"], 3), "len": round(at["length"], 3), "rot": r.get("rotation") or 0,
                     "crop": crop, "rev": bool(r.get("reverse")),
                     # (fades in over the end of the one before: as long as their transition overlaps them)
-                    "fin": round(max(0.0, times[k - 1]["start"] + times[k - 1]["length"] - at["start"]), 3) if k else 0}
+                    "fin": round(max(0.0, times[k - 1]["start"] + times[k - 1]["length"] - at["start"]), 3) if k else 0,
+                    "tr": transitions.LOOKS.get((board[k - 1].get("transition") or self.transition_name()) if k else "",
+                                                "fade")}
             if r["kind"] == "video":
                 clip.update(a=round(r["trim_start"] if r["trim_start"] is not None else (r["keep_start"] or 0.0), 3),
                             sp=r.get("speed") or 1.0, snd=bool(r.get("clip_sound")),
@@ -5745,6 +5795,10 @@ class Page:
                     .props("dense outline no-caps color=white") \
                     .tooltip("Makes a small video like the finished one (with the look and transitions); it takes "
                              "a while. Not needed while editing.")
+                ui.button("Exciting transitions", icon="auto_awesome", on_click=self.suggest_transitions) \
+                    .props("dense outline no-caps color=amber") \
+                    .tooltip("The app picks a transition for every cut from the music: fun ones (spin, bounce, zoom "
+                             "punch) where it is lively, soft ones where it is calm. Click a ◆ to change one.")
                 ui.button("Add a title here", icon="title", on_click=self.add_timeline_title) \
                     .props("dense outline no-caps color=white") \
                     .tooltip("A new title on the clip you picked (or where the red line is)")
@@ -5824,6 +5878,8 @@ class Page:
                             was = before[n] if before and n < len(before) else None
                             self.draft_tile(n, r, times[n]["length"], times[n]["start"], total,
                                             changed=before is not None and (was is None or tuple(was) != tuple(now[n])))
+                        for n in range(len(board) - 1):  # ◆ between two clips: its transition
+                            self.transition_mark(n, board, times, total)
                         end = ui.element("div").classes("absolute rounded border-2 border-dashed border-slate-500 "
                                                          "flex items-center justify-center text-slate-400")
                         end.style("left:100%;top:0;bottom:0;width:22px;margin-left:-24px")
@@ -5863,8 +5919,8 @@ class Page:
         photo = self.photo_len.value if getattr(self, "photo_len", None) else 4.0
         seconds = self.t_len.value if getattr(self, "t_len", None) else 0.8
         lengths = [Trip.screen_length(r, photo) for r in board]
-        styles = [style_between(board[k].get("transition"), k + 1, self.transition_name(), seconds)
-                  for k in range(len(board) - 1)]  # (each shot's own transition, as the video is made)
+        styles = [style_between(board[k].get("transition"), k + 1, self.transition_name(), seconds,
+                                board[k].get("transition_len")) for k in range(len(board) - 1)]  # (each shot's own transition, as the video is made)
         return shot_times(lengths, styles) if lengths else []
 
     def transition_name(self) -> str:
@@ -6129,6 +6185,153 @@ class Page:
                 "absolute left-1 top-0 text-[10px] font-bold text-white whitespace-nowrap").style("text-shadow:0 0 3px #000")
             ui.label(f"{length:.1f}s").classes("absolute left-1 bottom-0 text-[10px] text-white") \
                 .style("text-shadow:0 0 3px #000")
+
+    TRANSITION_MARKS = {"Soft": "◆", "Move": "➜", "Shape": "◯", "Fun": "✦"}
+
+    def transition_of(self, r: dict) -> str:
+        return r.get("transition") or self.transition_name()
+
+    def transition_mark(self, n: int, board: list[dict], times: list[dict], total: float) -> None:
+        """The cut between clip n and the next: a small mark you click to choose its transition."""
+        name = self.transition_of(board[n])
+        end = times[n]["start"] + times[n]["length"]
+        cut = (times[n + 1]["start"] + end) / 2
+        group = next((g for g, names in transitions.GROUPS.items() if name in names), "")
+        mark = "│" if name == transitions.HARD_CUT else self.TRANSITION_MARKS.get(group, "◆")
+        own = board[n].get("transition") is not None
+        el = ui.element("div").classes("tm-trmark absolute flex items-center justify-center cursor-pointer select-none")
+        el.style(f"left:{100 * cut / total:.3f}%;top:-2px;width:20px;height:20px;margin-left:-10px;z-index:5;"
+                 f"border-radius:50%;font-size:12px;font-weight:700;color:#0f172a;"
+                 f"background:{'#fbbf24' if own else '#e2e8f0'};box-shadow:0 0 0 2px #0f172a")
+        with el:
+            ui.label(mark)
+        el.on("click.stop", lambda n=n: self.transition_picker(n))
+        el.tooltip(f"{name}" + (f" · {board[n]['transition_len']:.1f} s" if board[n].get("transition_len") else "")
+                   + (f" · {board[n]['transition_why']}" if board[n].get("transition_why") else "")
+                   + " · click to change")
+
+    def transition_picker(self, n: int) -> None:
+        """Every transition, moving, in groups: click one to see it big between your two clips; its length; use it
+        here or for every cut."""
+        board = self.trip.storyboard()
+        if n + 1 >= len(board):
+            return
+        a_row, b_row = board[n], board[n + 1]
+        current = self.transition_of(a_row)
+        seconds = self.t_len.value if getattr(self, "t_len", None) else 0.8
+        pick = {"name": current, "len": float(a_row.get("transition_len") or
+                                              transitions.seconds_of(current, seconds) if current != transitions.HARD_CUT else seconds)}
+        a_pic, b_pic = data_url(a_row["thumb"]) if a_row.get("thumb") else "", data_url(b_row["thumb"]) if b_row.get("thumb") else ""
+
+        def demo(fam: str, size: str, cls: str = "tm-trdemo") -> str:
+            return (f'<div class="{cls}" data-fam="{fam}" style="position:relative;overflow:hidden;background:#000;'
+                    f'border-radius:6px;{size}"><img src="{a_pic}" style="position:absolute;inset:0;width:100%;'
+                    f'height:100%;object-fit:cover"><div class="tm-b" style="position:absolute;inset:0">'
+                    f'<img src="{b_pic}" style="width:100%;height:100%;object-fit:cover"></div>'
+                    f'<div class="tm-ov" style="position:absolute;inset:0;opacity:0"></div></div>')
+
+        with self.window_box, ui.dialog() as dialog, ui.card().classes("w-[64rem] max-w-full gap-2"):
+            ui.label(f"Transition from clip {n + 1} to clip {n + 2}").classes("text-lg font-semibold")
+
+            @ui.refreshable
+            def big() -> None:
+                name = pick["name"]
+                fam = "" if name == transitions.HARD_CUT else transitions.LOOKS.get(name, "fade")
+                with ui.row().classes("w-full items-center gap-4 no-wrap"):
+                    ui.html(demo(fam or "cut", "width:320px;height:180px;flex:none"), sanitize=False)
+                    with ui.column().classes("gap-1 flex-1"):
+                        ui.label(name).classes("text-xl font-semibold")
+                        if name != transitions.HARD_CUT and transitions.STYLES.get(name, transitions.Style("fade")).xfade:
+                            ui.label(f"Length: {pick['len']:.1f} s").classes("text-sm")
+                            ui.slider(min=0.2, max=2.0, step=0.1, value=pick["len"]).props("dense label") \
+                                .classes("w-72").on("change", lambda e: (pick.update(len=float(e.args)), big.refresh()))
+                        else:
+                            ui.label("A clean cut, right on the pin." if name == transitions.HARD_CUT else
+                                     "A quick effect around a clean cut.").classes("text-sm text-gray-600")
+                        if self.trip.edit_stage() == "fitted":
+                            ui.label("The cut stays on its pin; the clips grow into the transition.") \
+                                .classes("text-xs text-gray-500")
+                ui.run_javascript("tmTrDemos()")
+
+            big()
+            with ui.element("div").classes("w-full max-h-[46vh] overflow-auto"):
+                options = [("Clean cut", [transitions.HARD_CUT])] + list(transitions.GROUPS.items())
+                for group, names in options:
+                    ui.label(group).classes("text-sm font-semibold text-gray-700 mt-1")
+                    with ui.row().classes("gap-2"):
+                        for name in names:
+                            fam = "cut" if name == transitions.HARD_CUT else transitions.LOOKS.get(name, "fade")
+                            on = name == current
+                            with ui.column().classes("gap-0 items-center cursor-pointer rounded p-1 " +
+                                                     ("bg-amber-100" if on else "hover:bg-gray-100")) as tile:
+                                ui.html(demo(fam, "width:112px;height:63px"), sanitize=False)
+                                ui.label(name).classes("text-xs")
+                            tile.on("click", lambda name=name: (
+                                pick.update(name=name, len=round(transitions.seconds_of(name, seconds), 2)
+                                            if name != transitions.HARD_CUT else pick["len"]), big.refresh()))
+
+            def use(every: bool) -> None:
+                name = pick["name"]
+                quick = transitions.STYLES.get(name, transitions.Style("fade"))
+                length = round(pick["len"], 2) if name != transitions.HARD_CUT and quick.xfade else None
+                rows = board[:-1] if every else [a_row]
+                for r in rows:
+                    self.trip.set_transition(r["path"], name, length, "Your choice")
+                dialog.close()
+                self.draft_changed(f"{name} " + ("for every cut." if every else f"between clips {n + 1} and {n + 2}."))
+
+            with ui.row().classes("w-full items-center gap-2"):
+                ui.button("Video's default", on_click=lambda: (
+                    [self.trip.set_transition(a_row["path"], None)], dialog.close(),
+                    self.draft_changed("Back to the video's transition."))).props("flat no-caps") \
+                    .tooltip("Make video › More settings › Transition")
+                ui.space()
+                ui.button("Close", on_click=dialog.close).props("flat no-caps")
+                ui.button("Use it for every cut", on_click=lambda: use(True)).props("outline no-caps")
+                ui.button("Use it here", icon="check", on_click=lambda: use(False)).props("unelevated no-caps color=amber-8")
+        dialog.open()
+        ui.run_javascript("setTimeout(tmTrDemos, 100)")
+
+    async def suggest_transitions(self) -> None:
+        """A transition for every cut, from the music (lively: fun ones; calm: soft ones), the days and stories."""
+        board = self.trip.storyboard()
+        if len(board) < 2:
+            return
+        times = self.editor_times(board)
+        music = self.music_path()
+        song = None
+        if music:
+            try:
+                song = await run.io_bound(songmap.analyse, music, app_dir() / "music-maps")
+            except Exception:
+                traceback.print_exc()
+        beats = song.beat_times() if song is not None else np.zeros(0)
+        accents = np.asarray(getattr(song, "accents", None) or [], float) if song is not None else np.zeros(0)
+
+        def energy(t: float) -> float:
+            return float(song.energy_at(t)) if song is not None else 0.5
+
+        def hit(t: float) -> float:
+            if not len(beats) or len(accents) != len(beats):
+                return 0.0
+            k = int(np.argmin(np.abs(beats - t)))
+            return float(accents[k]) if abs(beats[k] - t) < 0.08 else 0.0
+
+        cuts = []
+        for k in range(len(board) - 1):
+            at = (times[k]["start"] + times[k]["length"] + times[k + 1]["start"]) / 2
+            cuts.append(transitions.Cut(before=board[k], after=board[k + 1], energy_before=energy(max(0, at - 1)),
+                                        energy_after=energy(at + 1), hit=hit(at),
+                                        room=0.4 * min(times[k]["length"], times[k + 1]["length"])))
+        seconds = self.t_len.value if getattr(self, "t_len", None) else 0.8
+        chosen = transitions.exciting(cuts, seconds)
+        for r, (name, why) in zip(board, chosen):
+            style = transitions.STYLES.get(name, transitions.Style("fade"))
+            length = 0.5 if name in transitions.FUN and style.xfade and style.quick is None else None
+            self.trip.set_transition(r["path"], name, length, why)
+        fun = sum(1 for name, _ in chosen if name in transitions.FUN)
+        self.draft_changed(f"A transition for every cut: {fun} fun ones where the music is lively, soft ones where "
+                           "it is calm, clean cuts on the beat. Hover a ◆ to see why; click it to change it.")
 
     def pick_draft_clip(self, n: int, start: float | None) -> None:
         self.draft_pick = None if self.draft_pick == n else n
@@ -6925,8 +7128,10 @@ function tmInstant(id, data, onTime) {
     s.querySelector('.tm-badge').textContent = c.rev ? '⇆ backwards in the finished video' : '';
   };
   let shown = -1;
+  const cover = el.querySelector('.tm-ov');
   const tick = (hard) => {
     const T = Math.min(now(), total - 0.02);  // (at the very end: its last picture)
+    if (cover) cover.style.opacity = 0;
     for (let i = 0; i < clips.length; i++) {  // who goes on which layer
       const c = clips[i];
       if (!(T >= c.st - 2.5 && T < c.st + c.len)) continue;
@@ -6941,7 +7146,8 @@ function tmInstant(id, data, onTime) {
       if (i < 0) { s.style.opacity = 0; return; }
       const c = clips[i], v = s.querySelector('video'), im = s.querySelector('img');
       const on = T >= c.st && T < c.st + c.len;
-      s.style.opacity = on ? (c.fin > 0.05 ? Math.min(1, (T - c.st) / c.fin) : 1) : 0;
+      const q = on && c.fin > 0.05 ? (T - c.st) / c.fin : 1;
+      tmTrLook(s, on ? c.tr : '', q, cover);
       s.style.zIndex = i + 1;
       const local = Math.max(0, Math.min(c.len, T - c.st));
       if (c.k === 'v') {
@@ -7013,6 +7219,60 @@ function tmInstant(id, data, onTime) {
   tick(true);
   raf = requestAnimationFrame(frame);
   return el;
+}
+// A transition in the instant player, roughly as the finished video draws it: the incoming clip's layer, q from
+// 0 (the transition starts) to 1 (done); fam '' hides the layer.
+function tmTrLook(s, fam, q, cover) {
+  if (!fam) { s.style.opacity = 0; s.style.transform = ''; s.style.clipPath = ''; s.style.filter = ''; return; }
+  q = Math.max(0, Math.min(1, q));
+  let o = 1, tf = '', clip = '', filt = '';
+  if (q < 1) {
+    const e = 1 - Math.pow(1 - q, 3), back = 1 + 2.70158 * Math.pow(q - 1, 3) + 1.70158 * Math.pow(q - 1, 2);
+    const p = (x) => (100 * x).toFixed(2) + '%';
+    switch (fam) {
+      case 'black': case 'white': case 'grey':
+        o = q < 0.5 ? 0 : 1;
+        if (cover) { cover.style.background = fam === 'black' ? '#000' : fam === 'white' ? '#fff' : '#808080';
+                     cover.style.opacity = 1 - Math.abs(2 * q - 1); }
+        break;
+      case 'blur': o = q; filt = `blur(${(1 - q) * 14}px)`; break;
+      case 'slide-l': tf = `translateX(${p(1 - e)})`; break;
+      case 'slide-r': tf = `translateX(-${p(1 - e)})`; break;
+      case 'slide-u': tf = `translateY(${p(1 - e)})`; break;
+      case 'slide-d': tf = `translateY(-${p(1 - e)})`; break;
+      case 'wipe-l': clip = `inset(0 0 0 ${p(1 - q)})`; break;
+      case 'wipe-u': clip = `inset(${p(1 - q)} 0 0 0)`; break;
+      case 'squeeze': tf = `scaleX(${Math.max(0.01, e)})`; break;
+      case 'circle': clip = `circle(${p(0.75 * q)} at 50% 50%)`; break;
+      case 'diag': clip = `polygon(0 0, ${p(2 * q)} 0, 0 ${p(2 * q)})`; break;
+      case 'doors': clip = `inset(0 ${p(0.5 * (1 - q))})`; break;
+      case 'box': clip = `inset(${p(0.5 * (1 - q))})`; break;
+      case 'zoom': tf = `scale(${0.3 + 0.7 * e})`; o = Math.min(1, q * 2); break;
+      case 'reveal': tf = `scale(${1 + 0.6 * (1 - e)})`; break;
+      case 'spin': tf = `rotate(${(1 - e) * 360}deg) scale(${Math.max(0.01, e)})`; break;
+      case 'bounce': tf = `translateX(${p(1 - back)})`; break;
+      case 'drop': tf = `translateY(-${p(1 - back)})`; break;
+      default: o = q;
+    }
+  }
+  s.style.opacity = o; s.style.transform = tf; s.style.clipPath = clip; s.style.filter = filt;
+}
+// The transition picker: every little preview plays its transition again and again (A, then B coming in).
+function tmTrDemos() {
+  if (window.tmTrLoop) return;
+  const loop = () => {
+    const demos = document.querySelectorAll('.q-dialog .tm-trdemo');
+    if (!demos.length) { window.tmTrLoop = null; return; }
+    const t = (performance.now() / 1000) % 2.2, q = Math.max(0, Math.min(1, (t - 0.6) / 0.9));
+    demos.forEach(d => {
+      const b = d.querySelector('.tm-b'), ov = d.querySelector('.tm-ov');
+      if (ov) ov.style.opacity = 0;
+      if (d.dataset.fam === 'cut') { tmTrLook(b, 'fade', q > 0 ? 1 : 0, ov); return; }
+      tmTrLook(b, d.dataset.fam, q, ov);
+    });
+    window.tmTrLoop = requestAnimationFrame(loop);
+  };
+  window.tmTrLoop = requestAnimationFrame(loop);
 }
 function tmInstantToggle(e, el) {
   if (el.paused) el.play(); else el.pause();

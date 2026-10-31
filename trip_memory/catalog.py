@@ -184,7 +184,7 @@ class Trip:
             "plan_role TEXT", "plan_pos REAL", "title_text TEXT", "title_sub TEXT", "title_style TEXT", "title_where TEXT",
             "focus_x REAL", "keep_start REAL", "keep_end REAL", "part_of TEXT",
             "theme TEXT", "theme_auto TEXT", "theme_sure REAL", "locks TEXT", "camera TEXT", "taken_orig TEXT", "postits TEXT",
-            "shot_of TEXT", "crop TEXT", "reverse INTEGER DEFAULT 0",
+            "shot_of TEXT", "crop TEXT", "reverse INTEGER DEFAULT 0", "transition_len REAL",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
@@ -378,6 +378,7 @@ class Trip:
                     trim_start=r["trim_start"] if r["trim_start"] is not None else r["keep_start"],
                     trim_end=r["trim_end"] if r["trim_start"] is not None else r["keep_end"],
                     transition=r["transition"],
+                    transition_seconds=r.get("transition_len"),
                     seconds=r["seconds"],
                     sound=bool(r["clip_sound"]),  # videos are silent unless you switch their sound on
                     volume=1.0 if r["clip_volume"] is None else r["clip_volume"],
@@ -721,7 +722,8 @@ class Trip:
             return 0
         end = cuts[-1]
         n = len(board)
-        styles = [style_between(board[k].get("transition"), k + 1, transition, transition_seconds) for k in range(n - 1)]
+        styles = [style_between(board[k].get("transition"), k + 1, transition, transition_seconds,
+                                board[k].get("transition_len")) for k in range(n - 1)]
         screens = [self.screen_length(r, photo_seconds) for r in board]
         most = [self.most_length(r) for r in board]
         before = overlaps(screens, styles) + [0.0]
@@ -1971,8 +1973,11 @@ class Trip:
         else:
             self.execute("UPDATE items SET clip_sound = ?, clip_volume = ? WHERE path = ?", (int(on), volume, path))
 
-    def set_transition(self, path: str, transition: str | None) -> None:
-        self.execute("UPDATE items SET transition = ?, transition_why = NULL WHERE path = ?", (transition, path))
+    def set_transition(self, path: str, transition: str | None, seconds: float | None = None,
+                       why: str | None = None) -> None:
+        """The transition out of this shot into the next one, and how long it lasts (None: the video's length)."""
+        self.execute("UPDATE items SET transition = ?, transition_len = ?, transition_why = ? WHERE path = ?",
+                     (transition, seconds, why, path))
 
     def set_scene(self, path: str, scene: str | None) -> None:
         self.execute("UPDATE items SET scene_user = ? WHERE path = ?", (scene, path))

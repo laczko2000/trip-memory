@@ -48,6 +48,7 @@ class MediaItem:
     trim_start: float | None = None
     trim_end: float | None = None
     transition: str | None = None  # transition into the next clip
+    transition_seconds: float | None = None  # how long it lasts (None: the video's transition length)
     seconds: float | None = None  # for photos: how long it is shown (None = the Make video setting)
     sound: bool = True  # for videos: use the clip's own sound
     volume: float = 1.0  # its loudness (1.0 = as recorded, up to 2.0)

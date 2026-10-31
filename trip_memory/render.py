@@ -27,7 +27,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 from . import titles
 from .looks import look_filter
 from .media import MediaItem
-from .transitions import MIXED, STYLES, ZOOM_INTO, ZOOM_OUT_OF, seconds_of
+from .transitions import MIXED, STYLES, ZOOM_INTO, ZOOM_OUT_OF, seconds_of, xfade_args
 from .tools import FFmpegError, has_encoder, has_filter, probe, run_ffmpeg
 
 # Friendly name -> FFmpeg xfade transition. None means a hard cut.
@@ -663,14 +663,18 @@ def _black_segment(s: RenderSettings, seconds: float, out: Path) -> None:
 def _transition_between(before: MediaItem, k: int, s: RenderSettings) -> tuple[str | None, float]:
     """The FFmpeg transition into clip k and how long it lasts: the one set after the previous clip, else the
     default."""
-    return style_between(before.transition, k, s.transition, s.transition_seconds)
+    return style_between(before.transition, k, s.transition, s.transition_seconds, before.transition_seconds)
 
 
-def style_between(name: str | None, k: int, default: str | None, seconds: float) -> tuple[str | None, float]:
-    """The transition into clip k after a clip whose own transition is name (None: the video's default)."""
+def style_between(name: str | None, k: int, default: str | None, seconds: float,
+                  own: float | None = None) -> tuple[str | None, float]:
+    """The transition into clip k after a clip whose own transition is name (None: the video's default), lasting
+    own seconds if you set it."""
     name = name or default
     style = TRANSITIONS.get(name, "fade")
     seconds = seconds_of(name if name in TRANSITIONS else "Fade", seconds)
+    if own and style:
+        seconds = float(own)
     return (MIXED[(k - 1) % len(MIXED)] if style == "mixed" else style), seconds
 
 
@@ -831,7 +835,7 @@ def _join_once(
         t_frames = max(1, round(min(seconds, lengths[k - 1] * 0.4, lengths[k] * 0.4) * FPS)) if style else 1
         offset_frames = total_frames - t_frames
         t, offset = t_frames / FPS, offset_frames / FPS
-        parts.append(f"[{v_prev}][sv{k}]xfade=transition={style or 'fade'}:duration={t:.6f}:offset={offset:.6f}[v{k}]")
+        parts.append(f"[{v_prev}][sv{k}]xfade={xfade_args(style or 'fade')}:duration={t:.6f}:offset={offset:.6f}[v{k}]")
         parts.append(f"[{a_prev}][sa{k}]acrossfade=d={t:.6f}[a{k}]")
         v_prev, a_prev = f"v{k}", f"a{k}"
         total_frames = offset_frames + frames[k]

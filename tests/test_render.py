@@ -383,3 +383,24 @@ def test_a_clip_can_play_backwards(tmp_path):
     with Image.open(frame) as img:
         r, g, b = img.convert("RGB").getpixel((160, 90))
     assert b > 150 and r < 100, (r, g, b)  # it starts with the end of the clip (blue)
+
+
+def test_every_transition_in_the_picker_joins(tmp_path):
+    """All the picker's transitions (FFmpeg's own and the hand-drawn spin, bounce and drop) make a video."""
+    from trip_memory.render import _join_once, _planned_length, _segment_length
+    from trip_memory.transitions import GROUPS, STYLES
+
+    names = [n for names in GROUPS.values() for n in names if STYLES[n].xfade]
+    ffmpeg = ffmpeg_paths()[0]
+    segments = []
+    for k in range(len(names) + 1):
+        seg = tmp_path / f"{k}.mp4"
+        subprocess.run([ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=96x54:r=30", "-f", "lavfi",
+                        "-i", "sine=sample_rate=48000", "-frames:v", "30", "-af", "atrim=0:1",
+                        "-c:v", "libx264", "-c:a", "aac", "-ac", "2", str(seg)], check=True)
+        segments.append(seg)
+    lengths = [_segment_length(s) for s in segments]
+    styles = [(STYLES[n].xfade, 0.3) for n in names]
+    settings = RenderSettings(width=96, height=54)
+    made = _join_once(segments, lengths, styles, settings, tmp_path / "out.mp4", lambda _f: None)
+    assert abs(made - _planned_length(lengths, styles, settings)) < 0.1

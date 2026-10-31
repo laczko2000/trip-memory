@@ -42,6 +42,77 @@ STYLES: dict[str, Style] = {
     "Zoom through": Style(None),  # a hard cut: the first shot rushes in, the next one lands zoomed and settles
     "Zoom out reveal": Style(None),  # a hard cut: the next shot starts close up and pulls back
     "Mixed": Style("mixed"),
+    # (more, 0.91)
+    "Fade to grey": Style("fadegrays"),
+    "Slide right": Style("slideright"),
+    "Slide up": Style("slideup"),
+    "Slide down": Style("slidedown"),
+    "Squeeze": Style("squeezeh"),
+    "Circle close": Style("circleclose"),
+    "Diagonal": Style("diagtl"),
+    "Doors open": Style("horzopen"),
+    "Blinds": Style("hlslice"),
+    "Wipe up": Style("wipeup"),
+    "Box": Style("rectcrop"),
+    "Spin": Style("custom:spin"),
+    "Bounce in": Style("custom:bounce"),
+    "Drop in": Style("custom:drop"),
+}
+# How the picker groups them (the order shown).
+GROUPS: dict[str, list[str]] = {
+    "Soft": ["Fade", "Dissolve", "Fade through black", "Dip to white", "Fade to grey", "Blur"],
+    "Move": ["Slide", "Slide right", "Slide up", "Slide down", "Smooth wipe", "Whip left", "Whip right", "Whip up",
+             "Squeeze"],
+    "Shape": ["Circle", "Circle close", "Radial", "Diagonal", "Doors open", "Blinds", "Wipe", "Wipe up", "Box",
+              "Pixelate"],
+    "Fun": ["Zoom", "Zoom punch", "Zoom through", "Zoom out reveal", "Flash", "Spin", "Bounce in", "Drop in"],
+}
+
+
+def _plane(fn: str, x: str, y: str) -> str:
+    return (f"if(eq(PLANE,0),{fn}0({x},{y}),if(eq(PLANE,1),{fn}1({x},{y}),"
+            f"if(eq(PLANE,2),{fn}2({x},{y}),{fn}3({x},{y}))))")
+
+
+def _back(q: str) -> str:  # eases in with a little overshoot, then settles (0 -> 1)
+    return f"(1+2.70158*pow({q}-1,3)+1.70158*pow({q}-1,2))"
+
+
+def custom_expr(kind: str) -> str:
+    """FFmpeg xfade's own-drawn transitions (P runs from 1 to 0; no stored variables: the picture is drawn in
+    parallel slices)."""
+    q = "(1-P)"
+    if kind == "spin":  # the next shot spins in from the middle, growing
+        s, th = f"max({q},0.001)", "(P*6.2832)"
+        u = f"(((X-W/2)*cos({th})-(Y-H/2)*sin({th}))/{s}+W/2)"
+        v = f"(((X-W/2)*sin({th})+(Y-H/2)*cos({th}))/{s}+H/2)"
+        return f"if(between({u},0,W-1)*between({v},0,H-1),{_plane('b', u, v)},{_plane('a', 'X', 'Y')})"
+    if kind == "bounce":  # the next shot pushes in from the right, overshoots a little and settles
+        dx = f"(W*(1-{_back(q)}))"
+        return (f"if(gte(X,{dx}),{_plane('b', f'min(max(X-{dx},0),W-1)', 'Y')},"
+                f"{_plane('a', f'min(X-{dx}+W,W-1)', 'Y')})")
+    if kind == "drop":  # the next shot drops in from the top and lands with a little bounce
+        y0 = f"(-H*(1-{_back(q)}))"
+        return f"if(lt(Y,{y0}+H),{_plane('b', 'X', f'min(max(Y-{y0},0),H-1)')},{_plane('a', 'X', 'Y')})"
+    raise ValueError(kind)
+
+
+def xfade_args(style: str) -> str:
+    """The xfade filter's transition options for a style (a custom one carries its expression)."""
+    if style.startswith("custom:"):
+        return f"transition=custom:expr='{custom_expr(style.split(':', 1)[1])}'"
+    return f"transition={style}"
+
+
+# How the editor's instant player shows each (CSS, roughly like the finished video).
+LOOKS: dict[str, str] = {
+    "Fade": "fade", "Dissolve": "fade", "Mixed": "fade", "Fade through black": "black", "Dip to white": "white",
+    "Fade to grey": "grey", "Blur": "blur", "Pixelate": "blur", "Slide": "slide-l", "Whip left": "slide-l",
+    "Slide right": "slide-r", "Whip right": "slide-r", "Slide up": "slide-u", "Whip up": "slide-u",
+    "Slide down": "slide-d", "Smooth wipe": "wipe-l", "Wipe": "wipe-l", "Wipe up": "wipe-u", "Squeeze": "squeeze",
+    "Circle": "circle", "Circle close": "circle", "Radial": "circle", "Diagonal": "diag", "Doors open": "doors",
+    "Blinds": "fade", "Box": "box", "Zoom": "zoom", "Zoom punch": "zoom", "Flash": "white", "Spin": "spin",
+    "Bounce in": "bounce", "Drop in": "drop", "Zoom through": "zoom", "Zoom out reveal": "reveal",
 }
 # Transitions drawn by zooming the shots themselves (around a clean cut), and how each side moves.
 ZOOM_OUT_OF = {"Zoom through": "zoom"}  # the shot before the cut
@@ -146,3 +217,33 @@ def _day_name(row: dict) -> str:
         return datetime.fromisoformat(row["taken_at"]).astimezone().strftime("%a %d %b")
     except (KeyError, TypeError, ValueError):
         return ""
+
+
+FUN = ["Zoom punch", "Spin", "Whip left", "Bounce in", "Flash", "Drop in", "Whip up", "Squeeze", "Zoom through"]
+FANCY_CALM = ["Circle", "Smooth wipe", "Dissolve", "Doors open", "Radial", "Box"]
+
+
+def exciting(cuts: list[Cut], soft_seconds: float) -> list[tuple[str, str]]:
+    """Like recommend, with more going on: on lively music every second or third clean cut becomes a fun effect
+    (spin, bounce, zoom punch...), on calm music the soft blends take turns with shapes. Each still fits."""
+    out = []
+    turn = {"fun": 0, "calm": 0}
+    since = 99
+    for cut, (name, why) in zip(cuts, recommend(cuts, soft_seconds)):
+        energy = (cut.energy_before + cut.energy_after) / 2
+        if name == HARD_CUT and energy >= 0.5 and since >= (2 if cut.hit >= 0.5 else 3):
+            for _ in range(len(FUN)):
+                pick = FUN[turn["fun"] % len(FUN)]
+                turn["fun"] += 1
+                if seconds_of(pick, min(soft_seconds, 0.5)) <= max(cut.room, 1 / 30):
+                    name, why = pick, "Lively music: something fun" + (" on the big hit" if cut.hit >= 0.5 else "")
+                    break
+        elif name in CALM_BLENDS and turn["calm"] % 2:
+            pick = FANCY_CALM[(turn["calm"] // 2) % len(FANCY_CALM)]
+            if seconds_of(pick, soft_seconds) <= cut.room:
+                name, why = pick, "Calm music: a soft shape"
+        if name in CALM_BLENDS or name in FANCY_CALM:
+            turn["calm"] += 1
+        since = 0 if name != HARD_CUT else since + 1
+        out.append((name, why))
+    return out
