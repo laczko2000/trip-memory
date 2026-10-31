@@ -1318,7 +1318,7 @@ class Page:
     def part_dialog(self, it: dict, a: float, b: float, title: str, actions: list[tuple],
                     taken: list[tuple[float, float, int]] | None = None,
                     made: list[tuple[float, float, str]] | None = None, extra=None, on_hide=None,
-                    full: bool = False) -> None:
+                    full: bool = False, on_highlight=None) -> None:
         """A big window to choose a part of a video: it plays that part (silently, again and again), the strip below
         shows the whole clip (move the mouse along it to look), and the green handles set the part.
         actions: (label, icon, callback(start, end), props) buttons; a callback returning True closes the window."""
@@ -1329,7 +1329,10 @@ class Page:
             ui.label(title).classes("text-lg font-semibold")
             height = "max(240px,calc(100vh - 360px))" if full else "min(60vh,520px)"
             with ui.element("div").classes("w-full").on("dblclick", lambda: dialog.close()) \
-                    .tooltip("Double-click: close and go back"):
+                    .tooltip("Double-click: close and go back") as holder:
+                if on_highlight is not None:  # Space plays and pauses, Shift puts a highlight here
+                    holder.props("data-shotwin")
+                    holder.on("tmhighlight", lambda e: on_highlight(float(e.args["detail"]["t"])), ["detail"])
                 box = self.preview(it, f"width:100%;height:{height}", part["min"], part["max"], view="part")
             shade = "position:absolute;top:0;bottom:0;background:rgba(15,23,42,.65)"
             ui.html(f'<div data-scrub-for="{box}" style="position:relative;height:48px;margin:4px 10px 0;'
@@ -1352,6 +1355,10 @@ class Page:
                               f'border-left:2px solid #16a34a;border-right:2px solid #16a34a;pointer-events:none">'
                               f'<span style="color:white;font:600 11px sans-serif;padding:2px;text-shadow:0 0 3px #000">'
                               f'{label}</span></div>' for x, y, label in made or [])
+                    + "".join(f'<div class="tm-hl" style="position:absolute;top:0;bottom:0;width:3px;'
+                              f'left:{100 * (t - full0) / ((full1 - full0) or 1):.2f}%;background:#facc15;'
+                              f'box-shadow:0 0 3px #000;pointer-events:none"></div>'
+                              for t in [p["t"] for p in it.get("postits") or [] if full0 <= p["t"] <= full1])
                     + '</div>', sanitize=False).classes("w-full")
             if taken:
                 ui.label("Red: parts other shots in your video already use (never shown twice).") \
@@ -1654,6 +1661,8 @@ class Page:
                 with ui.row().classes("w-full items-center gap-2 px-2"):
                     ui.button(f"Undo: {history[-1][0]}", icon="undo", on_click=lambda: undo(dialog)) \
                         .props("outline dense no-caps")
+            if it["kind"] == "video":
+                highlights_row()
             if it.get("shot_of"):
                 ui.label("✂ A shot you made from " + Path(it["shot_of"]).name).classes("text-xs text-green-800 px-2")
             if shots:
@@ -1674,6 +1683,41 @@ class Page:
                                          "remove the unticked files.")
                         else:
                             ui.label("The rest of the video is dropped (unticked).").classes("text-xs text-gray-500")
+
+        @ui.refreshable
+        def highlights_row() -> None:
+            marks = self.trip.postits(path)
+            with ui.row().classes("w-full items-center gap-2 px-2"):
+                ui.label("⭐ Highlights:" if marks else "Space plays and pauses · tap Shift at a great moment to put "
+                         "a ⭐ highlight there: it is always in the video.").classes("text-xs text-amber-800")
+                for k, m in enumerate(marks):
+                    with ui.row().classes("items-center gap-0 bg-amber-50 border border-amber-300 rounded px-2"):
+                        ui.label(f"⭐ {clock(m['t'])}" + (f" {m['name']}" if m.get("name") else "")).classes("text-xs")
+                        ui.button(icon="close", on_click=lambda k=k: unhighlight(k)) \
+                            .props("flat dense round size=xs").tooltip("Take this highlight off")
+
+        def highlight(t: float) -> None:
+            self.trip.add_postit(path, round(t, 2))
+            history.append((f"highlight {clock(t)}", lambda t=round(t, 2): drop_highlight_at(t)))
+            mark()
+            ui.notify(f"⭐ Highlight at {clock(t)}: it is always in the video.", timeout=1500)
+            ui.run_javascript(f"tmHighlightMark({t:.2f})")
+            highlights_row.refresh()
+
+        def drop_highlight_at(t: float) -> None:
+            marks = self.trip.postits(path)
+            k = min(range(len(marks)), key=lambda k: abs(marks[k]["t"] - t), default=None)
+            if k is not None and abs(marks[k]["t"] - t) < 0.4:
+                self.trip.change_postit(path, k, remove=True)
+
+        def unhighlight(k: int) -> None:
+            self.trip.change_postit(path, k, remove=True)
+            mark()
+            changed["again"] = True
+            again()
+            for d in list(self.window_box):
+                if isinstance(d, ui.dialog) and d.value:
+                    d.close()
 
         def again() -> None:  # the same window, drawn again with what changed
             changed["again"] = True
@@ -1768,7 +1812,7 @@ class Page:
              ("Cut: keep only this part", "content_cut", keep, "outline no-caps"),
              ("Make this a shot", "add_box", make_and_reopen, "color=green no-caps")],
             made=[(x["start"], x["end"], f"shot {k}") for k, x in enumerate(shots, 1)],
-            extra=controls, on_hide=after, full=True)
+            extra=controls, on_hide=after, full=True, on_highlight=highlight)
 
     def photo_editor(self, it: dict, dialog, mark) -> None:
         """Zoom in on a photo and drag it to choose what shows: the video uses exactly that part."""
@@ -5818,6 +5862,37 @@ function tmCropDown(e, box) {
     if (x !== sx || y !== sy) box.dispatchEvent(new CustomEvent('tmcrop', {bubbles: true, detail: {x: x, y: y}}));
   };
   box.addEventListener('pointermove', move); box.addEventListener('pointerup', up);
+}
+// The shot window: Space plays and pauses the video, Shift puts a highlight at the second it is at.
+document.addEventListener('keydown', (e) => {
+  const holder = document.querySelector('.q-dialog [data-shotwin]');
+  const box = holder && holder.querySelector('.tm-hover');
+  if (!box || e.repeat || ['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
+  if (e.code === 'Space') {
+    e.preventDefault(); e.stopPropagation();
+    if (tmPlaying && tmPlaying !== box) tmStop(tmPlaying);
+    tmPlaying = box;
+    const v = tmVideo(box);
+    if (v.paused) v.play().catch(() => {}); else v.pause();
+  } else if (e.key === 'Shift') {
+    const v = box.querySelector('video');
+    const t = v && v.src ? v.currentTime : parseFloat(box.dataset.start || '0');
+    box.dispatchEvent(new CustomEvent('tmhighlight', {bubbles: true, detail: {t: t}}));
+  }
+}, true);
+document.addEventListener('keyup', (e) => {  // (so Space never also presses the button that has the focus)
+  if (e.code === 'Space' && document.querySelector('.q-dialog [data-shotwin]') &&
+      !['INPUT', 'TEXTAREA'].includes(e.target.tagName)) { e.preventDefault(); e.stopPropagation(); }
+}, true);
+function tmHighlightMark(t) {
+  const box = document.querySelector('.q-dialog [data-shotwin] .tm-hover');
+  const strip = box && document.querySelector(`[data-scrub-for="${box.id}"]`);
+  if (!strip) return;
+  const a = parseFloat(box.dataset.full0), b = parseFloat(box.dataset.full1);
+  const line = document.createElement('div');
+  line.className = 'tm-hl';
+  line.style.cssText = `position:absolute;top:0;bottom:0;width:3px;left:${100 * (t - a) / ((b - a) || 1)}%;background:#facc15;box-shadow:0 0 3px #000;pointer-events:none`;
+  strip.appendChild(line);
 }
 // Dragging a green handle: the video stops and shows the frame where the handle is (Play plays the part).
 function tmShowAt(id, start, end, at) {
