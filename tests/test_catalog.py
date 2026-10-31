@@ -1068,3 +1068,16 @@ def test_a_starred_photo_is_always_in_the_video(tmp_path, monkeypatch):
     assert catalog.Trip._with_locks([trip.items()[0]])[0]["forced"]
     trip.set_star(path, False)
     assert not trip.starred(path)
+
+
+def test_the_opening_and_the_ending_have_their_own_look_and_length(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    (tmp_path / "trip").mkdir()
+    trip = catalog.Trip(tmp_path / "trip")
+    trip.set_title_settings(card="bold", open_seconds=2.0)
+    assert trip.end_card()[1]["card"] == "bold"  # (until you choose: the ending looks like the opening)
+    trip.set_title_settings(end_card="minimal", end_black=6.0)
+    assert trip.opening_card()["card"] == "bold" and trip.opening_card()["seconds"] == 2.0
+    seconds, words = trip.end_card()
+    assert seconds == 6.0 and words["card"] == "minimal"

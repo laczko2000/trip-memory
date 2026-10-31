@@ -6082,65 +6082,100 @@ class Page:
         t = self.trip.title_settings()
         board = self.trip.storyboard()
         first = board[0]["thumb"] if board and board[0].get("thumb") else ""
+        last = board[-1]["thumb"] if board and board[-1].get("thumb") else first
         w, h = RESOLUTIONS[self.resolution.value] if getattr(self, "resolution", None) else (1920, 1080)
-        state = {"card": t["card"] if t["card"] in titles.CARDS else ""}
+        state = {"card": t["card"] if t["card"] in titles.CARDS else "",
+                 "end_card": t["end_card"] if t["end_card"] in titles.CARDS else ""}
+        lengths = {1.0: "1 s", 1.5: "1.5 s", 2.0: "2 s", 2.5: "2.5 s", 3.0: "3 s", 4.0: "4 s", 5.0: "5 s", 6.0: "6 s",
+                   8.0: "8 s"}
 
         def save(**values) -> None:
             self.trip.set_title_settings(**values)
 
-        with ui.dialog() as dialog, ui.card().style("width:min(980px,96vw);max-width:96vw"):
+        with ui.dialog() as dialog, ui.card().style("width:min(1100px,96vw);max-width:96vw;max-height:96vh") \
+                .classes("gap-2 overflow-auto"):
             ui.label("Opening and ending cards").classes("text-lg font-semibold")
-            ui.label("The trip's title on a card at the very start, and words on a card at the end. The opening "
-                     "card lies over the start of your first shot, so every cut stays on its pin.") \
-                .classes("text-sm text-gray-600")
+            ui.label("Each has its own look, words and length. The opening card lies over the start of your first "
+                     "shot, so every cut stays on its pin; the ending card comes after the last shot as the music "
+                     "fades out.").classes("text-sm text-gray-600")
 
-            @ui.refreshable
-            def looks() -> None:
-                words = {"text": t["trip_title"], "sub": t["trip_sub"]}
-                with ui.row().classes("w-full gap-3"):
-                    for key, spec in [("", {"label": "No card (title over the shot)"}), *titles.CARDS.items()]:
-                        picked = key == state["card"]
-                        box = ui.element("div").classes("cursor-pointer rounded overflow-hidden").style(
-                            "width:200px;border:3px solid " + ("#2563eb" if picked else "#e5e7eb"))
-                        box.on("click", lambda key=key: pick(key))
+            draws: dict = {}
+
+            def make_looks(which: str) -> None:  # (one refreshable each: refreshing one must not redraw the other)
+                @ui.refreshable
+                def draw() -> None:
+                    looks(which)
+                draws[which] = draw
+                draw()
+
+            def looks(which: str) -> None:
+                words = ({"text": t["trip_title"], "sub": t["trip_sub"]} if which == "card" else
+                         {"text": t["end_text"], "sub": t["end_sub"]})
+                none = "No card (title over the shot)" if which == "card" else "Words on black"
+                with ui.row().classes("w-full gap-2 no-wrap overflow-x-auto"):
+                    for key, spec in [("", {"label": none}), *titles.CARDS.items()]:
+                        picked = key == state[which]
+                        box = ui.element("div").classes("cursor-pointer rounded overflow-hidden flex-none").style(
+                            "width:150px;border:3px solid " + ("#2563eb" if picked else "#e5e7eb"))
+                        box.on("click", lambda key=key: pick(which, key))
                         with box:
                             if key:
-                                ui.image(self.card_png(key, words, w, h, first)).style("width:100%;aspect-ratio:16/9")
+                                ui.image(self.card_png(key, words, w, h, first if which == "card" else last)) \
+                                    .style("width:100%;aspect-ratio:16/9")
                             else:
-                                ui.image(data_url(first) if first else "").style("width:100%;aspect-ratio:16/9;background:#000")
+                                ui.image(data_url(first) if first and which == "card" else "") \
+                                    .style("width:100%;aspect-ratio:16/9;background:#000")
                             ui.label(("✓ " if picked else "") + spec["label"]).classes(
-                                "text-sm px-2 py-1 " + ("font-semibold text-blue-700" if picked else ""))
+                                "text-xs px-2 py-1 " + ("font-semibold text-blue-700" if picked else ""))
 
-            def pick(key: str) -> None:
-                state["card"] = key
-                t["card"] = key
-                save(card=key)
-                looks.refresh()
+            def pick(which: str, key: str) -> None:
+                state[which] = key
+                t[which] = key
+                save(**{which: key})
+                draws[which].refresh()
 
-            looks()
-            with ui.row().classes("w-full items-end gap-3"):
-                ui.switch("Opening", value=t["opening"], on_change=lambda e: save(opening=e.value)).classes("w-28")
-                first_line = ui.input("Title", value=t["trip_title"]).classes("w-64")
-                second = ui.input("Second line", value=t["trip_sub"]).classes("w-64")
+            # The opening
+            with ui.column().classes("w-full gap-1 p-2 rounded bg-blue-50"):
+                with ui.row().classes("w-full items-end gap-3"):
+                    ui.label("🎬 Opening").classes("text-base font-semibold w-24")
+                    ui.switch("On", value=t["opening"], on_change=lambda e: save(opening=e.value))
+                    first_line = ui.input("Title", value=t["trip_title"]).classes("w-64")
+                    second = ui.input("Second line", value=t["trip_sub"]).classes("w-64")
 
-                def words_changed() -> None:
-                    t["trip_title"], t["trip_sub"] = first_line.value, second.value
-                    save(trip_title=first_line.value, trip_sub=second.value)
-                    looks.refresh()
-                first_line.on("blur", words_changed)
-                second.on("blur", words_changed)
-                ui.select({2.0: "2 s", 3.0: "3 s", 4.0: "4 s", 5.0: "5 s"}, value=float(t["open_seconds"] or 3),
-                          label="Card shows", on_change=lambda e: save(open_seconds=e.value)).classes("w-28")
-            with ui.row().classes("w-full items-end gap-3"):
-                ui.switch("Ending", value=t["ending"], on_change=lambda e: save(ending=e.value)).classes("w-28")
-                end = ui.input("Words", value=t["end_text"]).classes("w-64")
-                end.on("blur", lambda: save(end_text=end.value))
-                end_sub = ui.input("Second line", value=t["end_sub"]).classes("w-64")
-                end_sub.on("blur", lambda: save(end_sub=end_sub.value))
-                ui.select({0.0: "No ending card", 2.0: "2 s", 3.0: "3 s", 4.0: "4 s", 5.0: "5 s"},
-                          value=float(t["end_black"] or 0), label="Ending card",
-                          on_change=lambda e: save(end_black=e.value)).classes("w-36") \
-                    .tooltip("After the last shot, as the music fades out")
+                    def words_changed() -> None:
+                        t["trip_title"], t["trip_sub"] = first_line.value, second.value
+                        save(trip_title=first_line.value, trip_sub=second.value)
+                        draws["card"].refresh()
+                    first_line.on("blur", words_changed)
+                    second.on("blur", words_changed)
+                    open_len = float(t["open_seconds"] or 3)
+                    ui.select(lengths | ({open_len: f"{open_len:g} s"} if open_len not in lengths else {}),
+                              value=open_len, label="Opening length",
+                              on_change=lambda e: save(open_seconds=e.value)).classes("w-36")
+                ui.label("Opening look").classes("text-xs text-gray-600")
+                make_looks("card")
+            # The ending
+            with ui.column().classes("w-full gap-1 p-2 rounded bg-amber-50"):
+                with ui.row().classes("w-full items-end gap-3"):
+                    ui.label("🌅 Ending").classes("text-base font-semibold w-24")
+                    ui.switch("On", value=t["ending"], on_change=lambda e: save(ending=e.value))
+                    end = ui.input("Words", value=t["end_text"]).classes("w-64")
+                    end_sub = ui.input("Second line", value=t["end_sub"]).classes("w-64")
+
+                    def end_words() -> None:
+                        t["end_text"], t["end_sub"] = end.value, end_sub.value
+                        save(end_text=end.value, end_sub=end_sub.value)
+                        draws["end_card"].refresh()
+                    end.on("blur", end_words)
+                    end_sub.on("blur", end_words)
+                    end_len = float(t["end_black"] or 0)
+                    ui.select({0.0: "No ending card"} | lengths | ({end_len: f"{end_len:g} s"} if end_len not in lengths
+                                                                   and end_len else {}),
+                              value=end_len, label="Ending length",
+                              on_change=lambda e: save(end_black=e.value)).classes("w-36") \
+                        .tooltip("After the last shot, as the music fades out")
+                ui.label("Ending look").classes("text-xs text-gray-600")
+                make_looks("end_card")
 
             def done() -> None:
                 dialog.close()
@@ -7344,10 +7379,10 @@ class Page:
             ui.label("Words that fade in over the video. Add your own on any shot in the Storyboard (Add title).") \
                 .classes("text-sm text-gray-600")
             with ui.row().classes("items-center gap-2"):
-                card = titles.CARDS.get(t["card"])
+                card, end_look = titles.CARDS.get(t["card"]), titles.CARDS.get(t["end_card"])
                 ui.button("Opening & ending cards", icon="style", on_click=self.cards_dialog).props("outline no-caps")
-                ui.label(f"Look: {card['label']}" if card else "No cards: the title shows over the first shot") \
-                    .classes("text-sm text-gray-600")
+                ui.label(f"Opening: {card['label'] if card else 'title over the first shot'} · Ending: "
+                         f"{end_look['label'] if end_look else 'words on black'}").classes("text-sm text-gray-600")
             with ui.row().classes("w-full items-end gap-3"):
                 ui.switch("Opening title", value=t["opening"], on_change=lambda e: save(opening=e.value)).classes("w-44")
                 first = ui.input("Title", value=t["trip_title"]).classes("w-64")

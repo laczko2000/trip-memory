@@ -462,7 +462,8 @@ class Trip:
         return {"opening": True, "trip_title": saved.get("ai_title") or self.folder.name.replace("_", " "), "trip_sub": span,
                 "stories": True, "story_style": "caption", "ending": True, "end_text": "Until next time",
                 "end_sub": self.folder.name.replace("_", " "), "style": "bold", "end_black": 3.0,
-                "card": "", "open_seconds": 3.0, **saved}
+                "card": "", "open_seconds": 3.0, **saved} | (
+                    {} if "end_card" in saved else {"end_card": saved.get("card", "")})  # (the ending's own look)
 
     def opening_card(self) -> dict | None:
         """The opening card (the trip's title on black or on the first shot blurred), or None: then the
@@ -477,8 +478,8 @@ class Trip:
         t = self.title_settings()
         words = ({"text": t["end_text"], "sub": t["end_sub"], "style": "elegant", "where": "center"}
                  if t["ending"] and (t["end_text"] or t["end_sub"]) else None)
-        if t["card"] in titles.CARDS and t["end_black"]:
-            words = {**titles.card_words(t["card"], words or {}), "card": t["card"]}
+        if t["end_card"] in titles.CARDS and t["end_black"]:
+            words = {**titles.card_words(t["end_card"], words or {}), "card": t["end_card"]}
         return float(t["end_black"] or 0), words
 
     def set_title_settings(self, **values) -> None:
