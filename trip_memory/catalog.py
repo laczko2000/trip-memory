@@ -500,8 +500,23 @@ class Trip:
         t = self.title_settings()
         names = {s["number"]: s["name"] for s in self.stories()}
         # By theme or day by day, the shots don't follow the stories: no story titles then.
-        chapters_on = self.storyline()["order"] != themes.TIME
+        line = self.storyline()
+        chapters_on = line["order"] != themes.TIME or line["by_day"]
         result: dict[str, dict] = {}
+        if line["order"] == themes.TIME and line["day_titles"]:  # "Day 2 · Lisbon · Tue 15 Jul" as each day starts
+            days = sorted({x["day"] for x in board})
+            seen: set[str] = set()
+            for r in board:
+                if r["day"] in seen:
+                    continue
+                seen.add(r["day"])
+                places = [x["place"] or x["country"] for x in board
+                          if x["day"] == r["day"] and (x["place"] or x["country"])]
+                when = datetime.fromisoformat(r["day"]).strftime("%a %-d %b")
+                result[r["path"]] = {"text": f"Day {days.index(r['day']) + 1}",
+                                     "sub": (max(set(places), key=places.count) + " · " if places else "") + when,
+                                     "style": t["story_style"], "where": "", "auto": "day"}
+            chapters_on = True  # day titles instead of story titles
         previous = object()
         for k, r in enumerate(board):
             if r["story"] != previous and t["stories"] and k > 0 and not chapters_on:
@@ -1355,7 +1370,11 @@ class Trip:
         "split": activities shown per person, "finale": bool}. As it happened, with a finale, until you change it."""
         rows = self.query("SELECT value FROM meta WHERE key = 'storyline'")
         saved = json.loads(rows[0]["value"]) if rows and rows[0]["value"] else {}
-        return {"order": themes.TIME, "blocks": [], "split": [], "finale": True} | saved
+        line = {"order": themes.TIME, "blocks": [], "split": [], "finale": True, "by_day": False,
+                "day_titles": False} | saved
+        if line["order"] == themes.DAY:  # (Day by day is now a switch of As it happened)
+            line |= {"order": themes.TIME, "by_day": True}
+        return line
 
     def set_storyline(self, **changes) -> None:
         value = self.storyline() | changes

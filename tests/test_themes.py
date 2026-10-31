@@ -47,7 +47,7 @@ def test_the_storyline_orders_the_shots_three_ways():
               for k in ("Water sports|", "Food & drink|", "Boat|")]
     chapters, where = themes.chapters_for(line | {"order": themes.THEME, "blocks": blocks, "finale": False}, rows)
     assert where == [2, 1, 0, 1, 0]  # water sports first, then food, then the boat
-    chapters, where = themes.chapters_for(line | {"order": themes.DAY, "blocks": blocks, "finale": False}, rows)
+    chapters, where = themes.chapters_for(line | {"by_day": True, "blocks": blocks, "finale": False}, rows)
     assert [c["what"] for c in chapters] == ["2025-07-03 Water sports|", "2025-07-03 Food & drink|", "2025-07-03 Boat|",
                                              "2025-07-04 Water sports|", "2025-07-04 Food & drink|"]
     assert where == [2, 1, 0, 4, 3]

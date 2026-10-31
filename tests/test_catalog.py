@@ -393,6 +393,9 @@ def test_titles_opening_story_end_and_your_own(tmp_path, monkeypatch):
 
     trip.set_shot_title(str(trip_dir / "2.jpg"), "", "")
     assert shown()["2.jpg"][0] == "story"
+    trip.set_storyline(day_titles=True)  # a title as each day starts, instead of the story titles
+    assert shown() == {"0.jpg": ("day", "Day 1"), "2.jpg": ("day", "Day 2")}
+    assert trip.shot_titles()[str(trip_dir / "2.jpg")]["sub"].endswith("Fri 4 Jul")
 
 
 def test_video_doubles_are_found_on_several_frames(tmp_path, monkeypatch):

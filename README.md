@@ -59,6 +59,7 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **0.84:** *Day by day* is now part of **As it happened** (Storyboard), with two switches: **A title for each day** ("Day 2 · Lisbon · Tue 15 Jul" over the first shot of each day) and **Keep each day's themes together** (inside each day: all its kitesurfing, then all its food, in the theme order you set). Choices left: As it happened, By theme, My story (AI).
 - **0.83:** the app **learns your ⭐ highlights**, across all your trips. Once it has 5 or more, press *Suggest highlights like mine* (Choose files, Step 1b): it looks through the chosen videos that have no ⭐ yet and suggests the seconds most like yours, in orange. Keep one (⭐) and it becomes a highlight; drop one (✕) and the app learns that too. The suggestions also show in the shot window (orange line and chip). The first look takes a while: it reads a frame every second of each video, once.
 - **0.82:** **⇆ Play backwards** switch in the shot window for videos: that shot plays in reverse in the video (without its own sound). The draft shows it too, and the clip gets a ⇆ badge. *Undo* turns it back.
 - **0.81:** photos in the shot window: **turn** buttons (↺ ↻) and a **Crop** button. Zoom in and move the photo to frame it, then press *Crop*: what you see is saved as a cropped copy (in the app's folder; your own photo is not changed) that takes the photo's place everywhere. *Undo: crop* brings the whole photo back.

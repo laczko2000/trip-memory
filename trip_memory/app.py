@@ -3222,7 +3222,7 @@ class Page:
         "lively": {"cut_on": "strong", "max_video": 2.5, "max_photo": 1.5, "min_shot": 0.5},
     }
     ORDER_WORDS = {
-        themes.TIME: "The whole trip in the order it happened.",
+        themes.TIME: "The whole trip in the order it happened, day after day.",
         themes.THEME: "Your themes in the order you set; inside each one, the shots run in time order.",
         themes.DAY: "Day after day; inside each day, its themes in the order you set.",
         themes.STORY: "Describe (or say) the story you want: the AI arranges your themes into parts, each with its own "
@@ -3257,8 +3257,20 @@ class Page:
             ui.label(self.ORDER_WORDS[line["order"]]).classes("text-sm text-gray-600")
             if line["order"] == themes.STORY:
                 self.my_story_view(line)
-            elif line["order"] != themes.TIME:
-                self.storyline_blocks_view(line)
+            else:
+                if line["order"] == themes.TIME:
+                    with ui.row().classes("items-center gap-4"):
+                        ui.switch("A title for each day", value=line["day_titles"],
+                                  on_change=lambda e: self.set_line(day_titles=e.value)).props("dense") \
+                            .tooltip("\"Day 2 · Lisbon · Tue 15 Jul\" over the first shot of each day")
+                        ui.switch("Keep each day's themes together", value=line["by_day"],
+                                  on_change=lambda e: self.set_line(by_day=e.value)).props("dense") \
+                            .tooltip("Inside each day: all its kitesurfing, then all its food... in the theme order "
+                                     "below, instead of mixed as you filmed them")
+                if line["order"] == themes.THEME or line["by_day"]:
+                    if line["by_day"] and line["order"] == themes.TIME:
+                        ui.label("The order of the themes inside each day:").classes("text-sm text-gray-600")
+                    self.storyline_blocks_view(line)
             if line["order"] != themes.STORY:  # my story ends with its last part, nothing after it
                 with ui.row().classes("items-center gap-3"):
                     ui.switch("Finale: end with the most exciting shots", value=line["finale"],
@@ -3839,6 +3851,12 @@ class Page:
     def set_order(self, order: str) -> None:
         self.trip.set_storyline(order=order, blocks=self._saved_blocks())
         self.storyboard_view.refresh()
+
+    def set_line(self, **changes) -> None:
+        self.trip.set_storyline(blocks=self._saved_blocks(), **changes)
+        self.storyboard_view.refresh()
+        if "day_titles" in changes:
+            self.refresh_all()  # (the titles show on the storyboard and in Make video)
 
     def set_finale(self, on: bool) -> None:
         self.trip.set_storyline(finale=on)

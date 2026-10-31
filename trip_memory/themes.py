@@ -130,7 +130,7 @@ def by_tags(tags: list[str], scene: str | None) -> str:
 # ---------- the storyline: blocks of themes in your order ----------
 
 TIME, THEME, DAY, STORY = "time", "theme", "day", "story"
-ORDERS = {TIME: "As it happened", THEME: "By theme", DAY: "Day by day", STORY: "My story (AI) ✨"}
+ORDERS = {TIME: "As it happened", THEME: "By theme", STORY: "My story (AI) ✨"}  # (day by day: a switch of TIME)
 PICKS = {"all": "all shots", "early": "first half", "late": "second half", "action": "most exciting half",
          "moment": "a moment… 🔍"}
 PACES = {"calm": 0.2, "medium": 0.55, "lively": 0.9}  # how lively the shots of a story part should be, 0..1
@@ -187,6 +187,8 @@ def chapters_for(storyline: dict, rows: list[dict]) -> tuple[list[dict], list[in
         order = TIME  # no story made yet: as it happened
     if order == STORY:  # your parts in your order, the last one ends the video (no finale after it)
         return _story_chapters(story, rows, split)
+    if order == TIME and storyline.get("by_day"):
+        order = DAY  # as it happened, each day's themes kept together
     if order == TIME:
         chapters.append({"kind": "theme", "what": "The whole trip"})
         where = [0 if block_of(r, split) in on else None for r in rows]
