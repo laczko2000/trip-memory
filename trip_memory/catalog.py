@@ -30,7 +30,7 @@ from PIL import Image, ImageOps
 
 from .faces import FaceFinder, group_faces
 from .media import MediaItem, scan_folder
-from . import autoedit, director, moments, motion, musicmood, stories, themes, timeshift
+from . import autoedit, director, moments, motion, musicmood, stories, themes, timeshift, titles
 from .scenes import SceneTagger, mean_vector
 from .tags import TAG_GROUP, Tagger, group_name, look_alike_groups, people_tag, story_subject
 from .tools import ffmpeg_paths, probe
@@ -477,6 +477,7 @@ class Trip:
     def set_shot_title(self, path: str, text: str, sub: str = "", style: str = "clean", where: str = "") -> None:
         """Your own words over a shot (empty: none, the automatic title shows if there is one)."""
         text, sub = (text or "").strip(), (sub or "").strip()
+        self._set_muted_titles([p for p in self.muted_titles() if p != path])  # yours shows again
         if not text and not sub:
             self.execute("UPDATE items SET title_text = NULL, title_sub = NULL, title_style = NULL, title_where = NULL "
                          "WHERE path = ?", (path,))
@@ -515,7 +516,40 @@ class Trip:
             if r["title_text"] or r["title_sub"]:
                 result[r["path"]] = {"text": r["title_text"] or "", "sub": r["title_sub"] or "",
                                      "style": r["title_style"] or "clean", "where": r["title_where"] or "", "auto": None}
+        for path in self.muted_titles():  # moved onto the video's timeline (or taken away there)
+            result.pop(path, None)
         return result
+
+    # Titles on the video's own timeline (the editor under the video). Each: {"id", "text", "sub", "style",
+    # "where", "length", "fade_in", "fade_out", and "link" (a shot's path) + "offset", or "start" (seconds)}.
+
+    def timeline_titles(self) -> list[dict]:
+        rows = self.query("SELECT value FROM meta WHERE key = 'timeline_titles'")
+        return json.loads(rows[0]["value"]) if rows else []
+
+    def save_timeline_titles(self, found: list[dict]) -> None:
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('timeline_titles', ?)", (json.dumps(found),))
+
+    def muted_titles(self) -> list[str]:
+        """Shots whose own or automatic title is not drawn on the shot any more (it lives on the timeline)."""
+        rows = self.query("SELECT value FROM meta WHERE key = 'muted_titles'")
+        return json.loads(rows[0]["value"]) if rows else []
+
+    def _set_muted_titles(self, paths: list[str]) -> None:
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('muted_titles', ?)", (json.dumps(paths),))
+
+    def title_to_timeline(self, path: str, shot_length: float) -> dict | None:
+        """A shot's title (yours or automatic) becomes a timeline title linked to that shot, at the same time."""
+        title = self.shot_titles().get(path)
+        if not title:
+            return None
+        a, b = titles.timing(shot_length)
+        new = {"id": f"t{time.time_ns()}", "text": title["text"], "sub": title["sub"], "style": title["style"],
+               "where": title["where"], "link": path, "offset": round(a, 2), "length": round(b - a, 2),
+               "fade_in": titles.FADE_IN, "fade_out": titles.FADE_OUT}
+        self.save_timeline_titles(self.timeline_titles() + [new])
+        self._set_muted_titles(self.muted_titles() + [path])
+        return new
 
     def _title_card(self, first: dict, board: list[dict], days: list[str]) -> MediaItem:
         """A chapter card such as "Day 2" / "Lisbon · Sat 5 Jul" over a blurred picture of that day."""

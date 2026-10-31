@@ -316,3 +316,35 @@ def test_a_collage_pops_its_photos_in_one_after_another(tmp_path):
     assert centre(0.8, 3).max() < 60  # the fourth is not yet
     yellow = centre(1.75, 3)  # ... and is by the end (as the video fades out)
     assert yellow[0] > yellow[2] + 40 and yellow[1] > yellow[2] + 40
+
+
+def test_timeline_titles_show_at_their_time_and_follow_their_shot(tmp_path):
+    import json
+
+    import numpy as np
+
+    from trip_memory.render import place_titles
+
+    trip = tmp_path / "trip"
+    trip.mkdir()
+    Image.new("RGB", (400, 300), (20, 20, 20)).save(trip / "a.jpg")
+    Image.new("RGB", (400, 300), (20, 20, 20)).save(trip / "b.jpg")
+    items, _ = scan_folder(trip)
+    times = [{"start": 0.0, "length": 2.0}, {"start": 1.5, "length": 2.0}]
+    placed = place_titles([{"text": "Hi", "shot": 1, "offset": 0.5, "length": 1}, {"text": "", "start": 1, "length": 1},
+                           {"text": "Lost", "shot": 7, "offset": 0, "length": 1}], times)
+    assert placed == [{"text": "Hi", "shot": 1, "offset": 0.5, "length": 1, "start": 2.0}]
+    settings = RenderSettings(width=320, height=180, photo_seconds=2, transition_seconds=0.5,
+                              titles=[{"text": "BIG WHITE", "style": "bold", "where": "center", "start": 1.0,
+                                       "length": 1.5, "fade_in": 0, "fade_out": 0}])
+    timing = tmp_path / "times.json"
+    out = render(items, settings, tmp_path / "t.mp4", timing=timing)
+    assert [round(t["start"], 1) for t in json.loads(timing.read_text())] == [0.0, 1.5]
+
+    def brightness(at):
+        frame = subprocess.run([ffmpeg_paths()[0], "-loglevel", "error", "-ss", str(at), "-i", str(out), "-frames:v", "1",
+                                "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True).stdout
+        return np.frombuffer(frame, np.uint8).mean()
+
+    assert brightness(1.8) > brightness(0.6) + 5  # the white title is on screen only from 1 s to 2.5 s
+    assert abs(brightness(3.0) - brightness(0.6)) < 3

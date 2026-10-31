@@ -86,6 +86,9 @@ class RenderSettings:
     end_black: float = 0.0  # seconds of black at the very end (the last shot fades into it, the music fades out)
     end_title: dict | None = None  # words shown on that black ending (see titles.py)
     look: str = "natural"  # the colour mood of the whole video (see looks.py)
+    # Titles on the video's own timeline (the editor under the video): {"text", "sub", "style", "where",
+    # "length", "fade_in", "fade_out", and "start" (seconds into the video) or "shot" (its number) + "offset"}.
+    titles: list = dataclasses.field(default_factory=list)
 
 
 def _fit_with_blur(src: str, w: int, h: int, out: str) -> str:
@@ -593,8 +596,10 @@ def render(
         segments = [ready[_segment_key(item, settings)] for item in items]
         lengths = [_segment_length(seg) for seg in segments]
         styles = [_transition_between(items[k - 1], k, settings) for k in range(1, len(items))]
+        times = shot_times(lengths, styles)
         if timing:
-            Path(timing).write_text(json.dumps(shot_times(lengths, styles)))
+            Path(timing).write_text(json.dumps(times))
+        settings = dataclasses.replace(settings, titles=place_titles(settings.titles, times))
         if settings.end_black > 0:
             # The last shot fades to black; the end title fades in on the black.
             seconds = settings.end_black + END_FADE
@@ -692,6 +697,31 @@ def _join(
                           f"Please send me the report saved at {report}.")
 
 
+def place_titles(found: list[dict], times: list[dict]) -> list[dict]:
+    """Timeline titles with their start in the video: a title linked to a shot starts that far into it."""
+    out = []
+    for t in found or []:
+        if t.get("shot") is not None:
+            if not 0 <= t["shot"] < len(times):
+                continue
+            start = times[t["shot"]]["start"] + float(t.get("offset") or 0)
+        else:
+            start = float(t.get("start") or 0)
+        if (t.get("text") or t.get("sub")) and float(t.get("length") or 0) > 0.2:
+            out.append(t | {"start": max(0.0, start)})
+    return out
+
+
+def title_filter(t: dict, n: int, label: str) -> str:
+    """The title picture (input n) fading in and out at its own time in the joined video."""
+    a, length = t["start"], float(t["length"])
+    fade_in = min(float(t.get("fade_in", titles.FADE_IN) or 0), length / 2)
+    fade_out = min(float(t.get("fade_out", titles.FADE_OUT) or 0), length / 2)
+    fades = (f",fade=t=in:st={a:.3f}:d={fade_in:.3f}:alpha=1" if fade_in > 0 else "") + \
+            (f",fade=t=out:st={a + length - fade_out:.3f}:d={fade_out:.3f}:alpha=1" if fade_out > 0 else "")
+    return f"[{n}:v]format=rgba,setpts=PTS-STARTPTS{fades}[{label}]"
+
+
 def shot_times(lengths: list[float], styles: list[tuple[str | None, float]]) -> list[dict]:
     """Where each shot starts in the joined video (a transition overlaps it with the one before) and how long
     it is seen, the same way _planned_length counts."""
@@ -781,18 +811,34 @@ def _join_once(
         total_frames = offset_frames + frames[k]
     total = total_frames / FPS
 
+    # Titles on the video's timeline (the editor's), each fading in and out at its own time.
+    pngs = []
+    for k, t in enumerate(s.titles or []):
+        if t["start"] >= total:
+            continue
+        png = out.with_name(f"{out.stem}.title{k}.png")
+        titles.draw(t, s.width, s.height).save(png)
+        pngs.append(png)
+        n_in = inputs.count("-i")
+        inputs += ["-loop", "1", "-t", f"{total:.3f}", "-i", str(png)]
+        parts.append(title_filter(t, n_in, f"tt{k}"))
+        end = min(total, t["start"] + float(t["length"]))
+        parts.append(f"[{v_prev}][tt{k}]overlay=0:0:enable='between(t,{t['start']:.3f},{end:.3f})':"
+                     f"format=auto,format=yuv420p[tv{k}]")
+        v_prev = f"tv{k}"
     # Gentle fade in from black at the start and out at the end.
     edge = min(1.0, total / 4)
     parts.append(f"[{v_prev}]format=yuv420p{look_filter(s.look)},format=yuv420p,"
                  f"fade=t=in:d={edge:.2f},fade=t=out:st={total - edge:.3f}:d={edge:.2f}[vout]")
     sound = f"[{a_prev}]afade=t=in:d={edge:.2f},afade=t=out:st={total - edge:.3f}:d={edge:.2f}"
 
+    music_in = inputs.count("-i")
     if s.music_path:
         inputs += ["-stream_loop", "-1", "-i", s.music_path]
         fade = min(max(3.0, s.end_black + END_FADE), total / 4)  # the music fades out across the black ending
         parts.append(f"{sound}[clips]")
         parts.append(
-            f"[{n}:a]aformat=sample_rates=48000:channel_layouts=stereo,atrim=0:{total:.3f},"
+            f"[{music_in}:a]aformat=sample_rates=48000:channel_layouts=stereo,atrim=0:{total:.3f},"
             f"volume={s.music_volume},afade=t=out:st={total - fade:.3f}:d={fade:.2f}[music]"
         )
         parts.append("[clips][music]amix=inputs=2:duration=first:normalize=0[aout]")
@@ -815,4 +861,6 @@ def _join_once(
         total_seconds=total,
         on_progress=progress,
     )
+    for png in pngs:
+        png.unlink(missing_ok=True)
     return _segment_length(out)
