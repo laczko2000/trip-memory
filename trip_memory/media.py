@@ -60,6 +60,7 @@ class MediaItem:
     overlay: dict | None = None  # text over the shot: {"text", "sub", "style", "where"} (see titles.py)
     focus: float | None = None  # where the people are, across the picture (0 left .. 1 right), for a phone video
     camera: str | None = None  # which camera took it, e.g. "iPhone 15 Pro" or "GoPro" (see timeshift.py)
+    reverse: bool = False  # for videos: play the shot backwards
     crop: dict | None = None  # for photos: the part you zoomed in on, {"zoom" (1 = all), "x", "y" (its middle, 0..1)}
 
     @property

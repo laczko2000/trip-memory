@@ -184,7 +184,7 @@ class Trip:
             "plan_role TEXT", "plan_pos REAL", "title_text TEXT", "title_sub TEXT", "title_style TEXT", "title_where TEXT",
             "focus_x REAL", "keep_start REAL", "keep_end REAL", "part_of TEXT",
             "theme TEXT", "theme_auto TEXT", "theme_sure REAL", "locks TEXT", "camera TEXT", "taken_orig TEXT", "postits TEXT",
-            "shot_of TEXT", "crop TEXT",
+            "shot_of TEXT", "crop TEXT", "reverse INTEGER DEFAULT 0",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
@@ -386,6 +386,7 @@ class Trip:
                     overlay=shown.get(r["path"]),
                     focus=where.get(r["path"]),
                     crop=json.loads(r["crop"]) if r.get("crop") else None,
+                    reverse=bool(r.get("reverse")),
                 )
             )
         return result
@@ -1478,6 +1479,10 @@ class Trip:
             self.execute("UPDATE items SET thumb = ? WHERE path = ?", (str(self._make_thumb(row)), path))
         except Exception:
             traceback.print_exc()  # the old preview picture stays
+
+    def set_reverse(self, path: str, on: bool) -> None:
+        """Play a video backwards in the video (or forwards again)."""
+        self.execute("UPDATE items SET reverse = ? WHERE path = ? OR part_of = ?", (int(on), path, path))
 
     def set_crop(self, path: str, zoom: float, x: float, y: float) -> None:
         """Zoom in on a photo: the video shows only that part of it (zoom 1: the whole photo again)."""

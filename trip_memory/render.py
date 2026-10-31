@@ -174,18 +174,19 @@ def _video_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
     smooth = f",framerate=fps={FPS}" if speed < 0.95 else ""  # slow motion: blend frames, so it doesn't stutter
     look = (_hdr_to_sdr() if item.hdr else "") + rotate_filter(item.rotation)
     graph = ""
+    src = "[0:v]reverse," if item.reverse else "[0:v]"  # played backwards (only the part used is read in)
     if effects.get("ramp"):
         # Normal speed, then twice as fast through the middle, then normal again.
         a, b = RAMP[0] * length * speed, (RAMP[0] * length + RAMP[1] * length * 2) * speed  # in the video's own time
-        graph += (f"[0:v]setpts=PTS-STARTPTS,split=3[r1][r2][r3];"
+        graph += (f"{src}setpts=PTS-STARTPTS,split=3[r1][r2][r3];"
                   f"[r1]trim=0:{a:.4f},setpts=(PTS-STARTPTS)/{speed:.4f}{smooth}[q1];"
                   f"[r2]trim={a:.4f}:{b:.4f},setpts=(PTS-STARTPTS)/{2 * speed:.4f}[q2];"
                   f"[r3]trim={b:.4f},setpts=(PTS-STARTPTS)/{speed:.4f}{smooth}[q3];"
                   f"[q1][q2][q3]concat=n=3:v=1:a=0,{look}format=yuv420p[src];")
     elif abs(speed - 1) > 1e-3:
-        graph += f"[0:v]setpts=(PTS-STARTPTS)/{speed:.4f}{smooth},{look}format=yuv420p[src];"
+        graph += f"{src}setpts=(PTS-STARTPTS)/{speed:.4f}{smooth},{look}format=yuv420p[src];"
     else:
-        graph += f"[0:v]{look}format=yuv420p[src];"
+        graph += f"{src}{look}format=yuv420p[src];"
     graph += (_fill_around("src", s.width, s.height, item.focus, "fit") if tall(s)
               else _fit_with_blur("src", s.width, s.height, "fit"))
     graph += f";[fit]fps={FPS}{_zoom_filter(item, moving)}{_hit_filter(effects, s.width, s.height)}{_freeze_filter(effects, moving)},format=yuv420p[v]"
@@ -194,7 +195,7 @@ def _video_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
     if item.overlay and (item.overlay.get("text") or item.overlay.get("sub")):
         title_png = out.with_suffix(".title.png")
         titles.draw(item.overlay, s.width, s.height).save(title_png)
-    if item.has_audio and item.sound and s.keep_clip_sound:
+    if item.has_audio and item.sound and s.keep_clip_sound and not item.reverse:  # (backwards: no clip sound)
         level = f"aformat=sample_rates=48000:channel_layouts=stereo,volume={item.volume * s.clip_volume:.2f}"
         if effects.get("ramp"):
             parts = [_atempo(speed), _atempo(2 * speed), _atempo(speed)]
@@ -522,7 +523,7 @@ def _segment_key(item: MediaItem, s: RenderSettings) -> str:
         parts += [item.title]
     else:
         parts += [clip_range(item, s), item.has_audio and item.sound and s.keep_clip_sound, item.volume * s.clip_volume,
-                  item.speed, sorted((item.effects or {}).items()), item.fx_in, item.fx_out]
+                  item.speed, sorted((item.effects or {}).items()), item.fx_in, item.fx_out, item.reverse]
     return hashlib.sha1(repr(parts).encode()).hexdigest()[:20]
 
 

@@ -59,6 +59,7 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **0.82:** **⇆ Play backwards** switch in the shot window for videos: that shot plays in reverse in the video (without its own sound). The draft shows it too, and the clip gets a ⇆ badge. *Undo* turns it back.
 - **0.81:** photos in the shot window: **turn** buttons (↺ ↻) and a **Crop** button. Zoom in and move the photo to frame it, then press *Crop*: what you see is saved as a cropped copy (in the app's folder; your own photo is not changed) that takes the photo's place everywhere. *Undo: crop* brings the whole photo back.
 - **0.80:** **Previous / Next** in the shot window: big arrows on the left and right (or the ← → keys) open the previous or next file without closing the window, in the order of Choose files (elsewhere: by time). When you close it, you land on the last file you looked at.
 - **0.79.5:** moving a clip up or down in the *Storyboard* keeps every cut on your pins, the same as in the editor under the draft: each place keeps its length and the clips that move along are fitted to it. The ✕ next to a ⭐ highlight in the shot window now takes it off (Undo puts it back).

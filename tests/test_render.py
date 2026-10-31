@@ -360,3 +360,26 @@ def test_a_zoomed_in_photo_shows_only_that_part():
     assert part.size == (200, 100)
     img.paste("blue", (200, 0, 400, 200))
     assert crop_photo(img, {"zoom": 2.0, "x": 0.9, "y": 0.5}).getpixel((10, 50)) == (0, 0, 255)
+
+
+def test_a_clip_can_play_backwards(tmp_path):
+    import subprocess
+
+    from PIL import Image
+    from trip_memory.tools import ffmpeg_paths
+
+    trip = tmp_path / "trip"
+    trip.mkdir()
+    subprocess.run([ffmpeg_paths()[0], "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "color=red:s=320x180:r=30:d=1[a];color=blue:s=320x180:r=30:d=1[b];[a][b]concat=n=2",
+                    "-metadata", "creation_time=2025-07-03T10:00:00Z", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    str(trip / "a.mp4")], check=True)
+    items, _ = scan_folder(trip)
+    items[0].reverse = True
+    out = render(items, RenderSettings(width=320, height=180), tmp_path / "back.mp4")
+    frame = tmp_path / "first.png"
+    subprocess.run([ffmpeg_paths()[0], "-loglevel", "error", "-y", "-ss", "0.7", "-i", str(out), "-frames:v", "1",
+                    str(frame)], check=True)
+    with Image.open(frame) as img:
+        r, g, b = img.convert("RGB").getpixel((160, 90))
+    assert b > 150 and r < 100, (r, g, b)  # it starts with the end of the clip (blue)

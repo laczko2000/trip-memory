@@ -1628,6 +1628,8 @@ class Page:
 
         def after() -> None:  # when the window closes: the page behind shows what changed, at the same spot
             if changed["any"] and not changed["again"]:
+                if name == "Make video" and self.auto_update:  # the draft catches up by itself
+                    self.update_due = time.time() + self.AUTO_PAUSE
                 self.stale = True
                 self.choose_focus, self.choose_focus_path = story, path  # Choose files draws down to the shot
                 self.choose_keep_scroll = True
@@ -1663,6 +1665,19 @@ class Page:
 
                 ui.select(sorted(set(names) | {now}), value=now, label="Theme",
                           on_change=lambda e: theme(e.value)).props("dense options-dense").classes("w-56")
+                if it["kind"] == "video":
+                    def backwards(on: bool) -> None:
+                        self.trip.set_reverse(path, on)
+                        history.append(("play backwards" if on else "play forwards",
+                                        lambda: self.trip.set_reverse(path, not on)))
+                        mark()
+                        ui.notify("⇆ This shot plays backwards in the video (see it in the draft)." if on else
+                                  "This shot plays forwards again.", timeout=2500)
+
+                    ui.switch("⇆ Play backwards", value=bool(it.get("reverse")),
+                              on_change=lambda e: backwards(e.value)).props("dense") \
+                        .tooltip("The shot plays in reverse in the video. The preview here plays forwards; "
+                                 "the draft shows it backwards.")
                 ui.label(f"🕒 {fmt_time(it['taken_at'])} · 📍 {it['place'] or it['country'] or 'Unknown place'}") \
                     .classes("text-xs text-gray-600")
                 ui.space()
@@ -4954,7 +4969,10 @@ class Page:
 
     def draft_board(self) -> list[tuple[str, float]]:
         photo = self.photo_len.value if getattr(self, "photo_len", None) else 4.0
-        return [(r["path"], round(Trip.screen_length(r, photo), 2)) for r in self.trip.storyboard()]
+        # (with what changes how a shot looks: turned, played backwards, cropped, its part)
+        return [(r["path"], round(Trip.screen_length(r, photo), 2),
+                 f"{r.get('rotation') or 0}|{r.get('reverse') or 0}|{r.get('crop') or ''}|{r.get('trim_start')}")
+                for r in self.trip.storyboard()]
 
     @ui.refreshable
     def editor_card(self) -> None:
@@ -5269,7 +5287,7 @@ class Page:
         tile.tooltip(f"{n + 1}: {length:.1f} s" + (" · 🔒 locked moment" if locked else "") +
                      " · double-click: open it big (theme, cut, lock)")
         with tile:
-            ui.label(f"{n + 1}" + (" 🔒" if locked else "")).classes(
+            ui.label(f"{n + 1}" + (" 🔒" if locked else "") + (" ⇆" if r.get("reverse") else "")).classes(
                 "absolute left-1 top-0 text-[10px] font-bold text-white").style("text-shadow:0 0 3px #000")
 
     def pick_draft_clip(self, n: int, start: float | None) -> None:
