@@ -732,7 +732,8 @@ class Page:
                         ui.button(icon="close", on_click=lambda i=idea: self.idea_answer([i], False)) \
                             .props("flat dense round size=sm color=grey-7").tooltip("Drop: not a highlight")
 
-    def suggestion_window(self, items: list[dict], k: int, title: str, keep, drop, done) -> None:
+    def suggestion_window(self, items: list[dict], k: int, title: str, keep, drop, done,
+                          highlights: bool = False) -> None:
         """One suggestion big (a highlight like yours, or a moment the app found): it opens at the very second the
         app picked, plays the seconds around it again and again (green on the strip, the second itself in orange),
         and you answer: Keep (at that second, or where you put the red line) or Not this. Then the next one comes,
@@ -752,7 +753,8 @@ class Page:
         def go(to: int) -> None:
             state["nav"] = True
             with self.window_timers:
-                ui.timer(0.05, lambda: self.suggestion_window(items, to, title, keep, drop, done), once=True)
+                ui.timer(0.05, lambda: self.suggestion_window(items, to, title, keep, drop, done, highlights),
+                         once=True)
 
         async def red_or_suggested() -> float:
             try:  # the red line, if you stopped the video somewhere; else the second the app suggested
@@ -800,22 +802,71 @@ class Page:
                              "is.").classes("text-xs text-orange-800")
                 ui.button("Back to the app's pick", icon="my_location", on_click=lambda: ui.run_javascript(
                     f"tmShowAt('{box}', {a:.2f}, {b:.2f}, {f['t']:.2f})")).props("flat dense no-caps color=orange-9")
+            if highlights:
+                self.highlight_cards(row, box, mine_box)
             for side, step, icon in (("left", -1, "chevron_left"), ("right", 1, "chevron_right")):
                 if 0 <= k + step < len(items):
                     ui.button(icon=icon, on_click=lambda s=step: (go(k + s), dialog.close())) \
                         .props(f"round unelevated color=grey-9 size=xl data-nav={step}") \
-                        .style(f"position:fixed;{side}:10px;top:50%;transform:translateY(-50%);z-index:20;opacity:.85") \
+                        .style(f"position:fixed;{side}:10px;top:{'28%' if highlights else '50%'};"
+                               "transform:translateY(-50%);z-index:20;opacity:.85") \
                         .tooltip(("Previous" if step < 0 else "Next") + " suggestion (← →)")
 
         def hidden() -> None:
             if not state["nav"]:
                 done()
 
+        mine_box: dict = {}  # the row of your own highlights in this video (redrawn when you add or take one off)
+
+        def add_highlight(t: float) -> None:  # Shift: one more ⭐ of your own, at the red line
+            self.trip.add_postit(row["path"], round(t, 2))
+            ui.run_javascript(f"tmHighlightMark({t:.2f})")
+            ui.notify(f"⭐ Your highlight at {clock(t)} (the picture is below).", timeout=1500, type="positive")
+            if mine_box.get("draw"):
+                mine_box["draw"].refresh()
+
         self.part_dialog(row | {"ideas": [{"t": f["t"]}]}, a, b,
                          f"{title}: suggestion {k + 1} of {len(items)} · {Path(row['path']).name} at {clock(f['t'])}",
                          [("Not this", "close", dropped, "outline no-caps color=grey-8"),
                           ("Keep at the red line", "star", kept, "unelevated no-caps color=orange-8")],
-                         extra=extra, on_hide=hidden, full=True, focus=f["t"])
+                         extra=extra, on_hide=hidden, full=True, focus=f["t"],
+                         on_highlight=add_highlight if highlights else None,
+                         video_height="max(200px,calc(100vh - 520px))" if highlights else None)
+
+    def highlight_cards(self, row: dict, box: str, holder: dict) -> None:
+        """Your own ⭐ highlights in this video, each as its picture with its time: click to go to it, ✕ to take it
+        off. Shift adds one at the red line."""
+        path = row["path"]
+
+        @ui.refreshable
+        def draw() -> None:
+            marks = self.trip.postits(path)
+            with ui.row().classes("w-full items-center gap-2 px-2"):
+                ui.label(f"⭐ Your highlights in this video ({len(marks)}):" if marks else
+                         "⭐ Another great moment in this video? Drag the strip to it and tap Shift: it becomes one "
+                         "of your highlights too.").classes("text-sm font-medium text-amber-900")
+                for n, m in enumerate(marks):
+                    with ui.column().classes("gap-0 p-1 rounded border-2 border-amber-400 bg-amber-50 items-center"):
+                        if m.get("thumb"):
+                            ui.image(data_url(m["thumb"])).classes("w-28 rounded cursor-pointer") \
+                                .style("aspect-ratio:16/10").props("fit=contain no-spinner") \
+                                .on("click", lambda t=m["t"]: ui.run_javascript(
+                                    f"(() => {{ const b = document.getElementById('{box}'); if (b) tmShowAt(b.id, "
+                                    f"parseFloat(b.dataset.start), parseFloat(b.dataset.end), {t:.2f}); }})()")) \
+                                .tooltip("Go to this frame")
+                        with ui.row().classes("items-center gap-0 no-wrap"):
+                            ui.label(f"⭐ {clock(m['t'])}").classes("text-xs font-semibold")
+                            ui.button(icon="close", on_click=lambda n=n: take_off(n)) \
+                                .props("flat dense round size=xs").tooltip("Take this highlight off")
+
+        def take_off(n: int) -> None:
+            self.trip.change_postit(path, n, remove=True)
+            ui.run_javascript(f"tmHighlightsSet({json.dumps([m['t'] for m in self.trip.postits(path)])})")
+            ui.notify("Highlight taken off.", timeout=1200)
+            draw.refresh()
+
+        holder["draw"] = draw
+        draw()
 
     def open_idea(self, ideas: list[dict], k: int) -> None:
         rows = {x["path"]: x for x in self.all_items}
@@ -828,7 +879,7 @@ class Page:
 
         self.suggestion_window(items, k, "⭐ Highlight like yours",
                                lambda f, t: run.io_bound(self.trip.keep_idea, f["path"], t, f["t"]),
-                               lambda f: run.io_bound(self.trip.drop_idea, f["path"], f["t"]), done)
+                               lambda f: run.io_bound(self.trip.drop_idea, f["path"], f["t"]), done, highlights=True)
 
     def learn_quietly(self) -> None:
         try:
@@ -1562,7 +1613,8 @@ class Page:
     def part_dialog(self, it: dict, a: float, b: float, title: str, actions: list[tuple],
                     taken: list[tuple[float, float, int]] | None = None,
                     made: list[tuple[float, float, str]] | None = None, extra=None, on_hide=None,
-                    full: bool = False, on_highlight=None, focus: float | None = None) -> None:
+                    full: bool = False, on_highlight=None, focus: float | None = None,
+                    video_height: str | None = None) -> None:
         """focus: open paused on this very frame, the red line on it (a suggested second you check and move).
         A big window to choose a part of a video: it plays that part (silently, again and again), the strip below
         shows the whole clip (move the mouse along it to look), and the green handles set the part.
@@ -1572,7 +1624,7 @@ class Page:
         with ui.dialog().props("maximized" if full else "") as dialog, \
                 ui.card().classes("w-full h-full gap-2 overflow-auto" if full else "w-[60rem] max-w-full gap-2"):
             ui.label(title).classes("text-lg font-semibold")
-            height = "max(240px,calc(100vh - 360px))" if full else "min(60vh,520px)"
+            height = video_height or ("max(240px,calc(100vh - 360px))" if full else "min(60vh,520px)")
             with ui.element("div").classes("w-full").on("dblclick", lambda: dialog.close()) \
                     .tooltip("Double-click: close and go back") as holder:
                 holder.on("tmvzoom", lambda e: self.vzoom_moved and self.vzoom_moved(e), ["detail"])
@@ -2122,7 +2174,14 @@ class Page:
                 ui.label("⭐ Highlights:" if marks else "Space plays and pauses · tap Shift at a great moment to put "
                          "a ⭐ highlight there: it is always in the video.").classes("text-xs text-amber-800")
                 for k, m in enumerate(marks):
-                    with ui.row().classes("items-center gap-0 bg-amber-50 border border-amber-300 rounded px-2"):
+                    with ui.row().classes("items-center gap-1 bg-amber-50 border border-amber-300 rounded px-1"):
+                        if m.get("thumb"):
+                            ui.image(data_url(m["thumb"])).classes("w-20 rounded cursor-pointer") \
+                                .style("aspect-ratio:16/10").props("fit=contain no-spinner") \
+                                .on("click", lambda t=m["t"]: ui.run_javascript(
+                                    f"(() => {{ const b = document.getElementById('tm-part-{clip_id(path)}'); if (b) "
+                                    f"tmShowAt(b.id, parseFloat(b.dataset.start), parseFloat(b.dataset.end), "
+                                    f"{t:.2f}); }})()")).tooltip("Go to this frame")
                         ui.label(f"⭐ {clock(m['t'])}" + (f" {m['name']}" if m.get("name") else "")).classes("text-xs")
                         ui.button(icon="close", on_click=lambda k=k: unhighlight(k)) \
                             .props("flat dense round size=xs").tooltip("Take this highlight off")
@@ -7672,13 +7731,17 @@ document.addEventListener('keydown', (e) => {  // keys in the editor: Space, ←
 // Scrubbing: press on the ruler, the red line or the music and drag; the video shows the frame under the cursor.
 // A new frame is asked for only once the last one is shown, so it keeps up with the mouse.
 function tmSeekSoft(v, t) {
+  // One seek at a time (smooth dragging), but never stuck: some browsers (Safari) don't always say a seek ended.
   v._want = t;
-  if (v._busy) return;
+  if (v._busy && Date.now() - (v._busyAt || 0) < 250) return;
   v._busy = true;
   const go = () => {
     const want = v._want; v._want = null;
+    if (want === null || want === undefined) { v._busy = false; return; }
+    v._busyAt = Date.now();
     v.currentTime = want;
     v.addEventListener('seeked', () => { if (v._want !== null && v._want !== undefined) go(); else v._busy = false; }, {once: true});
+    setTimeout(() => { if (v._busy && Date.now() - v._busyAt >= 240) go(); }, 250);
   };
   go();
 }
