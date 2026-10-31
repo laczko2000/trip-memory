@@ -39,7 +39,7 @@ from . import taps as song_taps
 from .beats import song_length
 from .autoedit import CUT_ON, shot_value
 from .autoedit import Limits as AutoLimits
-from .render import TRANSITIONS, RenderSettings, clip_range, held, render, shot_times, source_factor, style_between
+from .render import END_FADE, TRANSITIONS, RenderSettings, clip_range, held, render, shot_times, source_factor, style_between
 from .scenes import SCENES, text_vectors
 from .tags import ALL_TAGS, EDITABLE_TAGS, TAG_GROUP
 
@@ -5568,6 +5568,136 @@ class Page:
         self.update_due = None
         await self.make_draft()
 
+    def card_png(self, card: str, title: dict, w: int, h: int, picture: str | None = None) -> str:
+        """A card's words (and bars) as a small picture for the quick player; with picture (a thumbnail): the
+        whole card over it, to choose a look."""
+        size = (w // self.DRAFT_SCALE // 2 * 2, h // self.DRAFT_SCALE // 2 * 2)
+        words = {k: title.get(k) for k in ("text", "sub")}
+        key = hashlib.sha1(json.dumps([card, words, size, picture, 2], sort_keys=True).encode()).hexdigest()[:16]
+        folder = app_dir() / "drafts" / "titles"
+        folder.mkdir(parents=True, exist_ok=True)
+        out = folder / f"card-{key}.{'jpg' if picture is not None else 'png'}"
+        if not out.exists():
+            from PIL import Image
+            if picture is not None:
+                try:
+                    pic = Image.open(picture) if picture else None
+                except OSError:
+                    pic = None
+                titles.card_picture(card, words, pic, *size).save(out, quality=85)
+            else:
+                titles.card_layer(card, words, *size).save(out)
+        return f"/drafts/titles/{out.name}"
+
+    def card_live_html(self, board: list[dict], times: list[dict], w: int, h: int) -> str:
+        """The opening and ending cards over the quick player, fading in and out at their time."""
+        if not board or not times:
+            return ""
+        html = ""
+        opening = self.trip.opening_card()
+        if opening:
+            length = max(1.0, min(opening["seconds"], times[0]["length"] - 0.3 if len(times) > 1 else times[0]["length"] - 0.5))
+            css = titles.card_css(opening["card"])
+            back = f"backdrop-filter:{css};-webkit-backdrop-filter:{css};" if css else ""
+            html += (f'<div class="tm-live-title" data-start="0" data-len="{length:.3f}" data-fin="0" '
+                     f'data-fout="{min(titles.CARD_FADE, length / 2):.3f}" style="position:absolute;inset:0;opacity:0;'
+                     f'pointer-events:none;z-index:999;{back}">'
+                     f'<img src="{self.card_png(opening["card"], opening, w, h)}" style="position:absolute;inset:0;'
+                     'width:100%;height:100%"></div>')
+        tail, words = self.trip.end_card()
+        if tail > 0:
+            end = times[-1]["start"] + times[-1]["length"]
+            card = (words or {}).get("card")
+            css = titles.card_css(card) if card else ""
+            last = board[-1]
+            back = (f"background:#000 url('{data_url(last['thumb'])}') center/cover;filter:{css};"
+                    if css and last.get("thumb") else "background:#000;")
+            picture = (self.card_png(card, words or {}, w, h) if card
+                       else self.live_title_png(words, w, h) if words else "")
+            html += (f'<div class="tm-live-title" data-start="{end - END_FADE:.3f}" data-len="{tail + END_FADE + 1:.3f}" '
+                     f'data-fin="{END_FADE:.3f}" data-fout="0" style="position:absolute;inset:0;opacity:0;'
+                     f'pointer-events:none;z-index:999;overflow:hidden">'
+                     f'<div style="position:absolute;inset:-20px;{back}"></div>'
+                     + (f'<img src="{picture}" style="position:absolute;inset:0;width:100%;height:100%">' if picture else "")
+                     + '</div>')
+        return html
+
+    def cards_dialog(self) -> None:
+        """Choose the opening and ending cards: their look (six, shown on your first shot), words and length."""
+        if not self.trip:
+            return
+        t = self.trip.title_settings()
+        board = self.trip.storyboard()
+        first = board[0]["thumb"] if board and board[0].get("thumb") else ""
+        w, h = RESOLUTIONS[self.resolution.value] if getattr(self, "resolution", None) else (1920, 1080)
+        state = {"card": t["card"] if t["card"] in titles.CARDS else ""}
+
+        def save(**values) -> None:
+            self.trip.set_title_settings(**values)
+
+        with ui.dialog() as dialog, ui.card().style("width:min(980px,96vw);max-width:96vw"):
+            ui.label("Opening and ending cards").classes("text-lg font-semibold")
+            ui.label("The trip's title on a card at the very start, and words on a card at the end. The opening "
+                     "card lies over the start of your first shot, so every cut stays on its pin.") \
+                .classes("text-sm text-gray-600")
+
+            @ui.refreshable
+            def looks() -> None:
+                words = {"text": t["trip_title"], "sub": t["trip_sub"]}
+                with ui.row().classes("w-full gap-3"):
+                    for key, spec in [("", {"label": "No card (title over the shot)"}), *titles.CARDS.items()]:
+                        picked = key == state["card"]
+                        box = ui.element("div").classes("cursor-pointer rounded overflow-hidden").style(
+                            "width:200px;border:3px solid " + ("#2563eb" if picked else "#e5e7eb"))
+                        box.on("click", lambda key=key: pick(key))
+                        with box:
+                            if key:
+                                ui.image(self.card_png(key, words, w, h, first)).style("width:100%;aspect-ratio:16/9")
+                            else:
+                                ui.image(data_url(first) if first else "").style("width:100%;aspect-ratio:16/9;background:#000")
+                            ui.label(("✓ " if picked else "") + spec["label"]).classes(
+                                "text-sm px-2 py-1 " + ("font-semibold text-blue-700" if picked else ""))
+
+            def pick(key: str) -> None:
+                state["card"] = key
+                t["card"] = key
+                save(card=key)
+                looks.refresh()
+
+            looks()
+            with ui.row().classes("w-full items-end gap-3"):
+                ui.switch("Opening", value=t["opening"], on_change=lambda e: save(opening=e.value)).classes("w-28")
+                first_line = ui.input("Title", value=t["trip_title"]).classes("w-64")
+                second = ui.input("Second line", value=t["trip_sub"]).classes("w-64")
+
+                def words_changed() -> None:
+                    t["trip_title"], t["trip_sub"] = first_line.value, second.value
+                    save(trip_title=first_line.value, trip_sub=second.value)
+                    looks.refresh()
+                first_line.on("blur", words_changed)
+                second.on("blur", words_changed)
+                ui.select({2.0: "2 s", 3.0: "3 s", 4.0: "4 s", 5.0: "5 s"}, value=float(t["open_seconds"] or 3),
+                          label="Card shows", on_change=lambda e: save(open_seconds=e.value)).classes("w-28")
+            with ui.row().classes("w-full items-end gap-3"):
+                ui.switch("Ending", value=t["ending"], on_change=lambda e: save(ending=e.value)).classes("w-28")
+                end = ui.input("Words", value=t["end_text"]).classes("w-64")
+                end.on("blur", lambda: save(end_text=end.value))
+                end_sub = ui.input("Second line", value=t["end_sub"]).classes("w-64")
+                end_sub.on("blur", lambda: save(end_sub=end_sub.value))
+                ui.select({0.0: "No ending card", 2.0: "2 s", 3.0: "3 s", 4.0: "4 s", 5.0: "5 s"},
+                          value=float(t["end_black"] or 0), label="Ending card",
+                          on_change=lambda e: save(end_black=e.value)).classes("w-36") \
+                    .tooltip("After the last shot, as the music fades out")
+
+            def done() -> None:
+                dialog.close()
+                self.storyboard_view.refresh()
+                self.titles_card.refresh()
+                self.editor_card.refresh()
+            with ui.row().classes("w-full justify-end"):
+                ui.button("Done", icon="check", on_click=done).props("no-caps color=primary")
+        dialog.open()
+
     def live_title_png(self, title: dict, w: int, h: int) -> str:
         """The title as a see-through picture (a small one, like the draft), to lay over the playing draft."""
         size = (w // self.DRAFT_SCALE // 2 * 2, h // self.DRAFT_SCALE // 2 * 2)
@@ -5710,9 +5840,10 @@ class Page:
                 'height:38px;border-radius:50%;background:rgba(15,23,42,.75);color:white;display:flex;'
                 'align-items:center;justify-content:center;font-size:18px;pointer-events:none">▶</div></div>')
 
-    def instant_data(self, board: list[dict], times: list[dict], loop: tuple[float, float] | None = None) -> dict:
+    def instant_data(self, board: list[dict], times: list[dict], loop: tuple[float, float] | None = None,
+                     tail: float = 0.0) -> dict:
         """What the instant player plays: each clip straight from your file (its part, speed, turn, crop, sound),
-        at its place in the video, and the song."""
+        at its place in the video, and the song. tail: seconds after the last clip (the ending card)."""
         clips = []
         for k, (r, at) in enumerate(zip(board, times)):
             file = Path(r.get("part_of") or r["path"])
@@ -5739,7 +5870,7 @@ class Page:
                 clip["src"] = thumb  # (a HEIC photo: the browser shows its preview picture)
             clips.append(clip)
         music = self.music_path()
-        total = max([t["start"] + t["length"] for t in times] + [0.1])
+        total = max([t["start"] + t["length"] for t in times] + [0.1]) + tail
         return {"clips": clips, "total": round(total, 3), "music": serve_song(str(Path(music).expanduser())) if music else "",
                 "mvol": self.music_vol.value if getattr(self, "music_vol", None) else 0.5,
                 "fade": self.t_len.value if getattr(self, "t_len", None) else 0.8,
@@ -5752,7 +5883,8 @@ class Page:
         The player plays your clips straight from the files (instant: no waiting after a change); the exact
         preview, once made and while nothing changed, plays instead."""
         times = self.board_times(board, draft, changed)
-        total = max([t["start"] + t["length"] for t in times] + [1.0])
+        tail = self.trip.end_card()[0]  # (the ending card after the last clip)
+        total = max([t["start"] + t["length"] for t in times] + [1.0]) + tail
         w, h = RESOLUTIONS[self.resolution.value] if getattr(self, "resolution", None) else (1920, 1080)
         resume = getattr(self, "draft_resume", 0.0) or 0.0
         before = [tuple(x) for x in draft["board"]] if draft else None
@@ -5764,6 +5896,8 @@ class Page:
             f'src="{self.live_title_png(b, w, h)}" style="position:absolute;inset:0;width:100%;height:100%;'
             'opacity:0;pointer-events:none;z-index:1000">'
             for b in self.title_bars(board, times) if b["kind"] == "timeline")
+        if not exact:  # (the exact preview has the cards in it)
+            live += self.card_live_html(board, times, w, h)
         music = self.music_path()
         pins = [p for p in (song_taps.final_taps(music, app_dir() / "music-taps") or []) if p <= total + 0.01] \
             if music else []
@@ -5799,6 +5933,9 @@ class Page:
                     .props("dense outline no-caps color=amber") \
                     .tooltip("The app picks a transition for every cut from the music: fun ones (spin, bounce, zoom "
                              "punch) where it is lively, soft ones where it is calm. Click a ◆ to change one.")
+                ui.button("Opening & ending", icon="style", on_click=self.cards_dialog) \
+                    .props("dense outline no-caps color=white") \
+                    .tooltip("A card with the trip's title at the start and words at the end, in one of six looks")
                 ui.button("Add a title here", icon="title", on_click=self.add_timeline_title) \
                     .props("dense outline no-caps color=white") \
                     .tooltip("A new title on the clip you picked (or where the red line is)")
@@ -5902,7 +6039,7 @@ class Page:
                             f'style="position:absolute;inset:0;width:100%;height:100%"></canvas>{ticks}</div>',
                             sanitize=False).classes("w-full")
         if not exact:
-            data = json.dumps(self.instant_data(board, times))
+            data = json.dumps(self.instant_data(board, times, tail=tail))
             ui.run_javascript(f"setTimeout(() => tmInstant('tm-draft', {data}, tmDraftNow), 50)")
         ui.run_javascript("setTimeout(tmEditorReady, 60)")
 
@@ -6517,6 +6654,7 @@ class Page:
             look=self.trip.look(),
         )
         settings.end_black, settings.end_title = self.trip.end_card()
+        settings.opening = self.trip.opening_card()
         return settings, None
 
     async def make_draft(self) -> None:
@@ -6620,6 +6758,11 @@ class Page:
             ui.label("Titles").classes("text-lg font-semibold")
             ui.label("Words that fade in over the video. Add your own on any shot in the Storyboard (Add title).") \
                 .classes("text-sm text-gray-600")
+            with ui.row().classes("items-center gap-2"):
+                card = titles.CARDS.get(t["card"])
+                ui.button("Opening & ending cards", icon="style", on_click=self.cards_dialog).props("outline no-caps")
+                ui.label(f"Look: {card['label']}" if card else "No cards: the title shows over the first shot") \
+                    .classes("text-sm text-gray-600")
             with ui.row().classes("w-full items-end gap-3"):
                 ui.switch("Opening title", value=t["opening"], on_change=lambda e: save(opening=e.value)).classes("w-44")
                 first = ui.input("Title", value=t["trip_title"]).classes("w-64")
@@ -6806,6 +6949,7 @@ class Page:
             look=self.trip.look(),
         )
         settings.end_black, settings.end_title = self.trip.end_card()
+        settings.opening = self.trip.opening_card()
         settings.titles = self.resolved_titles()
         title = (self.name_input.value or "").strip() or self.trip.folder.name or "My trip"
         safe = "".join(c for c in title if c.isalnum() or c in " -_").strip() or "My trip"

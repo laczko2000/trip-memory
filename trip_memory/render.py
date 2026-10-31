@@ -85,7 +85,10 @@ class RenderSettings:
     music_path: str | None = None
     music_volume: float = 0.5
     end_black: float = 0.0  # seconds of black at the very end (the last shot fades into it, the music fades out)
-    end_title: dict | None = None  # words shown on that black ending (see titles.py)
+    end_title: dict | None = None  # words shown on that black ending (see titles.py); with "card": its look
+    # The opening card over the start of the first shot (it keeps every cut where it was):
+    # {"text", "sub", "card" (a key of titles.CARDS), "seconds"}.
+    opening: dict | None = None
     look: str = "natural"  # the colour mood of the whole video (see looks.py)
     # Titles on the video's own timeline (the editor under the video): {"text", "sub", "style", "where",
     # "length", "fade_in", "fade_out", and "start" (seconds into the video) or "shot" (its number) + "offset"}.
@@ -616,15 +619,19 @@ def render(
             Path(timing).write_text(json.dumps(times))
         settings = dataclasses.replace(settings, titles=place_titles(settings.titles, times))
         if settings.end_black > 0:
-            # The last shot fades to black; the end title fades in on the black.
+            # The last shot fades to black; the end title fades in on the black. (An ending card with a
+            # blurred look: the last picture blurs into the card instead.)
             seconds = settings.end_black + END_FADE
-            black = cache / f"black-{_black_key(settings, seconds)}.mp4"
+            card = (settings.end_title or {}).get("card")
+            blurred = titles.CARDS.get(card, {}).get("bg") == "blur"
+            last = segments[-1] if blurred else None
+            black = cache / f"black-{_black_key(settings, seconds, last)}.mp4"
             if not black.exists():
-                _black_segment(settings, seconds, workdir / "black.mp4")
+                _black_segment(settings, seconds, workdir / "black.mp4", last)
                 shutil.move(workdir / "black.mp4", black)
             segments.append(black)
             lengths.append(_segment_length(black))
-            styles.append(("fadeblack", END_FADE))
+            styles.append(("fade" if blurred else "fadeblack", END_FADE))
 
         report(prep_share, "Joining everything together")
         _join(segments, lengths, styles, settings, out_path,
@@ -638,23 +645,39 @@ def render(
 END_FADE = 1.2  # seconds for the last shot to fade to black
 
 
-def _black_key(s: RenderSettings, seconds: float) -> str:
+def _black_key(s: RenderSettings, seconds: float, last: Path | None = None) -> str:
     return hashlib.sha1(repr([SEGMENT_VERSION, s.width, s.height, round(seconds, 3),
-                              sorted((s.end_title or {}).items())]).encode()).hexdigest()[:20]
+                              sorted((k, repr(v)) for k, v in (s.end_title or {}).items()),
+                              last.name if last else None]).encode()).hexdigest()[:20]
 
 
-def _black_segment(s: RenderSettings, seconds: float, out: Path) -> None:
-    """The black ending, with the end title fading in once the picture has gone dark."""
-    inputs = ["-f", "lavfi", "-t", f"{seconds:.3f}", "-i", f"color=black:s={s.width}x{s.height}:r={FPS}",
-              "-f", "lavfi", "-t", f"{seconds:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
-    graph = "[0:v]format=yuv420p[v];[1:a]anull[a]"
+def _black_segment(s: RenderSettings, seconds: float, out: Path, last: Path | None = None) -> None:
+    """The black ending, with the end title fading in once the picture has gone dark. With last (the last
+    clip): its last picture, blurred in the ending card's look, instead of black."""
     title = s.end_title or {}
-    if title.get("text") or title.get("sub"):
+    card = title.get("card")
+    if last is not None:
+        still = out.with_suffix(".last.png")
+        run_ffmpeg(["-sseof", "-0.25", "-i", str(last), "-frames:v", "1", "-update", "1", str(still)])
+        inputs = ["-loop", "1", "-framerate", str(FPS), "-t", f"{seconds:.3f}", "-i", str(still)]
+        background = f"[0:v]scale={s.width}:{s.height},setsar=1,{titles.card_filter(card, s.height)},fps={FPS},format=yuv420p"
+    else:
+        inputs = ["-f", "lavfi", "-t", f"{seconds:.3f}", "-i", f"color=black:s={s.width}x{s.height}:r={FPS}"]
+        background = "[0:v]format=yuv420p"
+    inputs += ["-f", "lavfi", "-t", f"{seconds:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
+    graph = f"{background}[v];[1:a]anull[a]"
+    if title.get("text") or title.get("sub") or titles.CARDS.get(card, {}).get("bars"):
         png = out.with_suffix(".title.png")
-        titles.draw(title, s.width, s.height).save(png)
+        if card in titles.CARDS:
+            layer = titles.card_layer(card, title, s.width, s.height)
+            if titles.CARDS[card]["bg"] == "black":  # (black already: just the words)
+                layer = titles.draw(titles.card_words(card, title), s.width, s.height)
+            layer.save(png)
+        else:
+            titles.draw(title, s.width, s.height).save(png)
         inputs += ["-loop", "1", "-t", f"{seconds:.3f}", "-i", str(png)]
         appear = min(END_FADE * 0.8, seconds / 3)  # as the last shot is nearly gone
-        graph = (f"[0:v]format=yuv420p[v0];[2:v]format=rgba,setpts=PTS-STARTPTS,"
+        graph = (f"{background}[v0];[2:v]format=rgba,setpts=PTS-STARTPTS,"
                  f"fade=t=in:st={appear:.3f}:d=0.8:alpha=1[title];"
                  f"[v0][title]overlay=0:0:shortest=1:format=auto,format=yuv420p[v];[1:a]anull[a]")
     _encode_segment(inputs, graph, seconds, out, s)
@@ -841,8 +864,34 @@ def _join_once(
         total_frames = offset_frames + frames[k]
     total = total_frames / FPS
 
-    # Titles on the video's timeline (the editor's), each fading in and out at its own time.
+    # The opening card over the start of the first shot: the shot blurred (or black) with the trip's title,
+    # then it clears to the shot.
     pngs = []
+    card = s.opening or {}
+    if card.get("card") in titles.CARDS:
+        spec = titles.CARDS[card["card"]]
+        length = max(1.0, min(float(card.get("seconds") or 3.0), lengths[0] - 0.3 if n > 1 else total - 0.5, total * 0.6))
+        fade = min(titles.CARD_FADE, length / 2)
+        v_in = v_prev
+        if spec["bg"] == "blur":
+            parts.append(f"[{v_prev}]split=2[ocm][ocb]")
+            parts.append(f"[ocb]trim=end={length:.3f},setpts=PTS-STARTPTS,{titles.card_filter(card['card'], s.height)},"
+                         f"format=rgba,fade=t=out:st={length - fade:.3f}:d={fade:.3f}:alpha=1[ocbg]")
+            parts.append("[ocm][ocbg]overlay=0:0:eof_action=pass:format=auto,format=yuv420p[ocv]")
+            v_in = "ocv"
+        png = out.with_name(f"{out.stem}.opening.png")
+        titles.card_layer(card["card"], card, s.width, s.height).save(png)
+        pngs.append(png)
+        n_in = inputs.count("-i")
+        inputs += ["-loop", "1", "-t", f"{length:.3f}", "-i", str(png)]
+        parts.append(f"[{n_in}:v]format=rgba,setpts=PTS-STARTPTS,fade=t=in:st=0.15:d=0.5:alpha=1,"
+                     f"fade=t=out:st={length - fade:.3f}:d={fade:.3f}:alpha=1[ocw]"
+                     if spec["bg"] == "blur" else
+                     f"[{n_in}:v]format=rgba,setpts=PTS-STARTPTS,fade=t=out:st={length - fade:.3f}:d={fade:.3f}:alpha=1[ocw]")
+        parts.append(f"[{v_in}][ocw]overlay=0:0:eof_action=pass:format=auto,format=yuv420p[ocd]")
+        v_prev = "ocd"
+
+    # Titles on the video's timeline (the editor's), each fading in and out at its own time.
     for k, t in enumerate(s.titles or []):
         if t["start"] >= total:
             continue

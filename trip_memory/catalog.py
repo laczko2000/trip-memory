@@ -459,13 +459,24 @@ class Trip:
                     else f"{a:%-d %b} – {b:%-d %b %Y}")
         return {"opening": True, "trip_title": saved.get("ai_title") or self.folder.name.replace("_", " "), "trip_sub": span,
                 "stories": True, "story_style": "caption", "ending": True, "end_text": "Until next time",
-                "end_sub": self.folder.name.replace("_", " "), "style": "bold", "end_black": 3.0, **saved}
+                "end_sub": self.folder.name.replace("_", " "), "style": "bold", "end_black": 3.0,
+                "card": "", "open_seconds": 3.0, **saved}
+
+    def opening_card(self) -> dict | None:
+        """The opening card (the trip's title on black or on the first shot blurred), or None: then the
+        opening title shows over the first shot. {"text", "sub", "card", "seconds"}."""
+        t = self.title_settings()
+        if not (t["opening"] and t["card"] in titles.CARDS and (t["trip_title"] or t["trip_sub"])):
+            return None
+        return {"text": t["trip_title"], "sub": t["trip_sub"], "card": t["card"], "seconds": float(t["open_seconds"] or 3)}
 
     def end_card(self) -> tuple[float, dict | None]:
         """(seconds of black at the end, the words on it) for the video's ending."""
         t = self.title_settings()
         words = ({"text": t["end_text"], "sub": t["end_sub"], "style": "elegant", "where": "center"}
                  if t["ending"] and (t["end_text"] or t["end_sub"]) else None)
+        if t["card"] in titles.CARDS and t["end_black"]:
+            words = {**titles.card_words(t["card"], words or {}), "card": t["card"]}
         return float(t["end_black"] or 0), words
 
     def set_title_settings(self, **values) -> None:
@@ -527,7 +538,7 @@ class Trip:
                 result[r["path"]] = {"text": names.get(r["story"], ""), "sub": sub, "style": t["story_style"],
                                      "where": "", "auto": "story"}
             previous = r["story"]
-        if t["opening"] and (t["trip_title"] or t["trip_sub"]):
+        if t["opening"] and (t["trip_title"] or t["trip_sub"]) and t["card"] not in titles.CARDS:
             result[board[0]["path"]] = {"text": t["trip_title"], "sub": t["trip_sub"], "style": t["style"],
                                         "where": "center", "auto": "opening"}
         if t["ending"] and not t["end_black"] and len(board) > 1 and (t["end_text"] or t["end_sub"]):

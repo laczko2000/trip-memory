@@ -385,6 +385,14 @@ def test_titles_opening_story_end_and_your_own(tmp_path, monkeypatch):
     assert shown()["3.jpg"] == ("ending", "Until next time")
     assert trip.title_settings()["trip_sub"] == "3 – 4 July 2025"
 
+    # An opening card (one of six looks) takes the place of the title over the first shot.
+    assert trip.opening_card() is None
+    trip.set_title_settings(card="cinematic", end_black=3.0)
+    assert trip.opening_card() == {"text": "Portugal 2025", "sub": "3 – 4 July 2025", "card": "cinematic", "seconds": 3.0}
+    assert "0.jpg" not in shown()
+    assert trip.end_card()[1]["card"] == "cinematic" and trip.end_card()[1]["style"] == "cinematic"
+    trip.set_title_settings(card="")
+
     trip.set_shot_title(str(trip_dir / "2.jpg"), "Beach day", "", "bold", "center")
     trip.set_title_settings(opening=False, ending=False)
     assert shown() == {"2.jpg": (None, "Beach day")}
