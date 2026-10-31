@@ -1704,9 +1704,13 @@ class Page:
             if self.pending_click is not None:
                 self.pending_click.cancel()
                 self.pending_click = None
-            result = double()
-            if asyncio.iscoroutine(result):
-                await result
+            try:
+                result = double()
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:
+                traceback.print_exc()  # (so a failure shows in the Terminal)
+                raise
 
         if single is not None:
             element.on("click", clicked)
@@ -1734,6 +1738,10 @@ class Page:
         def after() -> None:  # when the window closes: the page behind shows what changed, at the same spot
             if not changed["again"]:  # the app learns your new highlights quietly, for this trip and the next
                 background_tasks.create(run.io_bound(self.learn_quietly))
+            if name == "Make video" and not changed["again"]:
+                back_to_clip()
+                if not changed["any"]:
+                    self.editor_card.refresh()
             if changed["any"] and not changed["again"]:
                 if name == "Make video" and self.auto_update:  # the draft catches up by itself
                     self.update_due = time.time() + self.AUTO_PAUSE
@@ -1742,7 +1750,28 @@ class Page:
                 self.choose_keep_scroll = True
                 self.refresh_all()
                 self.choose_keep_scroll = False
-                ui.run_javascript("for (const ms of [150, 450, 900]) setTimeout(tmBackToShot, ms)")
+                if name != "Make video":
+                    ui.run_javascript("for (const ms of [150, 450, 900]) setTimeout(tmBackToShot, ms)")
+
+        def back_to_clip() -> None:
+            """Back in the editor: on the clip you opened, the red line at its start, the timeline showing it."""
+            board = self.trip.storyboard()
+            k = next((i for i, r in enumerate(board) if (in_video and r["path"] == in_video["path"])), None)
+            if k is None:
+                k = next((i for i, r in enumerate(board) if (r.get("part_of") or r["path"]) == path), None)
+            if k is None:
+                return
+            self.draft_pick = k
+            at = self.editor_times(board)[k]["start"] + 0.05
+            self.draft_resume = at
+            ui.run_javascript(f"window.tmDraftT = {at:.2f}; window.tmBackClip = {k}; "
+                              "for (const ms of [300, 700, 1200]) setTimeout(() => { "
+                              "const el = document.getElementById('tm-ed-' + window.tmBackClip), "
+                              "sc = document.getElementById('tm-tl-scroll'); "
+                              "if (el && sc) { sc.scrollLeft = Math.max(0, el.offsetLeft - sc.clientWidth * 0.3); "
+                              "window.tmTlScroll = sc.scrollLeft; } "
+                              "const v = document.getElementById('tm-draft'); "
+                              "if (v && Math.abs(v.currentTime - window.tmDraftT) > 0.2) v.currentTime = window.tmDraftT; }, ms)")
 
         def mark() -> None:
             changed["any"] = True
@@ -1948,18 +1977,16 @@ class Page:
             again()
             dialog.close()
 
-        if it["kind"] != "video":
-            with self.window_box, ui.dialog().props("maximized") as dialog, \
-                    ui.card().classes("w-full h-full gap-2 overflow-auto"):
-                ui.label(Path(path).name).classes("text-lg font-semibold")
-                self.photo_editor(it, dialog, mark, lambda d, dialog=dialog: rotate(d, dialog),
-                                  lambda dialog=dialog: crop(dialog))
-                controls(dialog)
-                with ui.row().classes("w-full justify-end"):
-                    ui.button("Close", on_click=dialog.close).props("flat no-caps")
-            dialog.on("hide", after)
-            dialog.open()
-            return
+        # Opened from the video editor: the part this clip plays in the video, and a button to use a new one.
+        in_video = None
+        if name == "Make video":
+            board = self.trip.storyboard()
+            mine = [r for r in board if (r.get("part_of") or r["path"]) == path]
+            pick = self.draft_pick
+            in_video = board[pick] if pick is not None and pick < len(board) and board[pick] in mine else \
+                (mine[0] if mine else None)
+        slot = Trip.screen_length(in_video) if in_video else 0.0
+
 
         async def make(a: float, b: float) -> bool:
             n = ui.notification("Making the shot…", spinner=True, timeout=None)
@@ -2006,31 +2033,31 @@ class Page:
         length = it["duration"] or 0
         a, b = (shots[-1]["end"], min(length, shots[-1]["end"] + 4)) if shots and shots[-1]["end"] < length - 1 \
             else (length * 0.3, min(length, length * 0.3 + 4))
-        # Opened from the video editor: the part this clip plays in the video, and a button to use a new one.
-        in_video = None
-        if name == "Make video":
-            board = self.trip.storyboard()
-            mine = [r for r in board if (r.get("part_of") or r["path"]) == path]
-            pick = self.draft_pick
-            in_video = board[pick] if pick is not None and pick < len(board) and board[pick] in mine else \
-                (mine[0] if mine else None)
-        slot = Trip.screen_length(in_video) if in_video else 0.0
         if in_video and in_video.get("trim_start") is not None and in_video.get("trim_end") is not None:
             a, b = float(in_video["trim_start"]), float(in_video["trim_end"])
 
         def in_video_box() -> None:
             """Opened from the editor: this clip's speed in the video, and the draft made again right here."""
             with ui.column().classes("w-full gap-1 px-2 py-1 rounded bg-indigo-50"):
-                speed_row()
+                if it["kind"] == "video":
+                    speed_row()
+                    sound_row(in_video)
                 with ui.row().classes("w-full items-center gap-2"):
                     ui.button("Update and show me", icon="play_circle", on_click=update_and_show) \
                         .props("unelevated no-caps color=indigo") \
                         .tooltip("Makes the draft again (only the changed clips) and plays this clip in the video, "
                                  "with a second before and after it")
                     ui.label("Clips play at normal speed unless you pick another here. Use this part in the video: "
-                             "the part you set ends on the nearest pin and the clips after it move along.") \
+                             "the part you set ends on the nearest pin and the clips after it move along."
+                             if it["kind"] == "video" else
+                             "Turn or crop the photo above, then see it in the video here.") \
                         .classes("text-xs text-gray-600 flex-1")
                 preview_box()
+
+        def sound_row(r: dict) -> None:
+            with ui.row().classes("w-full items-center gap-2"):
+                ui.label("Its own sound in the video:").classes("text-sm font-medium text-indigo-900 w-48")
+                self.sound_control(r, on_change=lambda: (mark(), self.sound_changed()))
 
         @ui.refreshable
         def speed_row() -> None:
@@ -2103,6 +2130,19 @@ class Page:
                       "pin; the clips after it moved along" + (f" ({gone} at the end left the video)" if gone else "")
                       + ". The draft updates.", type="positive", multi_line=True)
             return True
+
+        if it["kind"] != "video":
+            with self.window_box, ui.dialog().props("maximized") as dialog, \
+                    ui.card().classes("w-full h-full gap-2 overflow-auto"):
+                ui.label(Path(path).name).classes("text-lg font-semibold")
+                self.photo_editor(it, dialog, mark, lambda d, dialog=dialog: rotate(d, dialog),
+                                  lambda dialog=dialog: crop(dialog))
+                controls(dialog)
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("Close", on_click=dialog.close).props("flat no-caps")
+            dialog.on("hide", after)
+            dialog.open()
+            return
 
         actions = [("Lock this part", "lock", lock, "outline no-caps"),
                    ("Cut: keep only this part", "content_cut", keep, "outline no-caps"),
@@ -4981,7 +5021,7 @@ class Page:
                          trim_end=it["trim_end"] if own else it.get("keep_end"))
         return clip_range(item, self.settings_now())
 
-    def sound_control(self, it: dict) -> None:
+    def sound_control(self, it: dict, on_change=None) -> None:
         """The clip's own sound: off by default (the music plays alone), with a loudness of 0-200%."""
         if not it["has_audio"]:
             ui.label("🔇 This clip has no sound").classes("text-xs text-gray-400")
@@ -4993,10 +5033,14 @@ class Page:
                 self.trip.set_clip_sound(it["path"], on)
                 it["clip_sound"] = int(on)
                 loudness.set_visibility(on)
+                if on_change:
+                    on_change()
 
             def set_volume(value: int) -> None:
                 self.trip.set_clip_sound(it["path"], True, value / 100)
                 percent.text = f"{value}%"
+                if on_change:
+                    on_change()
 
             ui.checkbox("Clip sound", value=bool(it["clip_sound"]), on_change=lambda e: switch(e.value)).props("dense")
             with ui.row().classes("items-center gap-2 no-wrap") as loudness:
@@ -5221,7 +5265,8 @@ class Page:
         photo = self.photo_len.value if getattr(self, "photo_len", None) else 4.0
         # (with what changes how a shot looks: turned, played backwards, cropped, its part)
         return [(r["path"], round(Trip.screen_length(r, photo), 2),
-                 f"{r.get('rotation') or 0}|{r.get('reverse') or 0}|{r.get('crop') or ''}|{r.get('trim_start')}|{r.get('speed') or 1}")
+                 f"{r.get('rotation') or 0}|{r.get('reverse') or 0}|{r.get('crop') or ''}|{r.get('trim_start')}|{r.get('speed') or 1}"
+                 f"|{r.get('clip_sound') or 0}|{r.get('clip_volume')}")
                 for r in self.trip.storyboard()]
 
     @ui.refreshable
@@ -5346,12 +5391,13 @@ class Page:
                     ui.html(f'<div style="position:relative;height:22px;cursor:ew-resize;background:#0f172a;'
                             f'border-radius:4px;touch-action:none" onpointerdown="tmScrubStart(event)">{marks}</div>',
                             sanitize=False).classes("w-full").tooltip("Press and drag: the video follows")
-                    ui.html('<div id="tm-playhead" onpointerdown="tmScrubStart(event)" style="position:absolute;'
-                            'top:0;bottom:0;left:0;width:14px;margin-left:-6px;z-index:6;cursor:ew-resize;'
-                            'touch-action:none"><div style="position:absolute;left:6px;top:0;bottom:0;width:2px;'
-                            'background:#ef4444;box-shadow:0 0 4px #ef4444"></div><div style="position:absolute;'
-                            'left:0;top:0;width:14px;height:14px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);'
-                            'background:#ef4444"></div></div>', sanitize=False)
+                    # (only its knob on the ruler takes the mouse: clicks on the clips under the line reach them)
+                    ui.html('<div id="tm-playhead" style="position:absolute;top:0;bottom:0;left:0;width:14px;'
+                            'margin-left:-6px;z-index:6;pointer-events:none"><div style="position:absolute;left:6px;'
+                            'top:0;bottom:0;width:2px;background:#ef4444;box-shadow:0 0 4px #ef4444"></div>'
+                            '<div onpointerdown="tmScrubStart(event)" style="position:absolute;left:0;top:0;width:14px;'
+                            'height:14px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);background:#ef4444;'
+                            'pointer-events:auto;cursor:ew-resize;touch-action:none"></div></div>', sanitize=False)
                     bars = sorted(self.title_bars(board, times), key=lambda b: b["at"])
                     ends: list[float] = []  # titles that overlap in time go on rows of their own
                     for bar in bars:
@@ -5669,11 +5715,7 @@ class Page:
 
     def pick_draft_clip(self, n: int, start: float | None) -> None:
         self.draft_pick = None if self.draft_pick == n else n
-        self.draft_title = None
-        if start is not None and self.draft_pick is not None:
-            self.draft_resume = start + 0.05
-            ui.run_javascript(f"window.tmDraftT = {start + 0.05}; const v = document.getElementById('tm-draft'); "
-                              f"if (v) {{ v.currentTime = {start + 0.05}; }}")
+        self.draft_title = None  # (the red line went where you clicked on the clip: see tmClipClick)
         self.editor_card.refresh()
 
     def draft_clip(self, board: list[dict]) -> None:
@@ -5702,11 +5744,17 @@ class Page:
                           on_click=lambda: self.shot_window(r["path"], "Make video")).props("flat no-caps") \
                     .tooltip("Theme, cut, lock, split (or double-click the clip)")
             if r["kind"] == "video":
+                self.sound_control(r, on_change=self.sound_changed)
                 self.draft_speed(r, length)
                 with ui.row().classes("items-center gap-2"):
                     ui.switch("⇆ Play backwards", value=bool(r.get("reverse")),
                               on_change=lambda e: self.draft_reverse(r, e.value)).props("dense")
                 self.lock_area(r, "story")
+
+    def sound_changed(self) -> None:
+        """A clip's sound on or off, or louder: the draft is made again by itself when you pause."""
+        if self.auto_update:
+            self.update_due = time.time() + self.AUTO_PAUSE
 
     SPEEDS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
 
@@ -6380,6 +6428,19 @@ function tmScrubStart(e) {
                      if (was) v.play(); };
   document.addEventListener('pointermove', move); document.addEventListener('pointerup', up);
 }
+// A click on a clip in the editor: the red line and the video go to that very moment of it.
+function tmClipClick(e, el) {
+  const v = document.getElementById('tm-draft'), r = el.getBoundingClientRect();
+  if (!v) return;
+  const t = parseFloat(el.dataset.start) + parseFloat(el.dataset.length) * Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+  v.pause(); window.tmDraftT = t; tmSeekSoft(v, t);
+  const tl = document.getElementById('tm-timeline'), head = document.getElementById('tm-playhead');
+  if (tl && head) head.style.left = (100 * t / parseFloat(tl.dataset.total)) + '%';
+}
+document.addEventListener('click', (e) => {  // (on every clip box of the editor's timeline)
+  const el = e.target.closest && e.target.closest('.tm-editor [id^=tm-ed-][data-start]');
+  if (el) tmClipClick(e, el);
+}, true);
 function tmSeekRuler(e, el, total) {
   const v = document.getElementById('tm-draft'), r = el.getBoundingClientRect();
   if (v) { v.currentTime = total * (e.clientX - r.left) / r.width; tmDraftNow(v.currentTime); }
