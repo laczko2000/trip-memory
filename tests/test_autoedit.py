@@ -423,3 +423,27 @@ def test_an_upright_video_in_a_landscape_video_always_gets_company():
                  Limits(pack="normal", landscape=True), {})
     assert short[0].effects["side"] == ["/v0.mp4"]  # alone in the trip: two of its own moments side by side
     assert _free_part(4.0, 3.0, [(0.0, 3.0)]) is None
+
+
+def test_upright_videos_side_by_side_only_come_from_the_same_part_of_the_story():
+    from trip_memory.autoedit import Limits, Shot, pack
+    rows = [{"path": "/a.mp4", "kind": "video", "upright": True, "duration": 10.0, "story": 1, "chapter": 0,
+             "taken_at": "2025-07-03T10:00:00"},
+            {"path": "/b.mp4", "kind": "video", "upright": True, "duration": 10.0, "story": 1, "chapter": 1,
+             "taken_at": "2025-07-03T10:01:00"},
+            {"path": "/w.mp4", "kind": "video", "upright": False, "duration": 10.0, "story": 1, "chapter": 0,
+             "taken_at": "2025-07-03T10:00:30"}]
+    out = pack([Shot(path="/a.mp4", kind="video", start=0.0, seconds=3.0)], rows,
+               Limits(pack="normal", landscape=True), {})
+    # Neither the landscape video nor the upright one of another part: its own moments next to it instead.
+    assert out[0].effects["side"] == ["/a.mp4", "/a.mp4"]
+
+
+def test_room_for_the_opening_and_ending_cards():
+    from trip_memory.autoedit import Slot, reserve_room
+    slots = [Slot(k * 2.0, k * 2.0 + 2.0, 0.5) for k in range(20)]
+    out = reserve_room(slots, 8.0, 8.0)
+    assert out[0].room and out[0].seconds >= 7.75 and out[0].start == 0.0
+    assert out[-1].room and out[-1].seconds >= 7.75 and out[-1].end == 40.0
+    assert not any(s.room for s in out[1:-1])
+    assert reserve_room(slots, 0, 0) == slots

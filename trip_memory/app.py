@@ -6057,6 +6057,22 @@ class Page:
                      f'pointer-events:none;z-index:999;{back}">'
                      f'<img src="{self.card_png(opening["card"], opening, w, h)}" style="position:absolute;inset:0;'
                      'width:100%;height:100%"></div>')
+        closing = self.trip.closing_card()
+        if closing:
+            end = times[-1]["start"] + times[-1]["length"]
+            length = max(1.0, min(closing["seconds"], times[-1]["length"] - 0.3))
+            card = closing["card"]
+            css = titles.card_css(card) if card else ""
+            back = (f"backdrop-filter:{css};-webkit-backdrop-filter:{css};" if css
+                    else "background:#000;")
+            words = {"text": closing["text"], "sub": closing["sub"], "style": "elegant", "where": "center"}
+            picture = (self.card_png(card, closing, w, h) if card
+                       else self.live_title_png(words, w, h) if closing["text"] or closing["sub"] else "")
+            html += (f'<div class="tm-live-title" data-start="{end - length:.3f}" data-len="{length + 1:.3f}" '
+                     f'data-fin="{min(titles.CARD_FADE, length / 2):.3f}" data-fout="0" style="position:absolute;'
+                     f'inset:0;opacity:0;pointer-events:none;z-index:999;{back}">'
+                     + (f'<img src="{picture}" style="position:absolute;inset:0;width:100%;height:100%">' if picture else "")
+                     + '</div>')
         tail, words = self.trip.end_card()
         if tail > 0:
             end = times[-1]["start"] + times[-1]["length"]
@@ -6086,8 +6102,7 @@ class Page:
         w, h = RESOLUTIONS[self.resolution.value] if getattr(self, "resolution", None) else (1920, 1080)
         state = {"card": t["card"] if t["card"] in titles.CARDS else "",
                  "end_card": t["end_card"] if t["end_card"] in titles.CARDS else ""}
-        lengths = {1.0: "1 s", 1.5: "1.5 s", 2.0: "2 s", 2.5: "2.5 s", 3.0: "3 s", 4.0: "4 s", 5.0: "5 s", 6.0: "6 s",
-                   8.0: "8 s"}
+        rooms = {float(v): f"{v:g} s" for v in (2, 3, 4, 5, 6, 8, 10, 12, 15)}
 
         def save(**values) -> None:
             self.trip.set_title_settings(**values)
@@ -6095,9 +6110,10 @@ class Page:
         with ui.dialog() as dialog, ui.card().style("width:min(1100px,96vw);max-width:96vw;max-height:96vh") \
                 .classes("gap-2 overflow-auto"):
             ui.label("Opening and ending cards").classes("text-lg font-semibold")
-            ui.label("Each has its own look, words and length. The opening card lies over the start of your first "
-                     "shot, so every cut stays on its pin; the ending card comes after the last shot as the music "
-                     "fades out.").classes("text-sm text-gray-600")
+            ui.label("Each has its own look, words and length. Auto-edit keeps that many seconds of the song free at "
+                     "the start and the end: one shot fills each, with the card over it (a blurred look shows the shot "
+                     "behind the words, a black look hides it). Press Auto-edit again after changing a length.") \
+                .classes("text-sm text-gray-600")
 
             draws: dict = {}
 
@@ -6148,10 +6164,12 @@ class Page:
                         draws["card"].refresh()
                     first_line.on("blur", words_changed)
                     second.on("blur", words_changed)
-                    open_len = float(t["open_seconds"] or 3)
-                    ui.select(lengths | ({open_len: f"{open_len:g} s"} if open_len not in lengths else {}),
+                    open_len = float(t["open_room"] or t["open_seconds"] or 3)
+                    ui.select(rooms | ({open_len: f"{open_len:g} s"} if open_len not in rooms else {}),
                               value=open_len, label="Opening length",
-                              on_change=lambda e: save(open_seconds=e.value)).classes("w-36")
+                              on_change=lambda e: save(open_room=e.value)).classes("w-36") \
+                        .tooltip("Auto-edit keeps this much at the start of the song: one shot (a photo or a long "
+                                 "clip) with the card over it. Press Auto-edit again after changing it.")
                 ui.label("Opening look").classes("text-xs text-gray-600")
                 make_looks("card")
             # The ending
@@ -6168,12 +6186,13 @@ class Page:
                         draws["end_card"].refresh()
                     end.on("blur", end_words)
                     end_sub.on("blur", end_words)
-                    end_len = float(t["end_black"] or 0)
-                    ui.select({0.0: "No ending card"} | lengths | ({end_len: f"{end_len:g} s"} if end_len not in lengths
-                                                                   and end_len else {}),
+                    end_len = float(t["end_room"] or 0)
+                    ui.select({0.0: "No ending card"} | rooms | ({end_len: f"{end_len:g} s"} if end_len not in rooms
+                                                                 and end_len else {}),
                               value=end_len, label="Ending length",
-                              on_change=lambda e: save(end_black=e.value)).classes("w-36") \
-                        .tooltip("After the last shot, as the music fades out")
+                              on_change=lambda e: save(end_room=e.value)).classes("w-36") \
+                        .tooltip("Auto-edit keeps this much at the end of the song: the last shot, with the card "
+                                 "fading in over it as the music ends. Press Auto-edit again after changing it.")
                 ui.label("Ending look").classes("text-xs text-gray-600")
                 make_looks("end_card")
 
@@ -7275,6 +7294,7 @@ class Page:
         )
         settings.end_black, settings.end_title = self.trip.end_card()
         settings.opening = self.trip.opening_card()
+        settings.closing = self.trip.closing_card()
         return settings, None
 
     async def make_draft(self) -> None:
@@ -7403,10 +7423,13 @@ class Page:
                 end.on("blur", lambda: save(end_text=end.value))
                 end_sub = ui.input("Second line", value=t["end_sub"]).classes("w-64")
                 end_sub.on("blur", lambda: save(end_sub=end_sub.value))
-                ui.select({0.0: "No black ending", 2.0: "2 s of black", 3.0: "3 s of black", 4.0: "4 s of black",
-                           5.0: "5 s of black"}, value=float(t["end_black"] or 0), label="Ending",
-                          on_change=lambda e: save(end_black=e.value)).classes("w-48") \
-                    .tooltip("The last shot fades to black, the end card fades in on the black, and the music fades out.")
+                end_room = float(t["end_room"] or 0)
+                ui.select({0.0: "No room (black after)"} | {float(v): f"{v} s at the end" for v in (4, 6, 8, 10, 12)}
+                          | ({end_room: f"{end_room:g} s at the end"} if end_room and end_room not in (4, 6, 8, 10, 12)
+                             else {}), value=end_room, label="Ending room",
+                          on_change=lambda e: save(end_room=e.value)).classes("w-48") \
+                    .tooltip("Auto-edit keeps these seconds at the end of the song for the end card, over the last "
+                             "shot (Opening & ending: its look). Press Auto-edit again after changing it.")
 
     @ui.refreshable
     def video_summary(self) -> None:
@@ -7570,6 +7593,7 @@ class Page:
         )
         settings.end_black, settings.end_title = self.trip.end_card()
         settings.opening = self.trip.opening_card()
+        settings.closing = self.trip.closing_card()
         settings.titles = self.resolved_titles()
         title = (self.name_input.value or "").strip() or self.trip.folder.name or "My trip"
         safe = "".join(c for c in title if c.isalnum() or c in " -_").strip() or "My trip"

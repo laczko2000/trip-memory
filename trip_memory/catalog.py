@@ -462,7 +462,7 @@ class Trip:
         return {"opening": True, "trip_title": saved.get("ai_title") or self.folder.name.replace("_", " "), "trip_sub": span,
                 "stories": True, "story_style": "caption", "ending": True, "end_text": "Until next time",
                 "end_sub": self.folder.name.replace("_", " "), "style": "bold", "end_black": 3.0,
-                "card": "", "open_seconds": 3.0, **saved} | (
+                "card": "", "open_seconds": 3.0, "open_room": 8.0, "end_room": 8.0, **saved} | (
                     {} if "end_card" in saved else {"end_card": saved.get("card", "")})  # (the ending's own look)
 
     def opening_card(self) -> dict | None:
@@ -471,11 +471,30 @@ class Trip:
         t = self.title_settings()
         if not (t["opening"] and t["card"] in titles.CARDS and (t["trip_title"] or t["trip_sub"])):
             return None
-        return {"text": t["trip_title"], "sub": t["trip_sub"], "card": t["card"], "seconds": float(t["open_seconds"] or 3)}
+        return {"text": t["trip_title"], "sub": t["trip_sub"], "card": t["card"],
+                "seconds": float(t["open_room"] or t["open_seconds"] or 3)}
+
+    def card_rooms(self) -> dict:
+        """The seconds Auto-edit keeps at the start and the end of the music for the opening and ending cards."""
+        t = self.title_settings()
+        return {"open_room": float(t["open_room"] or 0) if t["opening"] else 0.0,
+                "end_room": float(t["end_room"] or 0) if t["ending"] else 0.0}
+
+    def closing_card(self) -> dict | None:
+        """The ending card over the last seconds of the video, as the music ends: {"text", "sub", "card" (a key of
+        titles.CARDS, or "" for words on black), "seconds"}; None without one (or with the old black ending)."""
+        t = self.title_settings()
+        if not (t["ending"] and float(t["end_room"] or 0) > 0):
+            return None
+        card = t["end_card"] if t["end_card"] in titles.CARDS else ""
+        return {"text": t["end_text"], "sub": t["end_sub"], "card": card, "seconds": float(t["end_room"])}
 
     def end_card(self) -> tuple[float, dict | None]:
-        """(seconds of black at the end, the words on it) for the video's ending."""
+        """(seconds of black at the end, the words on it) for the video's ending. With room kept for the ending
+        card (closing_card) there is no black after the last shot."""
         t = self.title_settings()
+        if t["ending"] and float(t["end_room"] or 0) > 0:
+            return 0.0, None
         words = ({"text": t["end_text"], "sub": t["end_sub"], "style": "elegant", "where": "center"}
                  if t["ending"] and (t["end_text"] or t["end_sub"]) else None)
         if t["end_card"] in titles.CARDS and t["end_black"]:
@@ -1816,7 +1835,8 @@ class Trip:
 
     @staticmethod
     def _mark_upright(rows: list[dict]) -> None:
-        """Which shots stand upright (taller than wide, as shown: your turn counts), from their preview."""
+        """Which shots stand upright (taller than wide, as shown: your turn counts), from their preview (made with
+        your turn already applied, so the picture's own shape is what the video shows)."""
         for r in rows:
             try:
                 with Image.open(r["thumb"]) as img:
@@ -1824,8 +1844,6 @@ class Trip:
             except (OSError, TypeError, KeyError):
                 r["upright"] = False
                 continue
-            if (r.get("rotation") or 0) % 180 == 90:
-                w, h = h, w
             r["upright"] = h > w * 1.1
 
     def auto_edit_to_music(
@@ -1844,7 +1862,7 @@ class Trip:
         rows = self.auto_edit_pool()
         self._frame_rates(rows)
         self._mark_upright(rows)
-        limits = replace(limits, landscape=self.video_size() != "phone")
+        limits = replace(limits, landscape=self.video_size() != "phone", **self.card_rooms())
         scores = self._video_scores(rows, report)
         report(0.95, "Listening to the music")
         song = songmap.analyse(song_path, app_dir() / "music-maps")

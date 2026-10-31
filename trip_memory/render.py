@@ -90,6 +90,9 @@ class RenderSettings:
     # The opening card over the start of the first shot (it keeps every cut where it was):
     # {"text", "sub", "card" (a key of titles.CARDS), "seconds"}.
     opening: dict | None = None
+    # The ending card over the last seconds of the video (the room Auto-edit kept for it), fading in:
+    # {"text", "sub", "card" (a key of titles.CARDS, or "" for words on black), "seconds"}.
+    closing: dict | None = None
     look: str = "natural"  # the colour mood of the whole video (see looks.py)
     # Titles on the video's own timeline (the editor under the video): {"text", "sub", "style", "where",
     # "length", "fade_in", "fade_out", and "start" (seconds into the video) or "shot" (its number) + "offset"}.
@@ -301,6 +304,8 @@ def _freeze_filter(effects: dict, moving: float) -> str:
     """Hold the last picture (with a quick flash as it freezes); the name goes on top in _video_segment."""
     if not held(effects):
         return ""
+    if effects.get("still"):  # (held quietly behind the ending card)
+        return f",tpad=stop_mode=clone:stop_duration={held(effects):.3f}"
     return (f",tpad=stop_mode=clone:stop_duration={held(effects):.3f}"
             f",eq=brightness='0.4*gte(t,{moving:.3f})*exp(-(t-{moving:.3f})*9)':eval=frame")
 
@@ -954,6 +959,40 @@ def _join_once(
                      f"[{n_in}:v]format=rgba,setpts=PTS-STARTPTS,fade=t=out:st={length - fade:.3f}:d={fade:.3f}:alpha=1[ocw]")
         parts.append(f"[{v_in}][ocw]overlay=0:0:eof_action=pass:format=auto,format=yuv420p[ocd]")
         v_prev = "ocd"
+
+    # The ending card over the last seconds: the shot blurred (or black) with your words, fading in.
+    card = s.closing or {}
+    if card and (card.get("text") or card.get("sub") or card.get("card")):
+        spec = titles.CARDS.get(card.get("card") or "") or {"bg": "black"}
+        length = max(1.0, min(float(card.get("seconds") or 3.0), lengths[-1] - 0.3 if n > 1 else total - 0.5,
+                              total * 0.6))
+        start = max(0.0, total - length)
+        fade = min(titles.CARD_FADE, length / 2)
+        v_in = v_prev
+        if card.get("card") in titles.CARDS and spec["bg"] == "blur":
+            parts.append(f"[{v_prev}]split=2[ecm][ecb]")
+            parts.append(f"[ecb]trim=start={start:.3f},setpts=PTS-STARTPTS,"
+                         f"{titles.card_filter(card['card'], s.height)},format=rgba,"
+                         f"fade=t=in:st=0:d={fade:.3f}:alpha=1,setpts=PTS+{start:.3f}/TB[ecbg]")
+            parts.append("[ecm][ecbg]overlay=0:0:eof_action=pass:format=auto,format=yuv420p[ecv]")
+            v_in = "ecv"
+        png = out.with_name(f"{out.stem}.closing.png")
+        if card.get("card") in titles.CARDS:
+            titles.card_layer(card["card"], card, s.width, s.height).save(png)
+        else:  # words on black
+            layer = Image.new("RGBA", (s.width, s.height), (0, 0, 0, 255))
+            if card.get("text") or card.get("sub"):
+                layer = Image.alpha_composite(layer, titles.draw(
+                    {"text": card.get("text") or "", "sub": card.get("sub") or "", "style": "elegant",
+                     "where": "center"}, s.width, s.height))
+            layer.save(png)
+        pngs.append(png)
+        n_in = inputs.count("-i")
+        inputs += ["-loop", "1", "-t", f"{length:.3f}", "-i", str(png)]
+        parts.append(f"[{n_in}:v]format=rgba,fade=t=in:st=0:d={fade:.3f}:alpha=1,"
+                     f"setpts=PTS-STARTPTS+{start:.3f}/TB[ecw]")
+        parts.append(f"[{v_in}][ecw]overlay=0:0:eof_action=pass:format=auto,format=yuv420p[ecd]")
+        v_prev = "ecd"
 
     # Titles on the video's timeline (the editor's), each fading in and out at its own time.
     for k, t in enumerate(s.titles or []):

@@ -378,6 +378,7 @@ def test_titles_opening_story_end_and_your_own(tmp_path, monkeypatch):
         _gps_photo(trip_dir / f"{n}.jpg", when, 38.7, -9.1, "red")
     trip = catalog.Trip(trip_dir)
     trip.prepare()
+    trip.set_title_settings(end_room=0, open_room=3.0)  # (no room kept: the old black ending)
     shown = lambda: {Path(p).name: (t["auto"], t["text"]) for p, t in trip.shot_titles().items()}
     assert shown() == {"0.jpg": ("opening", "Portugal 2025"), "2.jpg": ("story", trip.stories()[1]["name"])}
     assert trip.end_card() == (3.0, {"text": "Until next time", "sub": "Portugal 2025", "style": "elegant", "where": "center"})
@@ -1075,9 +1076,23 @@ def test_the_opening_and_the_ending_have_their_own_look_and_length(tmp_path, mon
     (tmp_path / "app").mkdir()
     (tmp_path / "trip").mkdir()
     trip = catalog.Trip(tmp_path / "trip")
-    trip.set_title_settings(card="bold", open_seconds=2.0)
+    trip.set_title_settings(card="bold", open_room=2.0, end_room=0)  # (the old black ending)
     assert trip.end_card()[1]["card"] == "bold"  # (until you choose: the ending looks like the opening)
     trip.set_title_settings(end_card="minimal", end_black=6.0)
     assert trip.opening_card()["card"] == "bold" and trip.opening_card()["seconds"] == 2.0
     seconds, words = trip.end_card()
     assert seconds == 6.0 and words["card"] == "minimal"
+
+
+def test_the_ending_card_has_its_own_room_at_the_end(tmp_path):
+    trip_dir = tmp_path / "Portugal_2025"
+    trip_dir.mkdir()
+    _gps_photo(trip_dir / "0.jpg", "2025:07:03 10:00:00", 38.7, -9.1, "red")
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    trip.set_title_settings(end_room=8.0, end_card="minimal")
+    assert trip.closing_card()["seconds"] == 8.0 and trip.closing_card()["card"] == "minimal"
+    assert trip.end_card() == (0.0, None)  # (no black after the last shot: the card goes over it)
+    assert trip.card_rooms()["end_room"] == 8.0
+    trip.set_title_settings(end_room=0, end_black=3.0)
+    assert trip.closing_card() is None and trip.end_card()[0] == 3.0

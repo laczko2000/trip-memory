@@ -351,6 +351,8 @@ class Limits:
     camera_effects: bool = True  # zoom transitions, punch-ins on big hits, slow push-ins, speed ramps
     pack: str = "more"  # more moments per cut: photo collages, upright videos side by side (a key of PACK)
     landscape: bool = True  # the video is wider than tall (upright videos can go side by side)
+    open_room: float = 0.0  # seconds kept at the start for the opening card: the first shot lasts at least this
+    end_room: float = 0.0  # seconds kept at the end for the ending card: the last shot lasts at least this
 
 
 @dataclass
@@ -360,6 +362,7 @@ class Slot:
     energy: float  # how lively the music is here, 0..1
     soft_before: bool = False  # a soft transition (fade) into this slot instead of a hard cut
     tapped: bool = False  # both its cuts are your pins (Music tab): never joined, never split, however long
+    room: bool = False  # kept for the opening or ending card: one shot that fills it (a photo or a long clip)
 
     @property
     def seconds(self) -> float:
@@ -783,6 +786,7 @@ def collages(shots: list[Shot], slots: list[Slot], rows: dict[str, dict], transi
     return result
 
 
+ROOM_VIDEO_FROM = 3.0  # the last shot under the ending card can be a clip this long (it then holds its last picture)
 FREEZE = 1.0  # seconds a freeze-frame holds, with the person's name on it
 FREEZE_GAP = 20.0  # at most one freeze-frame in this many seconds
 
@@ -857,7 +861,7 @@ def pack(shots: list[Shot], candidates: list[dict], limits: Limits, curves: dict
     def video_ok(shot: Shot) -> bool:
         r = rows.get(shot.path, {})
         return (limits.landscape and shot.kind == "video" and not shot.effects and abs(shot.speed - 1) < 1e-3
-                and r.get("upright") and not r.get("locked") and "#" not in shot.path and shot.seconds >= SIDE_FROM)
+                and r.get("upright") is True and not r.get("locked") and "#" not in shot.path and shot.seconds >= SIDE_FROM)
 
     # (cuts still to come in each group: the spare shots are shared fairly between them)
     ahead: dict[tuple, int] = {}
@@ -902,28 +906,20 @@ def pack(shots: list[Shot], candidates: list[dict], limits: Limits, curves: dict
                 picked = [(g, None) for g in room[:extra]]
                 spare[key] = [x for x in spare.get(key, []) if x not in room[:extra]]
             if len(picked) < want - 1:
-                # Upright videos not used anywhere else (nearest in time) ...
-                anywhere = sorted((x for k2, xs in spare.items() if k2[1] == "video" and k2[2] for x in xs
-                                   if (x.get("duration") or 0) >= shot.seconds), key=lambda x: abs(_when(x) - when))
-                for g in anywhere[:want - 1 - len(picked)]:
-                    picked.append((g, None))
-                    for k2 in spare:
-                        if g in spare[k2]:
-                            spare[k2].remove(g)
-            if len(picked) < want - 1:
-                # ... else other moments of upright videos already in the video, this one's own first (never the
-                # seconds already shown): one clip cut into three moments playing side by side.
+                # ... else other moments of upright videos of the same part of the story already in the video, this
+                # one's own first (never the seconds already shown): one clip cut into three moments side by side.
+                # Never from another part of the story, and never a landscape video.
                 used = _used_windows(out + shots[len(out):], rows)
                 for g, a in picked:
                     if a is not None:
                         used.setdefault(_source(g["path"]), []).append((a, a + shot.seconds))
                 own = rows.get(shot.path)
-                others = sorted((x for x in candidates if x.get("upright") and x["kind"] == "video"
-                                 and "#" not in x["path"] and not x.get("locks") and not x.get("locked")
+                others = sorted((x for x in candidates if x.get("upright") is True and x["kind"] == "video"
+                                 and _group_of(x) == _group_of(r) and "#" not in x["path"] and not x.get("locks") and not x.get("locked")
                                  and _source(x["path"]) != _source(shot.path)
                                  and x["path"] not in {g["path"] for g, _ in picked}),
                                 key=lambda x: abs(_when(x) - when))
-                for g in ([own] if own else []) + others + ([own] if own else []):
+                for g in others + ([own, own] if own else []):
                     if len(picked) >= want - 1:
                         break
                     a = _free_part(g.get("duration") or 0.0, shot.seconds, used.get(_source(g["path"]), []))
@@ -992,6 +988,23 @@ def effects_for(row: dict, slot: Slot, seconds: float, speed: float, hits: list[
 MIN_FILL_SPEED = 0.5  # a video a little shorter than the time between two pins may be slowed down this far
 
 
+def reserve_room(slots: list[Slot], start: float, end: float) -> list[Slot]:
+    """Keep room for the opening and the ending cards: the first slots become one of at least `start` seconds,
+    the last ones one of at least `end` seconds (their cuts stay on the music's beats and your pins)."""
+    out = list(slots)
+    if start > 0 and len(out) > 2:
+        while len(out) > 2 and out[0].seconds < start - 0.25:
+            a, b = out[0], out[1]
+            out[:2] = [Slot(a.start, b.end, (a.energy + b.energy) / 2, a.soft_before, a.tapped and b.tapped)]
+        out[0] = replace(out[0], room=True)
+    if end > 0 and len(out) > 2:
+        while len(out) > 2 and out[-1].seconds < end - 0.25:
+            a, b = out[-2], out[-1]
+            out[-2:] = [Slot(a.start, b.end, (a.energy + b.energy) / 2, a.soft_before, a.tapped and b.tapped)]
+        out[-1] = replace(out[-1], room=True)
+    return out
+
+
 def fill_slots(slots: list[Slot], candidates: list[dict], limits: Limits) -> list[int]:
     """Choose a shot for every slot, keeping the trip in time order, matching lively shots to lively music.
 
@@ -1018,7 +1031,15 @@ def fill_slots(slots: list[Slot], candidates: list[dict], limits: Limits) -> lis
                 best_prev, best_idx = score[j - 1, i - 1], i - 1
             if best_prev <= neg / 2:
                 continue
-            if slot.tapped:
+            if slot.room:
+                # The opening's or ending's room: any photo, or a video that fills it at its own speed (at the
+                # end a shorter one holds its last picture behind the ending card).
+                fill = slot.seconds if j < n_slots - 1 else min(slot.seconds, ROOM_VIDEO_FROM)
+                if c["kind"] == "video" and (c["duration"] or 0) < fill - 0.05:
+                    continue
+                if c.get("locked") and slot.seconds > c["duration"] + 0.05:
+                    continue
+            elif slot.tapped:
                 # Your pins come first, whatever your length limits: any photo, or any video that fills the time
                 # (slowed down to half speed at most if it is a little short).
                 if c["kind"] == "video" and (c["duration"] or 0) < slot.seconds * MIN_FILL_SPEED - 0.05:
@@ -1091,7 +1112,23 @@ def plan_to_music(
         for longest in (None, limits.max_photo, max(limits.min_shot, limits.max_photo / 2)):
             slots = music_slots(song, limits, end, longest)
             slots = merge_slots(slots, len(candidates), longest or max(limits.max_video, limits.max_photo))
+            slots = reserve_room(slots, limits.open_room, limits.end_room)
             picks = fill_slots(slots, candidates, limits)
+            if limits.end_room > 0 and 2 < len(picks) < len(slots):
+                # Ran out of shots before the music ends: the video ends earlier, still with room for the card
+                # (the last shot runs on into the music after it, so no shot is lost).
+                n = len(picks)
+                a, b = slots[n - 1], n
+                while b < len(slots) and slots[b].end - a.start < limits.end_room - 0.25:
+                    b += 1
+                if b < len(slots):
+                    last = Slot(a.start, slots[b].end, a.energy, a.soft_before, False, room=True)
+                    short = slots[: n - 1] + [last]
+                else:
+                    short = reserve_room(slots[:n], 0, limits.end_room)
+                again = fill_slots(short, candidates, limits)
+                if len(again) == len(short):
+                    slots, picks = short + slots[len(picks):], again
             if len(picks) == len(slots):
                 return slots, picks
             if sum(s.seconds for s in slots[: len(picks)]) > sum(s.seconds for s in best[0][: len(best[1])]):
@@ -1207,6 +1244,12 @@ def plan_to_music(
             speed = max(MIN_FILL_SPEED, (c["duration"] or 0) / seconds - 0.001)
             speed_why = ("Your locked moment, a little slower to fill its time" if c.get("locked") and not slot.tapped
                          else "Slowed down to fill the time between your pins")
+        if slot.room and k == len(slots) - 1 and c["kind"] == "video" and not c.get("locked") \
+                and (c["duration"] or 0) < seconds * speed - 0.01:
+            # The last shot, under the ending card: a shorter clip plays whole, then holds its last picture.
+            speed, speed_why = 1.0, None
+            effects = {"freeze": round(seconds - (c["duration"] or 0) + 0.02, 3), "still": True}
+            effects_why = "Holds its last picture under the ending card"
         if c["kind"] == "video":
             curve = curves.get(c["path"])
             used = (seconds - (effects.get("freeze") or 0)) * speed * (1.4 if effects.get("ramp") else 1.0)  # of the video
