@@ -6179,7 +6179,8 @@ function tmVideo(box) {
     v.preload = 'auto';  // fetch it now so we can jump to the start of the part
     v.src = v.dataset.src;
     v.addEventListener('timeupdate', () => {
-      if (v.currentTime >= parseFloat(box.dataset.end) - 0.05) v.currentTime = parseFloat(box.dataset.start);
+      // (only while playing: a paused video showing the last frame of the part stays there)
+      if (!v.paused && v.currentTime >= parseFloat(box.dataset.end) - 0.05) v.currentTime = parseFloat(box.dataset.start);
     });
     v.addEventListener('ended', () => { v.currentTime = parseFloat(box.dataset.start); v.play().catch(() => {}); });
   }
