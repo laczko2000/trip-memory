@@ -782,18 +782,9 @@ class Page:
                   multi_line=True, timeout=8000)
         self.refresh_all()
 
-    def confirm_remove(self) -> None:
-        n = sum(1 for it in self.all_items if not it["chosen"])
-        with ui.dialog() as dialog, ui.card():
-            ui.label(f"Remove {n} unticked files from this trip?").classes("text-lg font-semibold")
-            ui.label("They disappear from every tab (Library, People, Stories, Storyboard) and are never analysed. "
-                     "The files themselves stay on your Mac, untouched. You can bring them back with See removed.") \
-                .classes("text-sm")
-            with ui.row().classes("justify-end w-full"):
-                ui.button("Cancel", on_click=dialog.close).props("flat")
-                ui.button(f"Remove {n}", icon="delete_sweep", on_click=lambda: (dialog.close(), self.remove_unchosen())[1]) \
-                    .props("color=negative")
-        dialog.open()
+    async def confirm_remove(self) -> None:
+        """Remove the unticked files at once (no question: See removed brings them back)."""
+        await self.remove_unchosen()
 
     async def remove_unchosen(self) -> None:
         # The first ticked file in view stays exactly where it is on the screen: nothing jumps.
@@ -805,7 +796,7 @@ class Page:
         except Exception:
             anchor = None
         n = self.trip.remove_unchosen()
-        ui.notify(f"Removed {n} files from the trip.", type="positive")
+        ui.notify(f"Removed {n} files from the trip (See removed brings them back).", type="positive")
         it = next((x for x in self.all_items if anchor and clip_id(x["path"]) == anchor[0]), None)
         if it is None:
             self.refresh_all()
