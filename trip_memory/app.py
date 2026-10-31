@@ -44,6 +44,29 @@ from .scenes import SCENES, text_vectors
 from .tags import ALL_TAGS, EDITABLE_TAGS, TAG_GROUP
 
 OUTPUT_DIR = Path.home() / "Movies" / "Trip Memory"
+MUSIC_SITES = [("YouTube Audio Library", "https://studio.youtube.com/channel/UC/music"),
+               ("Pixabay Music", "https://pixabay.com/music/"),
+               ("iTunes Store", "itms://itunes.apple.com/")]  # (opens the Mac's Music app on its store)
+# Where a song you buy in the iTunes Store lands on a Mac (the Music app's own folder, by artist and album).
+BOUGHT_SONGS = ["Music/Music/Media.localized/Music", "Music/Music/Media/Music", "Music/iTunes/iTunes Media/Music"]
+
+
+def new_song_since(since: float) -> Path | None:
+    """A song that arrived after `since`: in Downloads, or bought in the iTunes Store (the Music app's folder)."""
+    found = free_music.find_download("", since)
+    if found is not None:
+        return found
+    fresh = []
+    for folder in BOUGHT_SONGS:
+        root = Path.home() / folder
+        try:
+            for f in root.glob("*/*/*"):  # artist / album / song
+                if f.suffix.lower() in free_music.AUDIO_SUFFIXES and f.stat().st_mtime >= since - 2:
+                    fresh.append(f)
+        except OSError:
+            continue
+    return max(fresh, key=lambda f: f.stat().st_mtime) if fresh else None
+
 RESOLUTIONS = {"Full HD (1080p)": (1920, 1080), "HD (720p, faster)": (1280, 720),
                "Phone, upright 9:16 (Instagram, TikTok)": (1080, 1920)}
 PHONE = "Phone, upright 9:16 (Instagram, TikTok)"
@@ -2933,6 +2956,14 @@ class Page:
                 ui.button("Choose song…", icon="music_note", on_click=self.browse_music).props("outline dense")
             else:
                 ui.input("Song file", on_change=lambda e: setattr(self.music_input, "value", e.value)).classes("w-96")
+        with ui.row().classes("w-full items-center gap-2"):
+            ui.label("Get a song:").classes("text-sm text-gray-600")
+            for name, url in MUSIC_SITES:
+                ui.button(name, icon="open_in_new", on_click=lambda n=name, u=url: self.music_site(n, u)) \
+                    .props("outline dense no-caps size=sm color=purple") \
+                    .tooltip("A song you buy there is yours to use in your own videos, but not on YouTube"
+                             if url.startswith("itms") else
+                             "Songs you may use on YouTube. Download one there: the app picks it up from Downloads")
         if not music:
             ui.label("Choose a song first. Then play it and tap the right Shift key wherever you want a cut.") \
                 .classes("text-gray-500")
@@ -7551,6 +7582,59 @@ class Page:
                 ui.button("Close", on_click=dialog.close).props("flat")
         dialog.open()
         ui.timer(0.1, lambda: search(state["words"]), once=True)
+
+    def music_site(self, name: str, url: str) -> None:
+        """Open a free music library in the browser; a song you download there is picked up from Downloads."""
+        if url.startswith("itms") and sys.platform == "darwin":
+            subprocess.Popen(["open", url])  # (straight into the Music app, no browser tab)
+        else:
+            ui.navigate.to(url, new_tab=True)
+        since = time.time()
+        if getattr(self, "music_watch", None):
+            self.music_watch.cancel()
+        ui.notify("The Music app opens on the iTunes Store. Buy a song there: it shows up here by itself." if
+                  url.startswith("itms") else
+                  f"{name} is open in your browser. Listen, then click Download on a song: it shows up here.",
+                  multi_line=True, timeout=8000)
+
+        def check() -> None:
+            found = new_song_since(since)
+            if found is None:
+                if time.time() - since > 30 * 60:
+                    self.music_watch.cancel()
+                return
+            if found.stat().st_size == 0 or time.time() - found.stat().st_mtime < 1.5:
+                return  # (the browser is still writing it)
+            self.music_watch.cancel()
+            self.offer_download(found)
+
+        with self.window_box:
+            self.music_watch = ui.timer(2.0, check)
+
+    def offer_download(self, found: Path) -> None:
+        with self.window_box, ui.dialog() as dialog, ui.card().classes("gap-3"):
+            ui.label("A new song in your Downloads").classes("text-lg font-semibold")
+            ui.label(found.name).classes("font-medium")
+            url = f"/downloaded/{hashlib.sha1(str(found).encode()).hexdigest()[:12]}{found.suffix.lower()}"
+            app.add_media_file(local_file=found, url_path=url)  # (just this file, to listen to it here)
+            ui.audio(url).classes("w-96")
+
+            def use() -> None:
+                folder = app_dir() / "music"
+                folder.mkdir(parents=True, exist_ok=True)
+                path = folder / found.name
+                if not path.exists():
+                    import shutil
+                    shutil.copyfile(found, path)  # (a copy: moving or deleting Downloads later changes nothing)
+                self.music_input.value = str(path)
+                dialog.close()
+                ui.notify(f"Using {found.stem}. If the site asks for credit, copy it into your video's description.",
+                          type="positive", multi_line=True)
+
+            with ui.row().classes("w-full justify-end"):
+                ui.button("Not this one", on_click=dialog.close).props("flat")
+                ui.button("Use this song", icon="check", on_click=use).props("color=primary")
+        dialog.open()
 
     async def browse_music(self) -> None:
         path = await run.io_bound(choose_with_finder, "music")
