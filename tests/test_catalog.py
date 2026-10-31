@@ -418,6 +418,33 @@ def test_video_doubles_are_found_on_several_frames(tmp_path, monkeypatch):
     assert not {Path(i["path"]).name: i for i in trip.items()}["take1.mp4"]["chosen"]
 
 
+def test_keep_marked_sorts_out_a_set_for_good(tmp_path, monkeypatch):
+    from tests.test_render import make_clip
+
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    make_clip(trip_dir / "take1.mp4", "640x360", 4, "2025-07-03T10:00:00Z", audio=False)
+    make_clip(trip_dir / "take2.mp4", "640x360", 6, "2025-07-03T10:06:00Z", audio=False)
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    names = lambda: {Path(i["path"]).name: i for i in trip.items()}
+    paths = [i["path"] for i in trip.items()]
+    assert names()["take1.mp4"]["similar_set"] == names()["take2.mp4"]["similar_set"]
+    trip.set_chosen(paths, True)  # you keep both
+    trip.keep_marked(paths)
+    for _ in range(2):  # still apart after the app looks for doubles again
+        by = names()
+        assert by["take1.mp4"]["similar_set"] != by["take2.mp4"]["similar_set"]
+        assert by["take1.mp4"]["best"] and by["take2.mp4"]["best"]
+        trip._group_stories()
+    trip.untick_doubles()
+    assert all(i["chosen"] for i in trip.items())  # Keep only the star leaves a sorted-out set alone
+    trip.regroup_sets()
+    assert names()["take1.mp4"]["similar_set"] == names()["take2.mp4"]["similar_set"]
+
+
 def test_the_look_is_kept_per_trip(tmp_path, monkeypatch):
     monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
     (tmp_path / "app").mkdir()

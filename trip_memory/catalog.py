@@ -1639,12 +1639,41 @@ class Trip:
             "SELECT path, kind, taken_at, duration, lat, lon, dhash, colours, sharpness, features, motion_shake "
             "FROM items WHERE part_of IS NULL AND removed = 0")]
         groups = stories.group(rows, self.look_alike_level(), self.story_links())
+        cleaned = self.cleaned_sets()
+        if cleaned:  # sets you sorted out with Keep marked: each of their shots stands alone now
+            free = max((sim for _, sim, _ in groups.values() if sim is not None), default=-1) + 1
+            for path in sorted(cleaned):
+                if path in groups:
+                    groups[path] = (groups[path][0], free, bool(cleaned[path]))
+                    free += 1
         with self._lock:
             self.db.executemany(
                 "UPDATE items SET story = ?, similar_set = ?, best = ? WHERE path = ?",
                 [(st, sim, int(best), path) for path, (st, sim, best) in groups.items()],
             )
             self.db.commit()
+
+    def cleaned_sets(self) -> dict[str, int]:
+        """Shots of look-alike sets you have sorted out (Keep marked): path -> 1 if you kept it, else 0."""
+        rows = self.query("SELECT value FROM meta WHERE key = 'sets_cleaned'")
+        return json.loads(rows[0]["value"]) if rows else {}
+
+    def keep_marked(self, paths: list[str]) -> None:
+        """A set of look-alikes is sorted out: the ticked shots stay as single shots, the frame and the star go.
+        Remembered, also when the app looks for doubles again."""
+        cleaned = self.cleaned_sets()
+        chosen = {r["path"]: r["chosen"] for r in self.query(
+            f"SELECT path, chosen FROM items WHERE path IN ({','.join('?' * len(paths))})", tuple(paths))}
+        cleaned.update({p: int(chosen.get(p, 0)) for p in paths})
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('sets_cleaned', ?)", (json.dumps(cleaned),))
+        free = (self.query("SELECT MAX(similar_set) AS m FROM items")[0]["m"] or 0) + 1
+        self.db_write_many("UPDATE items SET similar_set = ?, best = ? WHERE path = ?",
+                           [(free + i, cleaned[p], p) for i, p in enumerate(paths)])
+
+    def regroup_sets(self) -> None:
+        """Undo every Keep marked: the look-alike frames come back."""
+        self.execute("DELETE FROM meta WHERE key = 'sets_cleaned'")
+        self._group_stories()
 
     def story_links(self) -> list[str]:
         rows = self.query("SELECT value FROM meta WHERE key = 'story_links'")

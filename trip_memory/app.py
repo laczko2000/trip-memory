@@ -497,6 +497,10 @@ class Page:
                 self.remove_button = ui.button(f"Remove {total - chosen} unticked from the trip", icon="delete_sweep",
                                                on_click=self.confirm_remove).props("color=negative")
                 self.remove_button.set_visibility(total > chosen)
+                cleaned = len(self.trip.cleaned_sets())
+                if cleaned:
+                    ui.button("Show the similar-shot frames again", icon="undo", on_click=self.regroup_sets) \
+                        .props("flat dense").tooltip(f"{cleaned} shots were sorted out with Keep marked")
                 if removed:
                     ui.button(f"See removed ({removed})", icon="restore_from_trash",
                               on_click=lambda: self.set_choose_filter("show", "removed")).props("flat")
@@ -977,6 +981,9 @@ class Page:
                         with ui.row().classes("items-center gap-1 px-1"):
                             ui.label(f"{len(members)} similar shots").classes("text-xs text-blue-800")
                             ui.button("keep ⭐ only", on_click=lambda m=members: self.keep_best(m)).props("flat dense size=xs")
+                            ui.button("✓ Keep marked", on_click=lambda m=members, n=number: self.keep_marked(m, n)) \
+                                .props("unelevated dense size=xs color=primary") \
+                                .tooltip("Done with this set: the ticked shots stay as single shots, the frame goes")
                         with ui.row().classes("gap-1"):
                             for it in members:
                                 self.choose_tile(it, in_set=True)
@@ -1399,6 +1406,22 @@ class Page:
     async def unlink_story(self, number: int) -> None:
         await run.io_bound(self.trip.unlink_story, number)
         self.choose_focus = number
+        self.stale = True
+        self.refresh_choose()
+
+    async def keep_marked(self, members: list[dict], number: int) -> None:
+        paths = [m["path"] for m in members]
+        await run.io_bound(self.trip.keep_marked, paths)
+        kept = sum(1 for m in members if m["chosen"])
+        ui.notify(f"Sorted out: kept {kept} of {len(members)}." + (" The unticked ones go when you remove the unticked "
+                  "files." if kept < len(members) else ""), type="positive")
+        self.choose_focus, self.choose_focus_path = number, paths[0]  # stay where you were
+        self.stale = True
+        self.refresh_choose()
+
+    async def regroup_sets(self) -> None:
+        await run.io_bound(self.trip.regroup_sets)
+        ui.notify("The similar-shot frames are back.")
         self.stale = True
         self.refresh_choose()
 
