@@ -697,7 +697,9 @@ class Page:
         chosen = sum(1 for it in self.all_items if it["chosen"])
         removed = self.trip.removed_count()
         size = sum(_file_size(it["path"]) for it in self.all_items)
-        doubles = total - len({it["similar_set"] for it in self.all_items})
+        # (files not compared yet have no set: they are no one's double)
+        in_sets = [it["similar_set"] for it in self.all_items if it["similar_set"] is not None]
+        doubles = len(in_sets) - len(set(in_sets))
         with ui.card().classes("w-full bg-amber-50").props('id="tm-step-doubles"'):
             ui.label("Sort out doubles" if getattr(self, "guided", False) else "Step 1: sort out").classes("text-lg font-semibold")
             self.sort_label = ui.label(self.sort_text(total, chosen, size, removed)).classes("text-sm")

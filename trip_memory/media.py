@@ -8,7 +8,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageFile
+
+# A photo whose end is missing (a copy cut short) still opens: the missing bottom shows grey instead of no preview.
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 from . import timeshift
 from .tools import FFmpegError, probe
