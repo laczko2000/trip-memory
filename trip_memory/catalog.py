@@ -1848,7 +1848,7 @@ class Trip:
                                         [bool(r["theme_ok"]) for r in seen],
                                         {i for i, r in enumerate(seen) if r["path"] in keep})
             shots = [{"path": seen[f["row"]]["path"], "now": f["now"], "better": f["better"], "why": f["why"],
-                      "yours": bool(seen[f["row"]]["theme_ok"])} for f in found]
+                      "also": f.get("also"), "yours": bool(seen[f["row"]]["theme_ok"])} for f in found]
             result = {"agree": round(1 - len(shots) / len(seen), 3), "shots": shots, "total": len(seen)}
         self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('theme_check', ?)", (json.dumps(result),))
         return result

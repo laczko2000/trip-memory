@@ -231,3 +231,9 @@ def test_second_check_questions_shots_that_look_like_another_themes_confirmed_sh
     assert themes.second_check(vectors, activities, now, mine, skip={8}) == []  # "keep mine": not asked again
     now[2] = "Kitesurfing"  # a confirmed shot that looks like the boat shots is questioned too
     assert any(f["row"] == 2 and f["better"] == "Boat" for f in themes.second_check(vectors, activities, now, mine))
+    beach = rng.normal(size=16)
+    vectors3 = np.vstack([vectors, [near(beach) for _ in range(3)]])
+    acts3 = activities[:2] + [{"name": "Beach", "vector": None}] + activities[2:]
+    found = themes.second_check(vectors3, acts3, ["Boat"] * 4 + ["Kitesurfing"] * 6 + ["Beach"] * 3,
+                                [True] * 8 + [False, False] + [True] * 3)
+    assert found and found[0]["also"] == "Beach"  # a third choice to click, besides now and the suggestion

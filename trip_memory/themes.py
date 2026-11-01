@@ -140,6 +140,12 @@ def second_check(vectors: np.ndarray, activities: list[dict], now: list[str], mi
             if alt != cur and names[alt] != OTHER and p[i, alt] - p[i, cur] >= CHECK_WORDS:
                 out.append({"row": i, "now": now[i], "better": names[alt], "how": float(p[i, alt] - p[i, cur]),
                             "why": f"the picture fits {names[alt]} better"})
+    for f in out:  # a third choice: the next most likely theme after these two
+        i, taken = f["row"], {f["now"], f["better"], OTHER}
+        order = [j for j in np.argsort(-near[i]) if np.isfinite(near[i, j])]
+        if p is not None:
+            order += [j for j in np.argsort(-p[i]) if j not in order]
+        f["also"] = next((names[j] for j in order if names[j] not in taken), None)
     return sorted(out, key=lambda x: -x["how"])
 
 

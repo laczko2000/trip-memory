@@ -4839,29 +4839,34 @@ class Page:
                             with box:
                                 self.preview(it, "width:100%;aspect-ratio:16/10", start=self.hover_start(it), view="theme")
                             box.on("dblclick", lambda p=shot["path"]: self.shot_window(p, "Themes"))
-                            ui.label(f"{shot['now']} → {shot['better']}").classes("text-sm font-semibold")
+                            ui.label("Which theme is it?").classes("text-sm font-semibold")
                             ui.label(("You set " + shot["now"] + "; it " if shot["yours"] else "It ") + shot["why"] + ".") \
                                 .classes("text-xs text-gray-600")
-                            with ui.row().classes("w-full gap-1 no-wrap items-center"):
-                                ui.button("Move", icon="east",
-                                          on_click=lambda p=shot["path"]: self.answer_theme_check(p, True)) \
-                                    .props("dense unelevated no-caps size=sm color=teal") \
-                                    .tooltip(f"Move it to {shot['better']}")
-                                ui.space()
-                                with ui.button("Change", icon="swap_vert").props(
-                                        "dense outline no-caps size=sm color=indigo") \
-                                        .tooltip("Another theme: pick it from the list"):
+                            # One click: the theme it's in now (keep), the one the check suggests, the next best
+                            # guess, or any other from the list.
+                            emoji = {x["name"]: x["emoji"] for x in activities}
+                            with ui.element("div").classes("w-full grid gap-1").style(
+                                    "grid-template-columns:repeat(2,minmax(0,1fr))"):
+                                choices = [(shot["better"], "unelevated color=teal", True),
+                                           (shot["now"], "outline color=grey-8", False)]
+                                if shot.get("also") and shot["also"] in emoji:
+                                    choices.append((shot["also"], "outline color=teal", True))
+                                for name, look, move in choices:
+                                    ui.button(f"{emoji.get(name, '')} {name}",
+                                              on_click=lambda p=shot["path"], n=name, m=move:
+                                              self.answer_theme_check(p, m, n if m else None)) \
+                                        .props(f"no-caps dense {look}").classes("w-full text-xs") \
+                                        .tooltip("Keep it here" if not move else f"Move it to {name}")
+                                with ui.button("Other…", icon="expand_more").props(
+                                        "no-caps dense outline color=indigo").classes("w-full text-xs") \
+                                        .tooltip("None of these: pick another theme"):
                                     with ui.menu().props("auto-close"):
                                         for a in activities:
-                                            if a["name"] in (shot["now"], shot["better"]):
+                                            if a["name"] in (shot["now"], shot["better"], shot.get("also")):
                                                 continue
                                             ui.menu_item(f"{a['emoji']} {a['name']}",
                                                          on_click=lambda p=shot["path"], n=a["name"]:
                                                          self.answer_theme_check(p, True, n))
-                                ui.space()
-                                ui.button("Keep", on_click=lambda p=shot["path"]: self.answer_theme_check(p, False)) \
-                                    .props("dense outline no-caps size=sm color=grey-8") \
-                                    .tooltip(f"It stays in {shot['now']}")
                 if len(check["shots"]) > 60:
                     ui.label(f"…and {len(check['shots']) - 60} more after these.").classes("text-xs text-gray-600")
 

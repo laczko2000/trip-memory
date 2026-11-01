@@ -59,6 +59,8 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.30.4** Second check, simpler: under each shot just click its theme. Four boxes: the theme the check suggests, the one it's in now (keeps it), the next best guess, and Other… for any other theme. (Run the Second check again to get the third guess.)
+
 - **1.30.3** Themes › Second check: each shot now has Move (to the theme the check suggests) on the left, Change in the middle (opens a list of all your themes, pick any other one) and Keep on the right.
 
 - **1.30.2** Swapping or adding a picture in a collage (or a video side by side) now offers the ones taken nearest in time first, just before and after the picture you swap, each marked "4 min before" or "2 min after".
