@@ -952,6 +952,93 @@ class Trip:
             self.db.commit()
         self.fit_length(new, length)
 
+    def alternatives(self, old: str, length: float, theme: str | None = None) -> list[dict]:
+        """Shots that could take this one's place, best first: they look like it, were taken around the same time,
+        share its theme, are sharp and good, aren't in the video yet, and (videos) are long enough for its slot.
+        Each row gets "fit" (0-1) and "why" (a few words)."""
+        rows = [dict(r) for r in self.query("SELECT * FROM items WHERE path = ?", (old,))]
+        if not rows:
+            return []
+        me = rows[0]
+        used = set()
+        for r in self.storyboard():
+            used.add(r.get("part_of") or r["path"])
+            fx = json.loads(r["effects"]) if r.get("effects") else {}
+            used.update(fx.get("collage") or [])
+            used.update(fx.get("side") or [])
+        used.add(me.get("part_of") or old)
+        cands = [dict(r) for r in self.query("SELECT * FROM items WHERE removed = 0 AND part_of IS NULL")
+                 if r["path"] not in used and r["thumb"]]
+        if not cands:
+            return []
+
+        def vec(r):
+            if r.get("clip") is not None:
+                v = np.frombuffer(r["clip"], dtype=np.float32)
+                n = float(np.linalg.norm(v))
+                return v / n if n else None
+            return None
+
+        def colours(r):
+            return np.frombuffer(r["colours"], dtype=np.uint8).astype(np.float32) if r.get("colours") else None
+
+        mine, my_colours = vec(me), colours(me)
+        try:
+            when = datetime.fromisoformat(me["taken_at"])
+        except (TypeError, ValueError):
+            when = None
+        sharp = sorted(r["sharpness"] for r in cands if r.get("sharpness") is not None)
+        my_theme = theme or me.get("theme") or me.get("theme_auto")
+        out = []
+        for r in cands:
+            why, score = [], 0.0
+            v = vec(r)
+            if mine is not None and v is not None and len(v) == len(mine):
+                look = max(0.0, (float(mine @ v) - 0.5) / 0.4)
+            elif my_colours is not None and colours(r) is not None:
+                look = max(0.0, 1 - float(np.abs(my_colours - colours(r)).mean()) / 80)
+            else:
+                look = 0.0
+            score += 2.0 * min(1.0, look)
+            if look > 0.6:
+                why.append("looks alike")
+            try:
+                gap = abs((datetime.fromisoformat(r["taken_at"]) - when).total_seconds()) if when else None
+            except (TypeError, ValueError):
+                gap = None
+            if gap is not None:
+                score += float(np.exp(-gap / 3600))
+                if gap < 1800:
+                    why.append("same time")
+                elif gap < 6 * 3600:
+                    why.append("same day")
+            if my_theme and (r.get("theme") or r.get("theme_auto")) == my_theme:
+                score += 1.0
+                why.append("same theme")
+            if r.get("sharpness") is not None and sharp:
+                score += 0.5 * sum(x <= r["sharpness"] for x in sharp) / len(sharp)
+            if r.get("best"):
+                score += 0.3
+                why.append("best of its set")
+            if r.get("ai_score"):
+                score += 0.03 * float(r["ai_score"])
+            if r.get("chosen"):
+                score += 0.3
+            if me.get("similar_set") is not None and r.get("similar_set") == me.get("similar_set"):
+                score -= 0.5  # (a double of the one you don't like)
+            if r["kind"] == "video":
+                lo, hi = kept_part(r) or (0.0, r.get("duration") or 0.0)
+                if hi - lo < length * 0.9:
+                    score -= 1.5
+                    why.append(f"only {hi - lo:.1f} s")
+                else:
+                    score += 0.2 * min(1.0, (r.get("motion_action") or 0.0) * 2)
+            r["fit"] = round(score, 3)
+            r["why"] = ", ".join(why[:3]) or "another shot"
+            out.append(r)
+        out.sort(key=lambda r: -r["fit"])
+        return out
+
     def together(self, path: str) -> tuple[str | None, list[str]]:
         """The shots that play on this cut with it: ("collage", photos) or ("side", upright videos), or (None, [])."""
         row = self.query("SELECT effects FROM items WHERE path = ?", (path,))

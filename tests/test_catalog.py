@@ -1150,3 +1150,20 @@ def test_remove_one_shot_from_themes(tmp_path, monkeypatch):
     assert gone not in [i["path"] for i in trip.items()]
     assert [i["path"] for i in trip.items(removed=True)] == [gone]
     assert (trip_dir / "0.jpg").exists()
+
+
+def test_alternatives_suggest_shots_not_in_the_video(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    for n, colour in enumerate(("red", "red", "blue")):
+        _gps_photo(trip_dir / f"{n}.jpg", f"2025:07:03 10:0{n}:00", 38.7223, -9.1393, colour)
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    for n in range(3):
+        trip.execute("UPDATE items SET thumb = path, position = ?, included = ? WHERE path = ?",
+                     (n if n < 2 else None, int(n < 2), str(trip_dir / f"{n}.jpg")))
+    found = trip.alternatives(str(trip_dir / "0.jpg"), 3.0)
+    assert [Path(r["path"]).name for r in found] == ["2.jpg"]
+    assert found[0]["why"]

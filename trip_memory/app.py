@@ -2180,6 +2180,15 @@ class Page:
 
                 ui.button("Open in the Library", icon="photo_library", on_click=to_library) \
                     .props("flat dense no-caps size=sm")
+            if in_video:
+                with ui.row().classes("w-full items-center gap-2 px-2"):
+                    def alternative(r=in_video) -> None:
+                        dialog.close()
+                        self.draft_swap_dialog(r, self.theme_of(r))
+
+                    ui.button("Find an alternative", icon="auto_awesome", on_click=alternative) \
+                        .props("unelevated no-caps color=purple") \
+                        .tooltip("Don't like this one? The app suggests shots that could take its place")
             if it["kind"] == "video":
                 video_tools(dialog)
             if history:
@@ -7165,8 +7174,9 @@ class Page:
                 ui.label(("🎬 " if r["kind"] == "video" else "📷 ") + Path(r["part_of"] or r["path"]).name) \
                     .classes("text-xs text-gray-500")
             with ui.row().classes("items-center gap-2"):
-                ui.button(f"Swap for another {theme} shot", icon="swap_horiz",
-                          on_click=lambda: self.draft_swap_dialog(r, theme)).props("outline no-caps")
+                ui.button("Find an alternative", icon="auto_awesome",
+                          on_click=lambda: self.draft_swap_dialog(r, theme)).props("outline no-caps color=purple") \
+                    .tooltip("The app suggests shots that could take its place (photos or videos)")
                 if r["kind"] == "video":
                     ui.button("Choose the part", icon="content_cut",
                               on_click=lambda: self.draft_part(r, length)).props("outline no-caps")
@@ -7542,29 +7552,66 @@ class Page:
         self.draft_changed("Taken out; the clip before it plays on.")
 
     def draft_swap_dialog(self, r: dict, theme: str) -> None:
-        on_board = {x["part_of"] or x["path"] for x in self.trip.storyboard()}
-        others = [it for it in self.items if self.theme_of(it) == theme and it["path"] not in on_board and it["thumb"]]
-        with ui.dialog() as dialog, ui.card().classes("w-[56rem] max-w-full"):
-            ui.label(f"Swap clip for another {theme} shot").classes("text-lg font-semibold")
-            if not others:
-                ui.label(f"Every {theme} shot is in the video already. Confirm more shots as {theme} in Themes.") \
-                    .classes("text-sm text-gray-600")
-            else:
-                ui.label("Click one: it takes this clip's place and length (the cuts stay put). Hover a video to "
-                         "play it.").classes("text-sm text-gray-600")
-            with ui.element("div").classes("w-full grid grid-cols-4 gap-2 max-h-[60vh] overflow-auto"):
-                for it in others[:120]:
-                    with ui.element("div").classes("rounded p-1 cursor-pointer hover:bg-blue-50") as tile:
-                        self.preview(it, "width:100%;aspect-ratio:16/10", start=self.hover_start(it), view="swap")
-                        ui.label(("🎬 " if it["kind"] == "video" else "📷 ") + fmt_time(it["taken_at"])) \
-                            .classes("text-xs text-gray-600")
+        """Find an alternative: the app's best 4 suggestions for this clip's place (look alike, same time, same
+        theme, sharp, long enough), 4 more at a time; or only this theme. One click swaps it in."""
+        photo = self.photo_len.value if getattr(self, "photo_len", None) else 4.0
+        length = Trip.screen_length(r, photo)
+        old = r["path"]
+        found = self.trip.alternatives(old, length, theme)
+        state = {"page": 0, "only": False}
 
-                    def use(it=it) -> None:
-                        dialog.close()
-                        self.trip.replace_shot(r["path"], it["path"], self.photo_len.value)
-                        self.draft_changed("Swapped for another shot of the same length.")
+        with self.window_box, ui.dialog() as dialog, ui.card().classes("w-[64rem] max-w-full"):
+            with ui.row().classes("w-full items-center gap-3"):
+                ui.label("Find an alternative").classes("text-lg font-semibold")
+                ui.label(f"for clip {Path(r.get('part_of') or old).name} · {theme} · {length:.1f} s") \
+                    .classes("text-sm text-gray-500")
+                ui.space()
+                ui.switch(f"Only {theme}", on_change=lambda e: (state.update(only=e.value, page=0), grid.refresh())) \
+                    .props("dense")
+            ui.label("Picked for you: shots that look like it, were taken around then and aren't in the video yet. "
+                     "Hover a video to play it; click one to swap it in (same place, same length).") \
+                .classes("text-sm text-gray-600")
 
-                    tile.on("click", use)
+            def use(it: dict) -> None:
+                dialog.close()
+                self.trip.replace_shot(old, it["path"], photo)
+                self.draft_changed(f"Swapped for {Path(it['path']).name}.")
+
+            @ui.refreshable
+            def grid() -> None:
+                rows = [x for x in found if not state["only"] or self.theme_of(x) == theme]
+                if not rows:
+                    ui.label("No other shots to suggest: every one is in the video already." if not state["only"] else
+                             f"Every {theme} shot is in the video already. Switch off 'Only {theme}' for others.") \
+                        .classes("text-sm text-gray-600 py-6")
+                    return
+                pages = max(1, -(-len(rows) // 4))
+                k = state["page"] % pages
+                with ui.element("div").classes("w-full grid grid-cols-4 gap-3"):
+                    for n, it in enumerate(rows[k * 4:k * 4 + 4]):
+                        with ui.element("div").classes("rounded-lg p-1 cursor-pointer border-2 border-transparent "
+                                                       "hover:border-purple-500 hover:bg-purple-50") as tile:
+                            self.preview(it, "width:100%;aspect-ratio:16/10", start=self.hover_start(it), view="swap")
+                            ui.label(("🎬 " if it["kind"] == "video" else "📷 ") + self.theme_of(it)) \
+                                .classes("text-sm font-medium mt-1 truncate")
+                            ui.label(f"{'⭐ ' if k == 0 and n == 0 else ''}{it['why']}") \
+                                .classes("text-xs text-purple-700 truncate")
+                            ui.label(fmt_time(it["taken_at"])).classes("text-xs text-gray-500")
+                        tile.on("click", lambda it=it: use(it))
+                with ui.row().classes("w-full items-center gap-2 mt-2"):
+                    ui.label(f"Ideas {k * 4 + 1}-{min(len(rows), k * 4 + 4)} of {len(rows)}") \
+                        .classes("text-xs text-gray-500")
+                    ui.space()
+                    if k > 0:
+                        ui.button("Back", icon="chevron_left",
+                                  on_click=lambda: (state.update(page=state["page"] - 1), grid.refresh())) \
+                            .props("flat no-caps")
+                    if pages > 1:
+                        ui.button("4 more ideas" if k + 1 < pages else "Start again", icon="refresh",
+                                  on_click=lambda: (state.update(page=state["page"] + 1), grid.refresh())) \
+                            .props("outline no-caps color=purple")
+
+            grid()
             with ui.row().classes("justify-end w-full"):
                 ui.button("Cancel", on_click=dialog.close).props("flat")
         dialog.open()
