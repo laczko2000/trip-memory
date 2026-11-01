@@ -1425,11 +1425,14 @@ class Trip:
     def add_postit(self, path: str, t: float, name: str = "") -> None:
         self.set_postits(path, self.postits(path) + [{"t": t, "name": name}])
 
-    def change_postit(self, path: str, k: int, name: str | None = None, remove: bool = False) -> None:
+    def change_postit(self, path: str, k: int, name: str | None = None, remove: bool = False,
+                      to: float | None = None) -> None:
         found = self.postits(path)
         if 0 <= k < len(found):
             if remove:
                 found.pop(k)
+            elif to is not None:  # moved: a new picture for its new moment
+                found[k] = {"t": max(0.0, float(to)), "name": found[k].get("name") or ""}
             elif name is not None:
                 found[k]["name"] = name.strip()
         self.set_postits(path, found)

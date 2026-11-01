@@ -59,6 +59,8 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.33.2** Best bits window: move the mouse along the bar under the video to look through it (the picture follows; click to play from there). Grab a yellow mark on the bar and drag it to move it; under each mark, ◀ ▶ move it half a second, ⌖ moves it to where the video is now, 🗑 removes it. New **Remove from trip** button takes the video out of the trip and goes on to the next (the file stays on your Mac).
+
 - **1.33.1** Keep only the ⭐ of every set now removes the other doubles from the trip straight away (no second red button). Files stay on the Mac; See removed brings them back.
 
 - **1.33** Quality check: a new step right after Files, before Doubles. The app picks out shots not good enough for a sharp video, grouped: blurry, too dark or black, washed out, almost empty (wall, floor, covered lens), very shaky videos, accidental videos (under a second), small low-quality pictures and screenshots. They come ticked for removal, worst first; untick any you keep and press Remove. Gentle / Normal / Strict sets how picky it is. Only the trip changes: your files stay on the Mac, See removed brings any back, and the ones you keep are never suggested again. Shots you marked (post-its, locks) are never suggested.

@@ -216,6 +216,7 @@ class Page:
         self.draft_resume = 0.0
         self.draft_busy = False
         self.bb_mark = None  # the Best bits viewer's "mark this moment", while it is open
+        self.bb_move = None  # ... and its "move this mark to where the video is now"
         self.lock_views: dict[str, list[tuple]] = {}  # clip -> the places on screen that show its locked moments
         self.library_focus: dict | None = None  # one shot opened by double-click: {path, tab, name, scroll}
         self.pending_click = None  # a single click waiting to see whether it becomes a double-click
@@ -323,6 +324,7 @@ class Page:
         ui.on("tm_title_menu", self.title_menu)
         ui.on("tm_postit", self.postit_key)
         ui.on("tm_bbmark", lambda e: self.bb_mark and self.bb_mark(e))
+        ui.on("tm_bbmove", lambda e: self.bb_move and self.bb_move(e))
         ui.timer(1.0, self.auto_update_tick)  # (here, outside every redrawn part, so it keeps running)
         self.window_box = ui.element("div")  # the shot window lives here: redrawing a tab never closes it
         self.window_timers = ui.element("div")
@@ -1237,15 +1239,25 @@ class Page:
                              f"Mark at least {highlights.START_FROM} moments first (20-30 videos is best).")
                 ui.html('<button onclick="tmBB.fullscreen()" title="Full screen (Esc to leave)" style="color:#fff;'
                         'border:1px solid #fff8;border-radius:4px;padding:5px 10px;font-size:14px">⛶ Full screen</button>')
+                def remove_this() -> None:  # (out of the trip only: the file stays on the Mac)
+                    self.trip.remove([path])
+                    self.reload()
+                    ui.notify(f"Removed {Path(path).name} from the trip (See removed brings it back).", type="positive")
+                    go(k, dialog)  # (the next video moves up to this place)
+
+                ui.button("Remove from trip", icon="delete", on_click=remove_this) \
+                    .props("outline no-caps color=red-4") \
+                    .tooltip("Take this video out of the trip and go on to the next one (the file stays on your Mac)")
                 ui.button("Done", icon="check", on_click=dialog.close).props("unelevated no-caps color=primary")
             with ui.element("div").classes("w-full flex justify-center").style("flex:1 1 auto;min-height:0"):
                 ui.html(f'<video id="tm-bb-video" src="{src}" controls muted autoplay playsinline preload="auto" '
-                        f'style="width:100%;height:calc(100vh - 260px);background:#000;'
+                        f'style="width:100%;height:calc(100vh - 310px);background:#000;'
                         f'object-fit:contain;{f"rotate:{rot}deg;" if rot else ""}"></video>')
             # Your marks on the timeline (amber), the app's marks to check (orange, dashed).
             ui.html(f'<div id="tm-bb-bar" data-len="{float(it.get("duration") or 0):.3f}" style="position:relative;'
-                    'width:100%;height:22px;border-radius:4px;background:#374151;cursor:pointer" '
-                    'title="Your marks (yellow) and the app\'s marks to check (orange): click to go there"></div>') \
+                    'width:100%;height:30px;border-radius:4px;background:#374151;cursor:pointer;touch-action:none;z-index:2" '
+                    'title="Move the mouse along the bar to look through the video; click to play from there. '
+                    'Grab a yellow mark and drag it to move it. The app\'s marks to check are orange."></div>') \
                 .classes("w-full")
             with ui.row().classes("w-full items-center gap-1 justify-center no-wrap"):
                 for label, js, tip in (("−5 s", "tmBB.skip(-5)", "Back 5 seconds"),
@@ -1287,10 +1299,19 @@ class Page:
                                     .style("aspect-ratio:16/10").props("fit=cover no-spinner") \
                                     .on("click", lambda t=m["t"]: ui.run_javascript(f"tmBB.at({t:.2f})")) \
                                     .tooltip("Go there")
+                            ui.label(f"📌 {clock(m['t'])}").classes("text-xs font-semibold text-amber-300")
                             with ui.row().classes("items-center gap-0 no-wrap"):
-                                ui.label(f"📌 {clock(m['t'])}").classes("text-xs font-semibold text-amber-300")
-                                ui.button(icon="close", on_click=lambda n=n: take_off(n)) \
-                                    .props("flat dense round size=xs color=grey-4").tooltip("Take this mark off")
+                                ui.button("◀", on_click=lambda n=n, t=m["t"]: move_mark(n, t - 0.5)) \
+                                    .props("flat dense no-caps size=sm color=grey-3").tooltip("Half a second earlier")
+                                ui.button(icon="my_location", on_click=lambda n=n: ui.run_javascript(
+                                    f"(() => {{ const v = tmBB.v(); if (v) emitEvent('tm_bbmove', "
+                                    f"{{n: {n}, t: v.currentTime}}); }})()")) \
+                                    .props("flat dense round size=sm color=amber-4") \
+                                    .tooltip("Move this mark to where the video is now")
+                                ui.button("▶", on_click=lambda n=n, t=m["t"]: move_mark(n, t + 0.5)) \
+                                    .props("flat dense no-caps size=sm color=grey-3").tooltip("Half a second later")
+                                ui.button(icon="delete", on_click=lambda n=n: take_off(n)) \
+                                    .props("flat dense round size=sm color=red-4").tooltip("Remove this mark")
                     for i in ideas:
                         with ui.column().classes("gap-0 p-1 rounded border-2 border-orange-500 border-dashed "
                                                  "bg-neutral-800 items-center flex-none"):
@@ -1320,7 +1341,21 @@ class Page:
             def take_off(n: int) -> None:
                 self.trip.change_postit(path, n, remove=True)
                 counter.text = count_words()
+                ui.notify("Mark removed.", timeout=1000)
                 marks_row.refresh()
+
+            def move_mark(n: int, t: float) -> None:
+                t = max(0.0, min(float(it.get("duration") or t), t))
+                self.trip.change_postit(path, n, to=round(t, 2))
+                ui.run_javascript(f"tmBB.at({t:.2f})")
+                marks_row.refresh()
+
+            def moved(e) -> None:
+                try:
+                    move_mark(int(e.args["n"]), float(e.args["t"]))
+                except (TypeError, ValueError, KeyError):
+                    return
+                ui.notify("📌 Mark moved here.", timeout=1000, type="positive")
 
             def answer(t: float, keep: bool, quiet: bool = False) -> None:
                 (self.trip.keep_idea if keep else self.trip.drop_idea)(path, t, learn=False)
@@ -1345,6 +1380,7 @@ class Page:
 
             marks_row()
             self.bb_mark = marked
+            self.bb_move = moved
             for side, step, icon in (("left", -1, "chevron_left"), ("right", 1, "chevron_right")):
                 if 0 <= k + step < len(videos):
                     ui.button(icon=icon, on_click=lambda s=step: go(k + s, dialog)) \
@@ -8847,14 +8883,16 @@ window.tmBB = {
     }
   },
   at(t) { const v = this.v(); if (v) { v.pause(); v.currentTime = t; } },
-  mark() { const v = this.v(); if (v) emitEvent('tm_bbmark', {t: v.currentTime}); },
+  mark() { const v = this.v(); if (v) { this._marked = true; emitEvent('tm_bbmark', {t: v.currentTime}); } },
   marks(mine, ideas) { this._mine = mine; this._ideas = ideas; this.draw(); },
   draw() {
     const bar = document.getElementById('tm-bb-bar'), v = this.v();
     if (!bar) return;
     const len = (v && v.duration) || parseFloat(bar.dataset.len) || 1;
     const pin = (t, colour, dash) => `<div style="position:absolute;top:0;bottom:0;left:calc(${100 * t / len}% - 2px);` +
-      `width:4px;background:${colour};${dash ? 'opacity:.8;outline:1px dashed #fff;' : ''}"></div>`;
+      `width:4px;background:${colour};${dash ? 'opacity:.8;outline:1px dashed #fff;' : ''}">` +
+      (dash ? '' : `<div style="position:absolute;top:-5px;left:-5px;width:14px;height:14px;border-radius:50%;` +
+                   `background:${colour};border:2px solid #fff"></div>`) + '</div>';
     const now = v ? `<div style="position:absolute;top:-3px;bottom:-3px;left:${100 * v.currentTime / len}%;width:2px;background:#ef4444"></div>` : '';
     bar.innerHTML = (this._ideas || []).map(t => pin(t, '#f97316', true)).join('') +
       (this._mine || []).map(t => pin(t, '#fbbf24', false)).join('') + now;
@@ -8868,10 +8906,58 @@ window.tmBB = {
     v.addEventListener('timeupdate', () => this.draw());
     v.addEventListener('loadedmetadata', () => this.draw());
     v.addEventListener('seeked', () => this.draw());
-    if (bar) bar.addEventListener('click', e => {
-      const r = bar.getBoundingClientRect(), len = v.duration || parseFloat(bar.dataset.len) || 1;
-      v.currentTime = Math.max(0, Math.min(len, (e.clientX - r.left) / r.width * len));
-    });
+    if (bar) {
+      // Look through the video by moving along the bar (the picture follows the mouse); click, or let go after
+      // dragging, to play from there. Leaving the bar without a click
+      // or a mark goes back to where you were.
+      const at = e => { const r = bar.getBoundingClientRect(), len = v.duration || parseFloat(bar.dataset.len) || 1;
+                        return Math.max(0, Math.min(len - 0.05, (e.clientX - r.left) / r.width * len)); };
+      let back = null, down = false;
+      const look = t => { if (!v.seeking) v.currentTime = t; else v._want = t; };
+      v.addEventListener('seeked', () => { if (v._want != null) { const t = v._want; v._want = null; v.currentTime = t; } });
+      bar.addEventListener('pointerenter', () => { back = {t: v.currentTime, playing: !v.paused}; this._marked = false; v.pause(); });
+      // Grab one of your marks (yellow) and drag it along the bar to move it; the picture follows.
+      let grab = null;
+      const near = e => {
+        const r = bar.getBoundingClientRect(), len = v.duration || parseFloat(bar.dataset.len) || 1;
+        let best = null, gap = 9;
+        (this._mine || []).forEach((t, n) => {
+          const d = Math.abs(r.left + t / len * r.width - e.clientX);
+          if (d < gap) { gap = d; best = n; }
+        });
+        return best;
+      };
+      bar.addEventListener('pointermove', e => {
+        const t = at(e);
+        if (grab !== null) { this._mine[grab] = t; this.draw(); }
+        bar.style.cursor = grab !== null ? 'grabbing' : (near(e) !== null ? 'grab' : 'pointer');
+        look(t);
+      });
+      bar.addEventListener('pointerdown', e => {
+        down = true; bar.setPointerCapture(e.pointerId);
+        grab = near(e);
+        look(at(e));
+      });
+      bar.addEventListener('pointerup', e => {
+        if (!down) return;
+        down = false; back = null; v._want = null;
+        if (grab !== null) {  // a mark moved: it stays here, the video waits at its new moment
+          const n = grab, t = at(e);
+          grab = null; this._marked = true;
+          v.currentTime = t;
+          emitEvent('tm_bbmove', {n: n, t: t});
+          return;
+        }
+        v.currentTime = at(e); v.play().catch(() => {});
+      });
+      bar.addEventListener('pointerleave', () => {
+        if (down || !back) return;
+        if (this._marked) { back = null; return; }  // (marked or moved a mark: stay there)  // (marked while looking: stay at that moment)
+        v._want = null; v.currentTime = back.t;
+        if (back.playing) v.play().catch(() => {});
+        back = null;
+      });
+    }
     this.draw();
   },
 };
