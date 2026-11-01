@@ -2022,7 +2022,16 @@ class Page:
         box = f"tm-{view}-{clip_id(it['path'])}"
         thumb = data_url(it["thumb"])
         if it["kind"] != "video" or not self.media_route:
-            if thumb:
+            if thumb and it["kind"] != "video" and it.get("postits") and it["postits"] != "[]":
+                # A favourite picture (Best pictures): a gold star on it, wherever it shows.
+                with ui.element("div").style(size).classes("relative"):
+                    ui.image(thumb).props(f'fit=contain data-shot="{clip_id(it["path"])}"') \
+                        .classes("rounded bg-gray-800 w-full h-full")
+                    ui.label("★").classes("absolute top-1 right-1 rounded-full text-white text-center font-bold") \
+                        .style("background:#f59e0b;width:22px;height:22px;line-height:22px;font-size:15px;"
+                               "box-shadow:0 0 0 2px #fff,0 1px 3px rgba(0,0,0,.5);pointer-events:none") \
+                        .tooltip("A favourite: always in the video")
+            elif thumb:
                 ui.image(thumb).props(f'fit=contain data-shot="{clip_id(it["path"])}"').style(size) \
                     .classes("rounded bg-gray-800")
             return box

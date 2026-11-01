@@ -59,6 +59,8 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.34.2** Favourite pictures carry a gold ★ badge (top right) wherever they show: Choose files, Library, Themes, Storyboard and the pickers.
+
 - **1.34.1** Analyse comes after your selection: the steps are now Files, Quality, Doubles, Best bits, Best pictures, then **Analyse** (its own green card), then Themes. Only the files still in the trip are analysed, so the cleaner your selection, the faster.
 
 - **1.34** Best pictures: a new step after Best bits. Your pictures open big, one by one from the first you took. Shift (or ⭐ Favourite) marks a favourite, which is always in the video, and goes on to the next; Delete (or Remove from trip) takes a picture out of the trip (the file stays on your Mac); → or Next just goes on, ← goes back; turn left or right at the top. Your favourites show in a strip at the bottom, and Continue picks up where you stopped.
