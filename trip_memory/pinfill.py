@@ -66,6 +66,11 @@ def suggest(song: SongMap, pins: list[float], stretches: list[dict], until: floa
     pattern = learn(song, pins, stretches)
     if pattern is None:
         return []
+    return walk(song, pattern, stretches, until)
+
+
+def walk(song: SongMap, pattern: dict, stretches: list[dict], until: float | None = None) -> list[float]:
+    """Pins from pattern["until"] on (0: the whole song), choosing the beats that fit the pattern best."""
     end = min(until or song.duration, song.duration)
     beats = song.beat_times()
     period = song.period
@@ -96,3 +101,78 @@ def suggest(song: SongMap, pins: list[float], stretches: list[dict], until: floa
         result.append(round(nxt, 3))
         t = nxt
     return result
+
+
+# Your cut style across songs: what was learned from each song you pinned (at least STYLE_FROM pins) is kept in a
+# small file, so a new song can be pinned your way before you've placed a single pin on it.
+STYLE_FROM = 8
+KEEP_SONGS = 30
+
+
+def remember(file, song_key: str, song: SongMap, pins: list[float], stretches: list[dict]) -> bool:
+    """Keep what this song's pins say about your style (False: too few pins to learn from)."""
+    import json
+    from pathlib import Path
+
+    if len([p for p in pins if 0 <= p <= song.duration]) < STYLE_FROM:
+        return False
+    pattern = learn(song, pins, stretches)
+    if pattern is None:
+        return False
+    file = Path(file)
+    try:
+        saved = json.loads(file.read_text())
+    except (OSError, ValueError):
+        saved = {}
+    saved.pop(song_key, None)
+    saved[song_key] = {k: v for k, v in pattern.items() if k != "until"} | {"pins": len(pins)}
+    saved = dict(list(saved.items())[-KEEP_SONGS:])
+    file.parent.mkdir(parents=True, exist_ok=True)
+    file.write_text(json.dumps(saved))
+    return True
+
+
+def my_style(file) -> dict | None:
+    """Your way of pinning across every song you pinned (None: none yet). Songs with more pins count more."""
+    import json
+    from pathlib import Path
+
+    try:
+        saved = list(json.loads(Path(file).read_text()).values())
+    except (OSError, ValueError):
+        return None
+    if not saved:
+        return None
+    weight = np.array([max(1, s.get("pins", 1)) for s in saved], float)
+
+    def wmedian(values, w):
+        order = np.argsort(values)
+        values, w = np.asarray(values, float)[order], np.asarray(w, float)[order]
+        return float(values[np.searchsorted(np.cumsum(w), w.sum() / 2)])
+
+    moods = {m for s in saved for m in s.get("gaps", {})}
+    gaps = {}
+    for m in moods:
+        have = [(s["gaps"][m], wt) for s, wt in zip(saved, weight) if m in s.get("gaps", {})]
+        gaps[m] = wmedian([g for g, _ in have], [wt for _, wt in have])
+    beat = [s for s in saved if s.get("on_beat")]
+    bw = np.array([max(1, s.get("pins", 1)) for s in beat], float)
+    bar = (np.average([s["bar"] for s in beat], axis=0, weights=bw) if beat else np.ones(BEATS_PER_BAR))
+    return {"gaps": gaps, "gap": wmedian([s["gap"] for s in saved], weight), "until": 0.0,
+            "offset": wmedian([s["offset"] for s in beat], bw) if beat else 0.0,
+            "bar": [float(b) for b in bar / max(bar.max(), 1e-6)],
+            "hits": float(np.average([s["hits"] for s in saved], weights=weight)),
+            "changes": float(np.average([s["changes"] for s in saved], weights=weight)),
+            "on_beat": weight[[bool(s.get("on_beat")) for s in saved]].sum() >= weight.sum() / 2,
+            "songs": len(saved)}
+
+
+def suggest_my_way(song: SongMap, style: dict, stretches: list[dict], pins: list[float] | None = None,
+                   until: float | None = None) -> list[float]:
+    """Pins for a song in your style learned from other songs: after the pins you already placed (if any), else
+    from the start. A song without a steady beat is pinned by spacing only."""
+    pattern = dict(style)
+    pattern["until"] = max(pins) if pins else 0.0
+    if not song.clear_beat or len(song.beat_times()) < 8:
+        pattern["on_beat"] = False
+    return walk(song, pattern, stretches, until)

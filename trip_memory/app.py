@@ -3131,7 +3131,8 @@ class Page:
             ui.button("Delete selected pin", icon="delete", on_click=lambda: ui.run_javascript("tmTapDelete()")).props("flat")
             ui.button("Clear all", icon="clear_all", on_click=self.clear_taps).props("flat")
             ui.button("Finish my pins", icon="auto_fix_high", on_click=self.finish_pins).props("outline no-caps") \
-                .tooltip("Pin the start of the song by hand; the app suggests the rest the same way")
+                .tooltip("Pin the start of the song by hand; the app suggests the rest the same way. No pins yet? "
+                         "It pins the song in your style, learned from songs you pinned before")
             ui.button("Half the pins", icon="exposure_neg_1", on_click=self.halve_pins).props("outline no-caps") \
                 .tooltip("Take away every second pin, for longer shots. The first and last pins stay, and so do "
                          "pins where the music changes. Press again to halve again")
@@ -3391,6 +3392,8 @@ class Page:
             return
         song_taps.save(music, app_dir() / "music-taps", pins, True)
         self.saved_pins = pins
+        if len(pins) >= pinfill.STYLE_FROM:  # (your cut style, for songs you haven't pinned yet)
+            ui.timer(0.1, lambda m=music, p=pins: self.learn_cut_style(m, p), once=True)
         self.pin_summary.refresh(music, pins)
         self.music_reading.refresh(music)  # the stretches line up with the pins
 
@@ -3492,6 +3495,18 @@ class Page:
         self.pins_before_half = None
         self.half_row.refresh()  # last: this removes the button you pressed
 
+    async def learn_cut_style(self, music: str, pins: list[float]) -> None:
+        def learn() -> None:
+            song = self.song_maps.get(music) or songmap.analyse(music, app_dir() / "music-maps")
+            self.song_maps[music] = song
+            stretches = musicmood.reading(song, music, app_dir() / "music-taps")["stretches"]
+            pinfill.remember(app_dir() / "learned-pins.json", music, song, pins, stretches)
+
+        try:
+            await run.io_bound(learn)
+        except Exception:
+            traceback.print_exc()
+
     async def finish_pins(self) -> None:
         """Learn how you pinned the start of the song, and suggest pins for the rest in the same way."""
         music = self.music_path()
@@ -3499,14 +3514,28 @@ class Page:
             return
         got = await ui.run_javascript("[tmTapGet(), tm.tap.trim ? tmTrimPart()[1] : null]", timeout=5)
         pins, until = [float(p) for p in got[0] or []], got[1]
-        if len(pins) < pinfill.LEAST:
-            ui.notify(f"Pin at least {pinfill.LEAST} cuts by hand first (a minute or so of the song works best).",
-                      type="warning")
+        style = await run.io_bound(pinfill.my_style, app_dir() / "learned-pins.json") \
+            if len(pins) < pinfill.LEAST else None
+        if len(pins) < pinfill.LEAST and not style:
+            ui.notify(f"Pin at least {pinfill.LEAST} cuts by hand first (a minute or so of the song works best). "
+                      "Once you've pinned a whole song, the app knows your style and can pin new songs for you.",
+                      type="warning", multi_line=True)
             return
         song = self.song_maps.get(music)
         if song is None:
             song = self.song_maps[music] = await run.io_bound(songmap.analyse, music, app_dir() / "music-maps")
         stretches = musicmood.reading(song, music, app_dir() / "music-taps")["stretches"]
+        if style:  # (not enough pins here: your style from the songs you pinned before)
+            suggested = await run.io_bound(pinfill.suggest_my_way, song, style, stretches, pins, until)
+            if suggested:
+                ui.run_javascript(f"tmTapSuggest({json.dumps(suggested)})")
+                self.suggesting = True
+                self.finish_row.refresh()
+                ui.notify(f"{len(suggested)} pins suggested in orange, in your style (learned from "
+                          f"{style['songs']} song{'s' if style['songs'] != 1 else ''} you pinned). Play it to listen; "
+                          "drag or delete any you don't like, then Keep these pins.", type="positive", multi_line=True,
+                          timeout=9000)
+                return
         suggested = await run.io_bound(pinfill.suggest, song, pins, stretches, until)
         if not suggested:
             ui.notify("Your pins already reach the end of the song.", type="info")
