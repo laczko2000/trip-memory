@@ -59,6 +59,8 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.30.3** Themes › Second check: each shot now has Move (to the theme the check suggests) on the left, Change in the middle (opens a list of all your themes, pick any other one) and Keep on the right.
+
 - **1.30.2** Swapping or adding a picture in a collage (or a video side by side) now offers the ones taken nearest in time first, just before and after the picture you swap, each marked "4 min before" or "2 min after".
 
 - **1.30.1** Fixed: after the editor, pages could stop scrolling on every tab (the editor turns scrolling off while it's open, and it could stay off). Scrolling now always comes back when the editor isn't open, and if the editor can't open it closes and says why instead of leaving the page frozen.

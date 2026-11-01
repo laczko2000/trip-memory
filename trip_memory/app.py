@@ -4827,6 +4827,7 @@ class Page:
                         .classes("text-sm font-medium text-teal-900 flex-1")
             if check and check.get("shots"):
                 items = {it["path"]: it for it in self.items}
+                activities = self.trip.activities()
                 with ui.element("div").classes("w-full grid gap-2").style(
                         "grid-template-columns:repeat(auto-fill,minmax(190px,1fr))"):
                     for shot in check["shots"][:60]:
@@ -4841,12 +4842,26 @@ class Page:
                             ui.label(f"{shot['now']} → {shot['better']}").classes("text-sm font-semibold")
                             ui.label(("You set " + shot["now"] + "; it " if shot["yours"] else "It ") + shot["why"] + ".") \
                                 .classes("text-xs text-gray-600")
-                            with ui.row().classes("gap-1"):
-                                ui.button(f"Move it", icon="east",
+                            with ui.row().classes("w-full gap-1 no-wrap items-center"):
+                                ui.button("Move", icon="east",
                                           on_click=lambda p=shot["path"]: self.answer_theme_check(p, True)) \
-                                    .props("dense unelevated no-caps size=sm color=teal")
-                                ui.button("Keep mine", on_click=lambda p=shot["path"]: self.answer_theme_check(p, False)) \
-                                    .props("dense outline no-caps size=sm color=grey-8")
+                                    .props("dense unelevated no-caps size=sm color=teal") \
+                                    .tooltip(f"Move it to {shot['better']}")
+                                ui.space()
+                                with ui.button("Change", icon="swap_vert").props(
+                                        "dense outline no-caps size=sm color=indigo") \
+                                        .tooltip("Another theme: pick it from the list"):
+                                    with ui.menu().props("auto-close"):
+                                        for a in activities:
+                                            if a["name"] in (shot["now"], shot["better"]):
+                                                continue
+                                            ui.menu_item(f"{a['emoji']} {a['name']}",
+                                                         on_click=lambda p=shot["path"], n=a["name"]:
+                                                         self.answer_theme_check(p, True, n))
+                                ui.space()
+                                ui.button("Keep", on_click=lambda p=shot["path"]: self.answer_theme_check(p, False)) \
+                                    .props("dense outline no-caps size=sm color=grey-8") \
+                                    .tooltip(f"It stays in {shot['now']}")
                 if len(check["shots"]) > 60:
                     ui.label(f"…and {len(check['shots']) - 60} more after these.").classes("text-xs text-gray-600")
 
@@ -4862,8 +4877,10 @@ class Page:
                   if check.get("agree") is not None else "Analyse the pictures first.", type="positive")
         self.themes_view.refresh()
 
-    def answer_theme_check(self, path: str, move: bool) -> None:
-        self.trip.answer_theme_check(path, move)
+    def answer_theme_check(self, path: str, move: bool, to: str | None = None) -> None:
+        self.trip.answer_theme_check(path, move, to)
+        if to:
+            ui.notify(f"Moved to {to}.", type="positive")
         self.reload()
         self.themes_view.refresh()
 

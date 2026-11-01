@@ -1856,8 +1856,9 @@ class Trip:
     def last_theme_check(self) -> dict | None:
         return self._meta_json("theme_check", None)
 
-    def answer_theme_check(self, path: str, move: bool) -> None:
-        """Move it (to the theme the check suggests: confirmed) or keep mine (confirmed as it is, not asked again)."""
+    def answer_theme_check(self, path: str, move: bool, to: str | None = None) -> None:
+        """Move it (to the theme the check suggests, or to `to`, another theme you chose: confirmed) or keep it
+        (confirmed as it is, not asked again)."""
         check = self.last_theme_check() or {"shots": []}
         shot = next((x for x in check["shots"] if x["path"] == path), None)
         if not shot:
@@ -1870,7 +1871,7 @@ class Trip:
             self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('theme_check_keep', ?)",
                          (json.dumps(sorted({*keep, path})),))
         self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('theme_check', ?)", (json.dumps(check),))
-        self.set_theme([path], shot["better"] if move else shot["now"])
+        self.set_theme([path], (to or shot["better"]) if move else shot["now"])
 
     def set_theme(self, paths: list[str], activity: str | None) -> None:
         """Confirm these shots' activity (activity None: the one suggested now), then suggest the rest again."""
