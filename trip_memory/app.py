@@ -559,8 +559,8 @@ class Page:
 
     GUIDE = [
         ("Files", "Choose files", None,
-         "Open your trip folder. The app looks at everything once (faces, places, look-alikes). Untick what you "
-         "don't want in the video."),
+         "Open your trip folder. The app makes previews and finds look-alikes; the deeper look (faces, scenes, "
+         "themes) comes later, once you have sorted out what to keep."),
         ("Quality", "Choose files", "tm-step-quality",
          "Blurry, dark, washed-out, empty, shaky or accidental shots are ticked for removal: untick what you keep, "
          "then remove the rest. Your files stay on the Mac."),
@@ -572,6 +572,9 @@ class Page:
         ("Best pictures", "Choose files", "tm-step-bestpics",
          "Look through your pictures one by one: Shift marks a favourite (always in the video), Delete takes a bad one "
          "out, → goes on."),
+        ("Analyse", "Choose files", "tm-step-analyse",
+         "Your selection is done: analyse what's left (faces, places, scenes, themes). Only the files still in the "
+         "trip are analysed."),
         ("Themes", "Themes", None,
          "Confirm what each shot is: tick the right ones, ⇄ moves a wrong one. Run the Second check."),
         ("Music", "Music & audio", None, "Choose the song, trim it, and put pins where you want the cuts."),
@@ -1798,11 +1801,17 @@ class Page:
         self.camera_clocks_card()
         self.postit_card()
         self.best_pictures_card()
-        with ui.row().classes("w-full items-center gap-3"):
-            ui.label("Analyse:" if getattr(self, "guided", False) else "Step 2:").classes("text-lg font-semibold")
-            ui.button(
-                f"Analyse the {chosen} chosen files", icon="auto_awesome", on_click=self.analyse_chosen
-            ).props("" if chosen else "disable")
+        # After the clean-up and your picks: only what is left gets analysed (the fewer, the faster).
+        with ui.card().classes("w-full mt-2 bg-green-50").props('id="tm-step-analyse"'):
+            with ui.row().classes("w-full items-center gap-3"):
+                ui.label("🔍 Analyse what's left").classes("text-lg font-semibold")
+                ui.space()
+                ui.button(f"Analyse the {chosen} chosen files", icon="auto_awesome", on_click=self.analyse_chosen) \
+                    .props("unelevated color=green-8 no-caps" + ("" if chosen else " disable"))
+            ui.label("Do this once Quality, Doubles, Best bits and Best pictures are done: the app then works out "
+                     "faces, places, scenes and themes for the files still in the trip only, so the fewer you keep, "
+                     "the faster it goes. You can analyse again any time after changing your selection.") \
+                .classes("text-sm text-gray-700")
         ui.label(
             "Files are grouped into stories (same time and place). Similar shots sit together in a box, and the ⭐ one "
             "is the app's suggestion. Hover over a video to play it."
