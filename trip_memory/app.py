@@ -8640,7 +8640,8 @@ function tmClipDrop(e, el, n) {
 }
 // Dragging a clip or a theme near the top or bottom of the window scrolls the page, faster the closer you get.
 let tmDragY = null, tmDragTimer = null;
-document.addEventListener('dragover', (e) => { tmDragY = e.clientY; });
+let tmDragX = null;
+document.addEventListener('dragover', (e) => { tmDragY = e.clientY; tmDragX = e.clientX; });
 // Where you were on the page when you double-clicked a shot (the big window stops the page scrolling, so it is
 // read here, before the window opens): closing the window brings you back to it.
 document.addEventListener('dblclick', (e) => {
@@ -8664,9 +8665,18 @@ document.addEventListener('dragstart', () => {
     const edge = 120, h = window.innerHeight;
     if (tmDragY < edge) window.scrollBy(0, -Math.ceil(30 * (edge - tmDragY) / edge));
     else if (tmDragY > h - edge) window.scrollBy(0, Math.ceil(30 * (tmDragY - (h - edge)) / edge));
+    // The editor's clip strip: near its left or right end it scrolls sideways (towards the start or the end).
+    const sc = document.getElementById('tm-tl-scroll');
+    if (sc && tmDragX !== null && sc.offsetParent !== null) {
+      const r = sc.getBoundingClientRect(), side = Math.min(140, r.width / 4);
+      if (tmDragY > r.top - 80 && tmDragY < r.bottom + 80) {
+        if (tmDragX < r.left + side) sc.scrollLeft -= Math.ceil(28 * Math.min(1, (r.left + side - tmDragX) / side));
+        else if (tmDragX > r.right - side) sc.scrollLeft += Math.ceil(28 * Math.min(1, (tmDragX - (r.right - side)) / side));
+      }
+    }
   }, 16);
 });
-const tmDragDone = () => { clearInterval(tmDragTimer); tmDragTimer = null; tmDragY = null; };
+const tmDragDone = () => { clearInterval(tmDragTimer); tmDragTimer = null; tmDragY = null; tmDragX = null; };
 document.addEventListener('dragend', tmDragDone);
 document.addEventListener('drop', tmDragDone);
 // After you cut a clip: its pictures everywhere on the page play only the kept part and show its new length.
