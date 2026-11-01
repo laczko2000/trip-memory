@@ -6646,7 +6646,7 @@ class Page:
                                     f'{fmt_length(k * step)}</span>' for k in range(int(total // step) + 1))
                     ui.html(f'<div style="position:relative;height:22px;cursor:ew-resize;background:#0f172a;'
                             f'border-radius:4px;touch-action:none" onpointerdown="tmScrubStart(event)">{marks}</div>',
-                            sanitize=False).classes("w-full").tooltip("Press and drag: the video follows")
+                            sanitize=False).classes("w-full").tooltip("Press and drag: the video follows. Double-click: back to the start")
                     # (only its knob on the ruler takes the mouse: clicks on the clips under the line reach them)
                     ui.html('<div id="tm-playhead" style="position:absolute;top:0;bottom:0;left:0;width:14px;'
                             'margin-left:-6px;z-index:6;pointer-events:none"><div style="position:absolute;left:6px;'
@@ -8224,6 +8224,18 @@ function tmClipClick(e, el) {
 document.addEventListener('click', (e) => {  // (on every clip box of the editor's timeline)
   const el = e.target.closest && e.target.closest('.tm-editor [id^=tm-ed-][data-start]');
   if (el) tmClipClick(e, el);
+}, true);
+// A double-click on the timeline (the ruler, the red line or the empty space, not on a clip): back to the start.
+document.addEventListener('dblclick', (e) => {
+  if (!e.target.closest || !e.target.closest('.tm-editor #tm-timeline')) return;
+  if (e.target.closest('[id^=tm-ed-][data-start]')) return;  // (a clip: its own window opens)
+  const v = document.getElementById('tm-draft'), head = document.getElementById('tm-playhead');
+  if (v) { v.pause(); window.tmDraftT = 0; tmSeekSoft(v, 0); }
+  if (head) head.style.left = '0%';
+  const clock = document.getElementById('tm-edclock');
+  if (clock && v) clock.textContent = `${tmClock2(0)} / ${tmClock2(v.duration || 0)}`;
+  const sc = document.getElementById('tm-tl-scroll');
+  if (sc) sc.scrollTo({left: 0, behavior: 'smooth'});
 }, true);
 function tmSeekRuler(e, el, total) {
   const v = document.getElementById('tm-draft'), r = el.getBoundingClientRect();
