@@ -80,6 +80,8 @@ def beat_of(samples: np.ndarray, duration: float) -> Beat:
     half = int(round(lag / 2))
     if 60 / (half * step) <= MAX_BPM and ac[half - 1 : half + 2].max() >= 0.15:
         lag = _refine(ac, half - 1 + int(np.argmax(ac[half - 1 : half + 2])))
+    if not np.isfinite(lag) or lag < 2:  # (a song with no steady pulse at all: an even grid)
+        return steady
     period = lag * step
     # Phase: where to put the beat grid so it sits on the most onsets.
     phases = np.arange(int(lag))

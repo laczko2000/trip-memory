@@ -30,3 +30,13 @@ def test_finds_tempo_and_first_beat():
 
 def test_noise_has_no_clear_beat():
     assert not beat_of(0.1 * np.random.default_rng(1).standard_normal(RATE * 30).astype(np.float32), 30).clear
+
+
+def test_a_song_without_a_steady_pulse_gets_an_even_grid():
+    import numpy as np
+    from trip_memory.beats import RATE, beat_of
+
+    rng = np.random.default_rng(1)
+    hum = (np.sin(np.arange(RATE * 20) * 2 * np.pi * 220 / RATE) * 0.3 + rng.normal(0, 1e-4, RATE * 20)).astype(np.float32)
+    beat = beat_of(hum, 20.0)  # (a steady tone: nothing to find, but no crash)
+    assert beat.period > 0

@@ -59,6 +59,8 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.28.1** Fixed: a song with no steady beat at all could stop the app reading it; it now gets an even grid of beats.
+
 - **1.28** The app learns your cut style: every song you pin (8 pins or more) teaches it how you pin (how far apart in calm and lively music, where in the bar, on the big hits, where the music changes). On a new song with no pins, Finish my pins now pins the whole song your way, in orange: listen, change what you like, Keep these pins.
 
 - **1.27** Style packages (Make video): one click sets the whole video's style. 🎬 Calm & cinematic, ⚡ Neon energy, 🏄 Fast action, 📔 Travel journal. Each picks the transitions for every cut (soft ones on calm music, lively ones on lively music, clean cuts on the beat), the colour look, the opening and ending cards and title style, and place names that come on screen as each new place starts. New title animations: slow reveal, typed letter by letter, neon flicker (left to right or right to left). New effects for the lively ones: a flash on the music's biggest hits, a colour swing into the cuts, a short glitch. Under the packages you can turn each part off or change it; 'No package' stops the extras.
