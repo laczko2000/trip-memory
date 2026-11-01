@@ -36,6 +36,7 @@ from . import themes
 from . import moments
 from . import highlights
 from . import timeshift
+from . import quality
 from . import sharephone
 from . import taps as song_taps
 from . import longer as song_longer
@@ -556,6 +557,9 @@ class Page:
         ("Files", "Choose files", None,
          "Open your trip folder. The app looks at everything once (faces, places, look-alikes). Untick what you "
          "don't want in the video."),
+        ("Quality", "Choose files", "tm-step-quality",
+         "Blurry, dark, washed-out, empty, shaky or accidental shots are ticked for removal: untick what you keep, "
+         "then remove the rest. Your files stay on the Mac."),
         ("Doubles", "Choose files", "tm-step-doubles",
          "Look-alike shots are grouped: keep the best of each (⭐ is the app's pick), leave the rest out."),
         ("Best bits", "Choose files", "tm-step-bestbits",
@@ -690,6 +694,112 @@ class Page:
             and (f["show"] != "sets" or sets.get(it["similar_set"] or -1, 0) > 1)
             and (f["show"] != "ticked" or it["chosen"]) and (f["show"] != "unticked" or not it["chosen"])
         ]
+
+    def quality_card(self) -> None:
+        """Before the doubles: shots not good enough for a sharp video (blurry, too dark, washed out, almost empty,
+        very shaky, accidental, tiny, screenshots), grouped, worst first, already ticked for removal. Untick what
+        you want to keep; one button removes the ticked ones from the trip (files stay on the Mac) and remembers
+        the ones you kept, so they are never suggested again."""
+        if not self.trip:
+            return
+        found = self.trip.quality_suggestions()
+        if not hasattr(self, "q_keep"):
+            self.q_keep: set[str] = set()  # (unticked here: you keep them)
+        self.q_keep &= {r["path"] for r in found}
+        self.q_more = getattr(self, "q_more", set())
+        level = self.trip.quality_level()
+        with ui.card().classes("w-full bg-rose-50").props('id="tm-step-quality"'):
+            with ui.row().classes("w-full items-center gap-2"):
+                ui.label("Quality check").classes("text-lg font-semibold")
+                ui.space()
+                ui.label("How picky:").classes("text-sm font-medium")
+                for key, name in quality.LEVELS.items():
+                    ui.button(name, on_click=lambda k=key: self.set_quality_level(k)).props(
+                        "dense no-caps size=sm " + ("unelevated color=red-8" if key == level else "outline color=red-8"))
+            if not found:
+                measured = any(it.get("looks_ok") for it in self.all_items)
+                ui.label("✓ Every picture and video passed the quality check." if measured or not self.all_items else
+                         "The quality check runs while the app looks at your files.").classes("text-sm text-gray-700")
+                return
+            ui.label(f"{len(found)} shots don't look good enough for a sharp video. They are ticked for removal: "
+                     "untick any you want to keep, then remove the ticked ones. They leave the trip only, your files "
+                     "on the Mac are not touched (See removed brings them back), and the ones you keep are never "
+                     "suggested again. Hover a video to play it; double-click a shot to see it big.") \
+                .classes("text-sm text-gray-700")
+            groups: dict[str, list[dict]] = {}
+            for r in found:
+                groups.setdefault(r["reason"], []).append(r)
+            self.q_count = None
+
+            def count_text() -> str:
+                n = sum(1 for r in found if r["path"] not in self.q_keep)
+                return f"Remove the {n} ticked from the trip" if n else "Nothing ticked: keep them all"
+
+            def toggle(r: dict, tile) -> None:
+                if r["path"] in self.q_keep:
+                    self.q_keep.discard(r["path"])
+                    tile.classes(remove="opacity-50", add="ring-2 ring-red-500")
+                else:
+                    self.q_keep.add(r["path"])
+                    tile.classes(remove="ring-2 ring-red-500", add="opacity-50")
+                mark = tile.default_slot.children[-1]
+                mark.text = "✕ remove" if r["path"] not in self.q_keep else "keep"
+                mark.classes(replace="absolute top-1 left-1 text-xs font-semibold rounded px-1 text-white "
+                             + ("bg-red-600" if r["path"] not in self.q_keep else "bg-green-600"))
+                button.text = count_text()
+
+            def set_group(rows: list[dict], keep: bool) -> None:
+                paths = {r["path"] for r in rows}
+                self.q_keep = (self.q_keep | paths) if keep else (self.q_keep - paths)
+                self.refresh_all()
+
+            for reason, rows in groups.items():
+                name, why = quality.REASONS[reason]
+                with ui.row().classes("w-full items-center gap-2 mt-3"):
+                    ui.label(f"{name} ({len(rows)})").classes("font-semibold")
+                    ui.label(why).classes("text-xs text-gray-600")
+                    ui.space()
+                    ui.button("Tick all", on_click=lambda rows=rows: set_group(rows, False)).props("flat dense no-caps size=sm")
+                    ui.button("Keep all", on_click=lambda rows=rows: set_group(rows, True)).props("flat dense no-caps size=sm")
+                shown = rows if reason in self.q_more else rows[:24]
+                with ui.element("div").classes("w-full grid gap-2").style(
+                        "grid-template-columns:repeat(auto-fill,minmax(9rem,1fr))"):
+                    for r in shown:
+                        out = r["path"] not in self.q_keep
+                        tile = ui.element("div").classes("relative rounded cursor-pointer select-none "
+                                                         + ("ring-2 ring-red-500" if out else "opacity-50"))
+                        with tile:
+                            self.preview(r, "width:100%;aspect-ratio:4/3", start=0, view="quality")
+                            ui.label("✕ remove" if out else "keep").classes(
+                                "absolute top-1 left-1 text-xs font-semibold rounded px-1 text-white "
+                                + ("bg-red-600" if out else "bg-green-600"))
+                        tile.tooltip(f"{Path(r['path']).name} · {name.lower()}")
+                        self.click_or_double(tile, lambda r=r, tile=tile: toggle(r, tile),
+                                             lambda p=r["path"]: self.shot_window(p, "Choose files"))
+                if len(rows) > len(shown):
+                    ui.button(f"Show all {len(rows)}", on_click=lambda reason=reason: (
+                        self.q_more.add(reason), self.refresh_all())).props("flat dense no-caps")
+            with ui.row().classes("items-center gap-2 mt-3"):
+                button = ui.button(count_text(), icon="delete_sweep",
+                                   on_click=lambda: self.remove_low_quality(found)).props("color=negative no-caps")
+
+    def set_quality_level(self, level: str) -> None:
+        self.trip.set_quality_level(level)
+        self.q_keep = set()
+        self.refresh_all()
+
+    def remove_low_quality(self, found: list[dict]) -> None:
+        """Remove the ticked ones from the trip, and remember the unticked ones as kept."""
+        out = [r["path"] for r in found if r["path"] not in self.q_keep]
+        kept = [r["path"] for r in found if r["path"] in self.q_keep]
+        if kept:
+            self.trip.keep_quality(kept)
+        if out:
+            self.trip.remove(out)
+        self.q_keep = set()
+        ui.notify((f"Removed {len(out)} from the trip (See removed brings them back)" if out else "Kept them all")
+                  + (f"; {len(kept)} kept, never suggested again." if kept else "."), type="positive")
+        self.refresh_all()
 
     def sort_out_card(self) -> None:
         """The first pass over a big folder: throw out doubles and anything you don't want, before the slow steps."""
@@ -1459,6 +1569,7 @@ class Page:
             self.choose_filters["day"] = ALL
         shown = self.choose_shown()
         chosen = len(self.items)
+        self.quality_card()
         self.sort_out_card()
         self.camera_clocks_card()
         self.postit_card()

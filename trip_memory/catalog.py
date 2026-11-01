@@ -30,7 +30,7 @@ from PIL import Image, ImageOps
 
 from .faces import FaceFinder, group_faces
 from .media import MediaItem, scan_folder
-from . import autoedit, director, highlights, transitions, moments, motion, musicmood, stories, themes, timeshift, titles
+from . import autoedit, director, highlights, transitions, moments, motion, musicmood, quality, stories, themes, timeshift, titles
 from .scenes import SceneTagger, mean_vector
 from .tags import TAG_GROUP, Tagger, group_name, look_alike_groups, people_tag, story_subject
 from .tools import ffmpeg_paths, probe
@@ -295,7 +295,7 @@ class Trip:
             "plan_role TEXT", "plan_pos REAL", "title_text TEXT", "title_sub TEXT", "title_style TEXT", "title_where TEXT",
             "focus_x REAL", "keep_start REAL", "keep_end REAL", "part_of TEXT",
             "theme TEXT", "theme_auto TEXT", "theme_sure REAL", "locks TEXT", "camera TEXT", "taken_orig TEXT", "postits TEXT",
-            "shot_of TEXT", "crop TEXT", "reverse INTEGER DEFAULT 0", "transition_len REAL",
+            "shot_of TEXT", "crop TEXT", "reverse INTEGER DEFAULT 0", "transition_len REAL", "looks_ok TEXT",
         ):
             try:  # catalogues made by older versions lack these columns
                 self.db.execute(f"ALTER TABLE items ADD COLUMN {column}")
@@ -1442,6 +1442,43 @@ class Trip:
 
     def _set_meta_json(self, key: str, value) -> None:
         self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, json.dumps(value)))
+
+    # ---------- the quality check ----------
+
+    def quality_level(self) -> str:
+        level = self._meta_json("quality_level", "normal")
+        return level if level in quality.LEVELS else "normal"
+
+    def set_quality_level(self, level: str) -> None:
+        self._set_meta_json("quality_level", level if level in quality.LEVELS else "normal")
+
+    def quality_kept(self) -> set[str]:
+        """Shots you looked at in the quality check and kept: never suggested again."""
+        return set(self._meta_json("quality_kept", []))
+
+    def keep_quality(self, paths: list[str]) -> None:
+        self._set_meta_json("quality_kept", sorted(self.quality_kept() | set(paths)))
+
+    def quality_suggestions(self) -> list[dict]:
+        """The shots in the trip not good enough for a sharp video, worst first in each group: rows with
+        "reason" and "bad". Never one you kept, marked (post-its, locks) or made yourself (a shot from a video)."""
+        rows = [dict(r) for r in self.query(
+            "SELECT * FROM items WHERE removed = 0 AND part_of IS NULL AND shot_of IS NULL AND looks_ok IS NOT NULL")]
+        kept = self.quality_kept()
+        for r in rows:
+            r["quality"] = json.loads(r["looks_ok"])  # (what quality.flags reads)
+        found = quality.flags(rows, self.quality_level())
+        out = []
+        for r in rows:
+            if r["path"] not in found or r["path"] in kept:
+                continue
+            if (r.get("postits") and r["postits"] != "[]") or (r.get("locks") and r["locks"] != "[]"):
+                continue
+            r["reason"], r["bad"] = found[r["path"]]
+            out.append(r)
+        order = list(quality.REASONS)
+        out.sort(key=lambda r: (order.index(r["reason"]), -r["bad"], r.get("taken_at") or ""))
+        return out
 
     def edit_stage(self) -> str:
         """"rough": you arrange the clips freely (each as long as you made it), nothing snaps to the music yet.
@@ -2741,6 +2778,18 @@ class Trip:
             names = ", ".join(Path(d).name for d in damaged[:5]) + (f" and {len(damaged) - 5} more" if len(damaged) > 5 else "")
             p.notes.append(f"Left out {len(damaged)} damaged file{'s' if len(damaged) > 1 else ''} the app can't read "
                            f"({names}). Your files are not touched; See removed lists them.")
+
+        todo = self.query("SELECT path, kind, thumb FROM items WHERE thumb IS NOT NULL AND looks_ok IS NULL AND removed = 0")
+        for i, row in enumerate(todo):
+            if i % 25 == 0:
+                p.fraction = i / len(todo)
+                p.message = f"Checking picture quality: {i + 1} of {len(todo)}"
+                notify()
+            try:
+                q = quality.measure(row["thumb"], row["path"], row["kind"])
+            except Exception:  # noqa: BLE001 - (no measure: never suggested for removal)
+                continue
+            self.execute("UPDATE items SET looks_ok = ? WHERE path = ?", (json.dumps(q), row["path"]))
 
         p.message = "Grouping into stories and spotting similar shots…"
         notify()

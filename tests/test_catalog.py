@@ -1241,3 +1241,19 @@ def test_damaged_files_leave_the_trip_by_themselves(tmp_path, monkeypatch):
     assert [Path(i["path"]).name for i in trip.items(removed=True)] == ["b.jpg"]  # (See removed brings it back)
     assert "damaged" in trip.progress.notes[0] and "b.jpg" in trip.progress.notes[0]
     assert (trip_dir / "b.jpg").exists()  # your file stays
+
+
+def test_quality_check_suggests_and_remembers_what_you_keep(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    monkeypatch.setattr(catalog, "FaceFinder", FakeFaces)
+    monkeypatch.setattr(catalog, "SceneTagger", FakeScenes)
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    _gps_photo(trip_dir / "a.jpg", "2025:07:03 10:00:00", 38.7223, -9.1393, "red")  # one plain colour: empty
+    trip = catalog.Trip(trip_dir)
+    trip.analyse()
+    found = trip.quality_suggestions()
+    assert [Path(r["path"]).name for r in found] == ["a.jpg"] and found[0]["reason"]
+    trip.keep_quality([found[0]["path"]])
+    assert trip.quality_suggestions() == []  # kept: never suggested again
