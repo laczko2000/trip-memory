@@ -59,6 +59,8 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.33.3** Best bits window: turn the video left or right (the two arrows at the top); it stays at the same second, and the turned video fills the space.
+
 - **1.33.2** Best bits window: move the mouse along the bar under the video to look through it (the picture follows; click to play from there). Grab a yellow mark on the bar and drag it to move it; under each mark, ◀ ▶ move it half a second, ⌖ moves it to where the video is now, 🗑 removes it. New **Remove from trip** button takes the video out of the trip and goes on to the next (the file stays on your Mac).
 
 - **1.33.1** Keep only the ⭐ of every set now removes the other doubles from the trip straight away (no second red button). Files stay on the Mac; See removed brings them back.

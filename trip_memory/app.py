@@ -1245,14 +1245,32 @@ class Page:
                     ui.notify(f"Removed {Path(path).name} from the trip (See removed brings it back).", type="positive")
                     go(k, dialog)  # (the next video moves up to this place)
 
+                async def turn(degrees: int) -> None:
+                    try:
+                        at = await ui.run_javascript("tmBB.v() ? tmBB.v().currentTime : 0", timeout=2)
+                    except Exception:  # noqa: BLE001
+                        at = 0
+                    await run.io_bound(self.trip.rotate, path, degrees)
+                    self.reload()
+                    self.bb_resume = (path, float(at or 0))
+                    go(k, dialog)
+
+                ui.button(icon="rotate_left", on_click=lambda: turn(-90)).props("flat round dense color=grey-3") \
+                    .tooltip("Turn this video anti-clockwise")
+                ui.button(icon="rotate_right", on_click=lambda: turn(90)).props("flat round dense color=grey-3") \
+                    .tooltip("Turn this video clockwise")
                 ui.button("Remove from trip", icon="delete", on_click=remove_this) \
                     .props("outline no-caps color=red-4") \
                     .tooltip("Take this video out of the trip and go on to the next one (the file stays on your Mac)")
                 ui.button("Done", icon="check", on_click=dialog.close).props("unelevated no-caps color=primary")
-            with ui.element("div").classes("w-full flex justify-center").style("flex:1 1 auto;min-height:0"):
+            # (turned sideways: the player's width and height swap, so the turned picture fills the space)
+            size = ("width:calc(100vh - 310px);height:calc(100vw - 40px)" if rot in (90, 270)
+                    else "width:100%;height:calc(100vh - 310px)")
+            with ui.element("div").classes("w-full").style(
+                    "position:relative;height:calc(100vh - 310px);overflow:hidden;flex:none"):
                 ui.html(f'<video id="tm-bb-video" src="{src}" controls muted autoplay playsinline preload="auto" '
-                        f'style="width:100%;height:calc(100vh - 310px);background:#000;'
-                        f'object-fit:contain;{f"rotate:{rot}deg;" if rot else ""}"></video>')
+                        f'style="position:absolute;left:50%;top:50%;{size};background:#000;object-fit:contain;'
+                        f'transform:translate(-50%,-50%) rotate({rot}deg)"></video>')
             # Your marks on the timeline (amber), the app's marks to check (orange, dashed).
             ui.html(f'<div id="tm-bb-bar" data-len="{float(it.get("duration") or 0):.3f}" style="position:relative;'
                     'width:100%;height:30px;border-radius:4px;background:#374151;cursor:pointer;touch-action:none;z-index:2" '
@@ -1381,6 +1399,12 @@ class Page:
             marks_row()
             self.bb_mark = marked
             self.bb_move = moved
+            resume = getattr(self, "bb_resume", None)
+            if resume and resume[0] == path:  # (turned: back to the same second)
+                self.bb_resume = None
+                ui.run_javascript(f"(() => {{ const v = tmBB.v(); if (!v) return; const go = () => {{ "
+                                  f"v.currentTime = {resume[1]:.2f}; }}; if (v.readyState >= 1) go(); "
+                                  f"else v.addEventListener('loadedmetadata', go, {{once: true}}); }})()")
             for side, step, icon in (("left", -1, "chevron_left"), ("right", 1, "chevron_right")):
                 if 0 <= k + step < len(videos):
                     ui.button(icon=icon, on_click=lambda s=step: go(k + s, dialog)) \
