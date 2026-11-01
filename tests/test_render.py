@@ -173,7 +173,15 @@ def test_quick_transitions_join_to_full_length(tmp_path):
     lengths = [_segment_length(s) for s in segments]
     settings = RenderSettings(width=96, height=54)
     made = _join_once(segments, lengths, styles, settings, tmp_path / "out.mp4", lambda _f: None)
-    assert abs(made - _planned_length(lengths, styles, settings)) < 0.1
+    assert abs(made - _planned_length(lengths, styles, settings)) < 0.1  # (joined in parts of a few clips: long)
+    from trip_memory import render as r
+
+    old, r.JOIN_PART = r.JOIN_PART, 1000  # all at once, as before: the same length to the frame
+    try:
+        whole = _join_once(segments, lengths, styles, settings, tmp_path / "whole.mp4", lambda _f: None)
+    finally:
+        r.JOIN_PART = old
+    assert abs(whole - made) < 1 / 30 + 1e-6
 
 
 def test_zooms_punch_ins_and_speed_ramps_keep_the_length(tmp_path):

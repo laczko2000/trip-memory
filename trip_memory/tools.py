@@ -76,5 +76,8 @@ def run_ffmpeg(args: list[str], total_seconds: float = 0, on_progress: Callable[
         if key == "out_time_us" and on_progress and total_seconds > 0 and value.isdigit():
             on_progress(min(1.0, int(value) / 1e6 / total_seconds))
     err = proc.stderr.read()
-    if proc.wait() != 0:
-        raise FFmpegError(err.strip()[-2000:] or "ffmpeg failed")
+    code = proc.wait()
+    if code != 0:
+        raise FFmpegError(err.strip()[-2000:] or (
+            "ffmpeg was stopped (most likely the computer ran short of memory)" if code < 0 else
+            f"ffmpeg failed (code {code})"))

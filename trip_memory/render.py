@@ -1126,33 +1126,40 @@ def _join_once(
     progress: Callable[[float], None],
 ) -> float:
     n = len(segments)
+    # Everything is counted in whole frames, so every transition starts and ends exactly on a frame.
+    frames = [max(1, round(length * FPS)) for length in lengths]
+    t_frames = [max(1, round(min(sec, lengths[k] * OVERLAP_SHARE, lengths[k + 1] * OVERLAP_SHARE) * FPS))
+                if style else 1 for k, (style, sec) in enumerate(styles[:n - 1])]  # (cut k: after clip k)
+    cuts: list[float] = []  # (the middle of each cut, in the joined video)
+    at = frames[0]
+    for k in range(1, n):
+        cuts.append((at - t_frames[k - 1] / 2) / FPS)
+        at += frames[k] - t_frames[k - 1]
+    # A long video is joined in parts first (a few clips each), then the parts: joining a hundred clips at once
+    # needs more memory than a laptop has (FFmpeg stopped without a word).
+    tmp = None
+    if n > JOIN_PART:
+        tmp = Path(tempfile.mkdtemp(prefix="trip-memory-join-"))
+        groups = [list(range(a, min(n, a + JOIN_PART))) for a in range(0, n, JOIN_PART)]
+        pieces, piece_frames = [], []
+        for g, idx in enumerate(groups):
+            piece = tmp / f"part{g}.mkv"
+            _join_plain([segments[k] for k in idx], [frames[k] for k in idx], [styles[k] for k in idx[:-1]],
+                        [t_frames[k] for k in idx[:-1]], s, piece,
+                        lambda f, g=g: progress(0.5 * (g + f) / len(groups)))
+            pieces.append(piece)
+            piece_frames.append(sum(frames[k] for k in idx) - sum(t_frames[k] for k in idx[:-1]))
+        joins = [(styles[idx[-1]], t_frames[idx[-1]]) for idx in groups[:-1]]
+        segments, frames, n = pieces, piece_frames, len(pieces)
+        outer = progress
+        progress = lambda f: outer(0.5 + 0.5 * f)  # noqa: E731
+    else:
+        joins = [(styles[k], t_frames[k]) for k in range(n - 1)]
     inputs: list[str] = []
     for seg in segments:
         inputs += ["-i", str(seg)]
-
     parts: list[str] = []
-    # Every clip starts at time 0 with the same clock and frame rate. (Clips from the Mac's video chip can
-    # start a little after 0, which made joining stop after the first clip.)
-    for k in range(n):
-        parts.append(f"[{k}:v]settb=AVTB,setpts=PTS-STARTPTS,fps={FPS},format=yuv420p[sv{k}]")
-        parts.append(f"[{k}:a]asetpts=PTS-STARTPTS,aresample=48000[sa{k}]")
-    # Every cut overlaps the clips by the transition's length; a hard cut is a one-frame fade. (Joining
-    # all cuts the same way keeps their timing predictable, e.g. for cutting on the music's beat.)
-    # Everything is counted in whole frames, so every transition starts and ends exactly on a frame.
-    frames = [max(1, round(length * FPS)) for length in lengths]
-    v_prev, a_prev, total_frames = "sv0", "sa0", frames[0]
-    cuts: list[float] = []  # (the middle of each cut, in the joined video)
-    for k in range(1, n):
-        style, seconds = styles[k - 1]
-        # A transition is never longer than ~40% of either clip.
-        t_frames = max(1, round(min(seconds, lengths[k - 1] * OVERLAP_SHARE, lengths[k] * OVERLAP_SHARE) * FPS)) if style else 1
-        offset_frames = total_frames - t_frames
-        t, offset = t_frames / FPS, offset_frames / FPS
-        parts.append(f"[{v_prev}][sv{k}]xfade={xfade_args(style or 'fade')}:duration={t:.6f}:offset={offset:.6f}[v{k}]")
-        parts.append(f"[{a_prev}][sa{k}]acrossfade=d={t:.6f}[a{k}]")
-        cuts.append(offset + t / 2)
-        v_prev, a_prev = f"v{k}", f"a{k}"
-        total_frames = offset_frames + frames[k]
+    v_prev, a_prev, total_frames = _xfade_chain(n, frames, joins, parts)
     total = total_frames / FPS
     fx = package_fx(s.fx or {}, cuts, total)
     if fx:
@@ -1271,4 +1278,47 @@ def _join_once(
     )
     for png in pngs:
         png.unlink(missing_ok=True)
+    if tmp is not None:
+        shutil.rmtree(tmp, ignore_errors=True)
     return _segment_length(out)
+
+
+JOIN_PART = 12  # clips joined together at a time in a long video (see _join_once)
+
+
+def _xfade_chain(n: int, frames: list[int], joins: list[tuple[tuple[str | None, float], int]],
+                 parts: list[str]) -> tuple[str, str, int]:
+    """The filters that put inputs 0..n-1 one after the other, each cut overlapping the clips by its transition
+    (a hard cut is a one-frame fade, so all cuts are timed the same way). Returns (video, audio, frames)."""
+    # Every clip starts at time 0 with the same clock and frame rate. (Clips from the Mac's video chip can
+    # start a little after 0, which made joining stop after the first clip.)
+    for k in range(n):
+        parts.append(f"[{k}:v]settb=AVTB,setpts=PTS-STARTPTS,fps={FPS},format=yuv420p[sv{k}]")
+        parts.append(f"[{k}:a]asetpts=PTS-STARTPTS,aresample=48000[sa{k}]")
+    v_prev, a_prev, total_frames = "sv0", "sa0", frames[0]
+    for k in range(1, n):
+        (style, _), t_frames = joins[k - 1]
+        offset_frames = total_frames - t_frames
+        t, offset = t_frames / FPS, offset_frames / FPS
+        parts.append(f"[{v_prev}][sv{k}]xfade={xfade_args(style or 'fade')}:duration={t:.6f}:offset={offset:.6f}[v{k}]")
+        parts.append(f"[{a_prev}][sa{k}]acrossfade=d={t:.6f}[a{k}]")
+        v_prev, a_prev = f"v{k}", f"a{k}"
+        total_frames = offset_frames + frames[k]
+    return v_prev, a_prev, total_frames
+
+
+def _join_plain(segments: list[Path], frames: list[int], styles: list[tuple[str | None, float]],
+                t_frames: list[int], s: RenderSettings, out: Path, progress: Callable[[float], None]) -> None:
+    """A few clips joined with their transitions, nothing else (a part of a long video, see _join_once). Kept in
+    high quality with plain sound, so joining the parts loses nothing and stays in time."""
+    inputs: list[str] = []
+    for seg in segments:
+        inputs += ["-i", str(seg)]
+    parts: list[str] = []
+    v, a, total_frames = _xfade_chain(len(segments), frames, list(zip(styles, t_frames)), parts)
+    parts.append(f"[{v}]format=yuv420p[pv]")
+    parts.append(f"[{a}]anull[pa]")
+    _run_encode(
+        lambda codec: [*inputs, "-filter_complex", ";".join(parts), "-map", "[pv]", "-map", "[pa]",
+                       *codec, "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", str(out)],
+        s.width, s.height, final=False, total_seconds=total_frames / FPS, on_progress=progress)
