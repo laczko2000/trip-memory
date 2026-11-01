@@ -1167,3 +1167,32 @@ def test_alternatives_suggest_shots_not_in_the_video(tmp_path, monkeypatch):
     found = trip.alternatives(str(trip_dir / "0.jpg"), 3.0)
     assert [Path(r["path"]).name for r in found] == ["2.jpg"]
     assert found[0]["why"]
+
+
+def test_a_moved_trip_keeps_its_work(tmp_path, monkeypatch):
+    import shutil
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "Japán"
+    trip_dir.mkdir()
+    for n, colour in enumerate(("red", "red", "blue")):
+        _gps_photo(trip_dir / f"{n}.jpg", f"2025:07:03 10:0{n}:00", 38.7223, -9.1393, colour)
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    trip.set_tile_frame(str(trip_dir / "1.jpg"), 0.2, 0.3, 0.5)
+    trip.set_chosen([str(trip_dir / "2.jpg")], False)
+    trip.db.close()
+    assert [t["name"] for t in catalog.known_trips()] == ["Japán"]
+    moved = tmp_path / "Trips" / "Japan 2025"
+    moved.parent.mkdir()
+    shutil.move(str(trip_dir), str(moved))
+    found = catalog.find_moved_trip(moved)
+    assert found and found["folder"] == str(trip_dir.resolve()) and not found["found"]
+    catalog.move_trip(found["folder"], moved)
+    again = catalog.Trip(moved)
+    paths = {i["path"]: i for i in again.items()}
+    assert set(paths) == {str(moved.resolve() / f"{n}.jpg") for n in range(3)}
+    assert not paths[str(moved.resolve() / "2.jpg")]["chosen"]
+    assert str(moved.resolve() / "1.jpg") in again.tile_frames()
+    assert all(Path(i["thumb"]).exists() for i in again.items() if i["thumb"])
+    assert catalog.find_moved_trip(moved) is None

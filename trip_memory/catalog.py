@@ -159,6 +159,113 @@ class Progress:
     turn: int = 0  # counts single AI requests, so a late answer to a stopped one is never used
 
 
+def trip_key(folder: str | Path) -> str:
+    return hashlib.sha1(str(Path(folder).expanduser().resolve()).encode()).hexdigest()[:12]
+
+
+def _trip_folder_of(work: Path) -> str | None:
+    """The folder a trip's work (app_dir/trips/<key>) belongs to: noted when it was opened, else read from its files."""
+    note = work / "folder.txt"
+    try:
+        return note.read_text().strip() or None
+    except OSError:
+        pass
+    try:
+        db = sqlite3.connect(f"file:{work / 'catalog.db'}?mode=ro", uri=True)
+        try:
+            row = db.execute("SELECT path FROM items WHERE part_of IS NULL ORDER BY path LIMIT 1").fetchone()
+        finally:
+            db.close()
+    except sqlite3.Error:
+        return None
+    return str(Path(row[0]).parent) if row else None
+
+
+def known_trips() -> list[dict]:
+    """Every trip you worked on, last opened first: {"folder", "name", "found" (the folder is still there), "files",
+    "opened" (time), "work" (its folder in app_dir)}."""
+    out = []
+    for work in (app_dir() / "trips").glob("*/catalog.db"):
+        work = work.parent
+        folder = _trip_folder_of(work)
+        if not folder:
+            continue
+        try:
+            db = sqlite3.connect(f"file:{work / 'catalog.db'}?mode=ro", uri=True)
+            try:
+                files = db.execute("SELECT COUNT(*) FROM items WHERE removed = 0 AND part_of IS NULL").fetchone()[0]
+            finally:
+                db.close()
+        except sqlite3.Error:
+            files = 0
+        if not files:
+            continue
+        opened = (work / "folder.txt").stat().st_mtime if (work / "folder.txt").exists() else (work / "catalog.db").stat().st_mtime
+        out.append({"folder": folder, "name": Path(folder).name, "found": Path(folder).is_dir(), "files": files,
+                    "opened": opened, "work": str(work)})
+    return sorted(out, key=lambda t: -t["opened"])
+
+
+def find_moved_trip(folder: str | Path) -> dict | None:
+    """Opening a folder the app hasn't seen: is it a trip you worked on before that was moved or renamed (its old
+    folder is gone and most of its file names are here)? That trip (see known_trips), else None."""
+    folder = Path(folder).expanduser().resolve()
+    if (app_dir() / "trips" / trip_key(folder) / "catalog.db").exists():
+        return None
+    try:
+        here = {f.name for f in folder.rglob("*") if f.is_file()}
+    except OSError:
+        return None
+    if not here:
+        return None
+    best, best_share = None, 0.0
+    for t in known_trips():
+        if t["found"]:
+            continue
+        try:
+            db = sqlite3.connect(f"file:{Path(t['work']) / 'catalog.db'}?mode=ro", uri=True)
+            try:
+                names = {Path(r[0]).name for r in db.execute("SELECT path FROM items WHERE part_of IS NULL")}
+            finally:
+                db.close()
+        except sqlite3.Error:
+            continue
+        share = len(names & here) / max(1, len(names))
+        if share > best_share:
+            best, best_share = t, share
+    return best if best is not None and best_share >= 0.6 else None
+
+
+def move_trip(old_folder: str | Path, new_folder: str | Path) -> None:
+    """A trip folder was moved or renamed: its work (choices, themes, story, cuts, locks ...) follows it. Every path
+    under the old folder, and under the old work folder, now points to the new ones."""
+    old_folder, new_folder = str(old_folder).rstrip("/"), str(Path(new_folder).expanduser().resolve())
+    old_work = app_dir() / "trips" / trip_key(old_folder)
+    if not (old_work / "catalog.db").exists():
+        old_work = next((Path(t["work"]) for t in known_trips() if t["folder"] == old_folder), old_work)
+    new_work = app_dir() / "trips" / trip_key(new_folder)
+    if new_work.exists():  # (opened once already as a new trip: kept aside, not deleted)
+        new_work.rename(new_work.with_name(f"{new_work.name}-before-{int(time.time())}"))
+    old_work.rename(new_work)
+    db = sqlite3.connect(new_work / "catalog.db")
+    try:
+        pairs = [(old_folder + "/", new_folder + "/"), (str(old_work) + "/", str(new_work) + "/")]
+        # (inside saved settings the names can be written the JSON way: "Japán" as "Jap\u00e1n")
+        pairs += [(json.dumps(a)[1:-1], json.dumps(b)[1:-1]) for a, b in pairs if json.dumps(a)[1:-1] != a]
+        tables = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
+        for table in tables:
+            cols = [c[1] for c in db.execute(f"PRAGMA table_info({table})") if (c[2] or "").upper() in ("TEXT", "")]
+            for col in cols:
+                for old, new in pairs:
+                    db.execute(f"UPDATE {table} SET {col} = REPLACE({col}, ?, ?) WHERE typeof({col}) = 'text' "
+                               f"AND instr({col}, ?) > 0", (old, new, old))
+                    db.execute(f"UPDATE {table} SET {col} = ? WHERE {col} = ?", (new.rstrip("/"), old.rstrip("/")))
+        db.commit()
+    finally:
+        db.close()
+    (new_work / "folder.txt").write_text(new_folder)
+
+
 class Trip:
     """One trip folder and its catalogue."""
 
@@ -167,6 +274,10 @@ class Trip:
         key = hashlib.sha1(str(self.folder).encode()).hexdigest()[:12]
         self.dir = app_dir() / "trips" / key
         (self.dir / "thumbs").mkdir(parents=True, exist_ok=True)
+        try:  # (for Recent trips, and to know where it was if the folder moves)
+            (self.dir / "folder.txt").write_text(str(self.folder))
+        except OSError:
+            pass
         (self.dir / "faces").mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self.db = sqlite3.connect(self.dir / "catalog.db", check_same_thread=False)

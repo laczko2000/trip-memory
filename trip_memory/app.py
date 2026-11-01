@@ -19,7 +19,7 @@ from urllib.parse import quote
 import numpy as np
 from nicegui import app, background_tasks, run, ui
 
-from .catalog import Trip, app_dir, kept_part
+from .catalog import Trip, app_dir, find_moved_trip, kept_part, known_trips, move_trip
 from .media import MediaItem
 from . import transitions
 from . import themefinder
@@ -388,12 +388,45 @@ class Page:
             self.progress_label = ui.label(
                 "Choose a trip folder, then pick the files you want. The app finds places, scenes and people in them."
             ).classes("text-gray-600")
+            self.recent_trips()
             self.notes_label = ui.label("").classes("text-orange-600 text-sm whitespace-pre-line")
             self.progress_bar.set_visibility(False)
             # Any AI step can be stopped; what it finished so far is kept.
             self.ai_stop = ui.button("Stop the AI (keep what it has done)", icon="stop_circle", on_click=self.stop_ai) \
                 .props("outline color=negative dense no-caps")
             self.ai_stop.set_visibility(False)
+
+    @ui.refreshable
+    def recent_trips(self) -> None:
+        """Your other trips, last opened first: one click opens one. A trip whose folder was moved or renamed shows
+        as such: open the folder where it is now and its work comes along."""
+        now = str(self.trip.folder) if self.trip else None
+        trips = [t for t in known_trips() if t["folder"] != now][:6]
+        if not trips:
+            return
+        with ui.row().classes("w-full items-center gap-1"):
+            ui.label("Recent trips:").classes("text-xs text-gray-500")
+            for t in trips:
+                if t["found"]:
+                    ui.button(f"{t['name']} · {t['files']}", icon="folder",
+                              on_click=lambda f=t["folder"]: self.open_recent(f)) \
+                        .props("flat dense no-caps size=sm color=primary").tooltip(t["folder"])
+                else:
+                    ui.button(f"{t['name']} (moved?)", icon="help_outline",
+                              on_click=lambda t=t: self.find_moved(t)) \
+                        .props("flat dense no-caps size=sm color=grey-7") \
+                        .tooltip(f"Its folder {t['folder']} is gone. Open the folder where it is now: your work comes along.")
+
+    async def open_recent(self, folder: str) -> None:
+        self.folder_input.value = folder
+        await self.open_trip()
+
+    async def find_moved(self, t: dict) -> None:
+        if sys.platform == "darwin":
+            ui.notify(f"Where is “{t['name']}” now? Choose its folder.", timeout=4000)
+            await self.browse_folder()
+        else:
+            ui.notify(f"Type or paste the folder where “{t['name']}” is now, then Open folder.", timeout=6000)
 
     async def browse_folder(self) -> None:
         path = await run.io_bound(choose_with_finder, "folder")
@@ -410,9 +443,27 @@ class Page:
         if self.trip and self.trip.progress.running:
             ui.notify("Still working, please wait.", type="warning")
             return
+        moved = await run.io_bound(find_moved_trip, folder)
+        if moved:  # a trip you worked on, moved or renamed: carry the work over?
+            with ui.dialog() as ask, ui.card().classes("w-[36rem]"):
+                ui.label(f"Is this your trip “{moved['name']}”?").classes("text-lg font-semibold")
+                ui.label(f"It used to be at {moved['folder']}, which is gone, and most of its {moved['files']} files "
+                         "are in this folder. Carry your work over (choices, themes, story, cuts, music)?") \
+                    .classes("text-sm text-gray-700")
+                with ui.row().classes("w-full justify-end gap-2"):
+                    ui.button("No, start fresh", on_click=lambda: ask.submit(False)).props("flat no-caps")
+                    ui.button("Yes, carry my work over", icon="drive_file_move",
+                              on_click=lambda: ask.submit(True)).props("unelevated no-caps")
+            if await ask:
+                try:
+                    await run.io_bound(move_trip, moved["folder"], folder)
+                    ui.notify(f"Your work on “{moved['name']}” is here now.", type="positive")
+                except OSError as exc:
+                    ui.notify(f"Couldn't carry the work over: {exc}", type="negative")
         self.trip = Trip(folder)
         self.media_route = serve_trip_folder(self.trip)
         save_settings(folder=str(self.trip.folder))
+        self.recent_trips.refresh()
         self.filters = {k: ALL for k in self.filters}
         self.choose_filters = {k: ALL for k in self.choose_filters}
         song = self.trip.song()

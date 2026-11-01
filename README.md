@@ -59,6 +59,8 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.25** Recent trips: under the folder box, your other trips (last opened first), one click opens one. Moved or renamed a trip folder? Open it where it is now: the app recognises it and asks to carry all your work over (choices, themes, story, cuts, music). A trip whose folder is gone shows as '(moved?)'.
+
 - **1.24** Collage window (photos and videos side by side): − now makes a picture smaller than its place (down to 40%), with a soft blurred copy of it around; drag it anywhere in its place. 'Swap it for another' lists the best 8 at a time (no scrolling); for videos it also offers other moments of upright videos already in the video, never the same video twice. Also fixed: a picture now always fills its whole place in the window.
 
 - **1.23** Upright videos side by side: never the same video twice next to itself. The partner is another upright video, from the same part of the story first, else the nearest in time from anywhere in the trip; with no other upright video it plays alone.
