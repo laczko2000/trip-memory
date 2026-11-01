@@ -39,7 +39,7 @@ AUDIO = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
 ProgressFn = Callable[[float, str], None]
 
 # Bump when the way clips are prepared changes, so old remembered clips are not reused.
-SEGMENT_VERSION = 7
+SEGMENT_VERSION = 8
 OVERLAP_SHARE = 0.5  # a transition takes at most half of either clip around it
 TITLE_SECONDS = 3.0
 FONTS = [
@@ -443,10 +443,7 @@ def _photo_segment(item: MediaItem, s: RenderSettings, out: Path, workdir: Path)
     return seconds
 
 
-POP = 0.18  # seconds a collage tile takes to pop into place
-RESHUFFLE_AFTER = 1.2  # a long collage changes its view this long after its last photo popped in ...
-RESHUFFLE_EVERY = 1.8  # ... and again every this many seconds (the photos move round one place)
-RESHUFFLE_FADE = 0.3  # seconds the change of view takes
+POP = 0.18  # seconds the photos of a collage take to pop into place (all together)
 COLLAGE_GAP_SHARE = 0.008  # the thin dark line between tiles, as a share of the video's width
 
 
@@ -571,76 +568,105 @@ def _title_input(title: dict, w: int, h: int, length: float, out: Path) -> tuple
             f"fps={FPS},fade=t=out:st={end - fade_out:.3f}:d={fade_out:.3f}:alpha=1")
 
 
+COLLAGE_DRIFT = 0.07  # how far each photo of a collage gently zooms (7%) while it's on screen
+COLLAGE_MOVES = ["in", "out", "left", "right", "in-up", "out-down"]
+
+
+def _ease(p: float) -> float:
+    p = min(1.0, max(0.0, p))
+    return p * p * (3 - 2 * p) * 0.35 + p * 0.65
+
+
+def drift(frame: dict | None, move: str, p: float) -> dict:
+    """How a collage photo is framed at moment p (0 = start, 1 = end) of its gentle move: your framing (x, y, z),
+    zoomed a little in or out and drifting a little sideways or up/down around it."""
+    f = dict(frame or {})
+    z = frame_zoom(f)
+    e = _ease(p)
+    grow = 1 + COLLAGE_DRIFT * (e if move.startswith("in") or move in ("left", "right") else 1 - e)
+    x, y = float(f.get("x", 0.5)), float(f.get("y", 0.5))
+    if move == "left":
+        x += 0.3 * (0.5 - e)
+    elif move == "right":
+        x -= 0.3 * (0.5 - e)
+    elif move == "in-up":
+        y += 0.3 * (0.5 - e)
+    elif move == "out-down":
+        y -= 0.3 * (0.5 - e)
+    return {"x": min(1.0, max(0.0, x)), "y": min(1.0, max(0.0, y)), "z": z * grow}
+
+
+def _warp(pic: np.ndarray, tw: int, th: int, frame: dict) -> np.ndarray:
+    """The picture as framed (z >= 1) in a tw x th place, with sub-pixel positions (it glides, never shakes)."""
+    ih, iw = pic.shape[:2]
+    left, top, right, bottom = frame_crop(iw, ih, tw, th, {**frame, "z": max(1.0, frame["z"])})
+    m = np.float32([[(right - left) / tw, 0, left], [0, (bottom - top) / th, top]])
+    return cv2.warpAffine(pic, m, (tw, th), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, borderMode=cv2.BORDER_REFLECT)
+
+
+def collage_tile(pic: np.ndarray, back: np.ndarray | None, tw: int, th: int, frame: dict | None, move: str,
+                 p: float) -> np.ndarray:
+    """One place of a collage at moment p of its move: filled as you framed it, or (zoomed out) the smaller
+    picture on its blurred copy (back), the picture itself still moving gently inside its box."""
+    f = drift(frame, move, p)
+    if frame_zoom(frame) >= 1.0:
+        return _warp(pic, tw, th, f)
+    left, top, w, h = frame_box(tw, th, frame)
+    out = back.copy()
+    out[top:top + h, left:left + w] = _warp(pic, w, h, {"x": 0.5, "y": 0.5, "z": f["z"] / frame_zoom(frame)})
+    return out
+
+
 def _collage_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
-    """Several photos on screen together, popping in one after another (on the beats where they'd have been cut)."""
+    """Several photos on screen together: they all come on at once, then each one moves gently on its own
+    (zooming a little in or out, drifting a little), around the way you framed it."""
     fx = item.effects or {}
     paths = [item.path, *map(Path, fx["collage"])][:4]
     turns = [item.rotation, *(fx.get("turns") or [0] * len(fx["collage"]))]
-    appear = list(fx.get("appear") or [0.0] * len(paths))
     seconds = item.seconds or s.photo_seconds
     w, h = s.width, s.height
-    tiles, pictures = [], []
     places = collage_tiles(len(paths), w, h, fx.get("layout") or "")
     framed = list(fx.get("frames") or [])
     framed += [None] * (len(paths) - len(framed))
-    for path, turn, frame, (x, y, tw, th) in zip(paths, turns, framed, places):
+    pictures, backs, moves = [], [], []
+    used: set[str] = set()
+    for k, (path, turn, frame, (x, y, tw, th)) in enumerate(zip(paths, turns, framed, places)):
         with Image.open(path) as img:
             img = ImageOps.exif_transpose(img).convert("RGB").rotate(-turn, expand=True)
-            img.thumbnail((2400, 2400))
-            pictures.append(img.copy())
-            tiles.append((x, y, fit_frame(img, tw, th, frame)))
+        # Just big enough for the closest it gets (sharp, and quick to move every frame).
+        need = max(tw / img.width, th / img.height) * max(1.0, frame_zoom(frame)) * (1 + COLLAGE_DRIFT) * 1.15
+        if need < 1:
+            img = img.resize((max(2, round(img.width * need)), max(2, round(img.height * need))), Image.LANCZOS)
+        pictures.append(np.asarray(img))
+        backs.append(fit_frame(img, tw, th, frame) if frame_zoom(frame) < 1.0 else None)
+        move = COLLAGE_MOVES[int(hashlib.sha1(str(path).encode()).hexdigest(), 16) % len(COLLAGE_MOVES)]
+        while move in used and len(used) < len(COLLAGE_MOVES):  # (neighbours move differently)
+            move = COLLAGE_MOVES[(COLLAGE_MOVES.index(move) + 1) % len(COLLAGE_MOVES)]
+        used.add(move)
+        moves.append(move)
     frames = max(1, round(seconds * FPS))
-    # A long collage changes its view now and then: the same photos move round one place (fresh on screen
-    # without new photos). Each view is a whole picture; the change is a quick cross-fade.
-    first = (max(appear) if appear else 0.0) + POP + RESHUFFLE_AFTER
-    changes = [first + k * RESHUFFLE_EVERY for k in range(20)
-               if first + k * RESHUFFLE_EVERY < seconds - RESHUFFLE_EVERY * 0.6] if len(paths) > 1 else []
-    views: list[np.ndarray] = []
-
-    def view(turn: int) -> np.ndarray:
-        while len(views) <= turn % len(paths):
-            r = len(views)
-            frame = np.full((h, w, 3), 12, np.uint8)
-            for i, pic in enumerate(pictures):
-                x, y, tw, th = places[(i + r) % len(paths)]
-                frame[y:y + th, x:x + tw] = fit_frame(pic, tw, th, framed[i])
-            views.append(frame)
-        return views[turn % len(paths)]
     layer = np.asarray(titles.draw(item.overlay, w, h)) if item.overlay and (
         item.overlay.get("text") or item.overlay.get("sub")) else None
 
     def feed(pipe) -> None:
         for n in range(frames):
             t = n / FPS
-            done = sum(1 for c in changes if t >= c)
-            if done:
-                since = t - changes[done - 1]
-                frame = view(done)
-                if since < RESHUFFLE_FADE:
-                    k = since / RESHUFFLE_FADE
-                    frame = (view(done - 1) * (1 - k) + frame * k).astype(np.uint8)
-                if layer is not None:
-                    frame = _with_title(frame, item.overlay, layer, t, seconds)
-                pipe.write(np.ascontiguousarray(frame).tobytes())
-                continue
+            p = t / max(seconds, 1e-6)
+            grow = 1 - (1 - min(1.0, t / POP)) ** 3  # all pop in together, quick at first, settling
             frame = np.full((h, w, 3), 12, np.uint8)
-            for (x, y, tile), start in zip(tiles, appear):
-                if t < start:
-                    continue
-                grow = min(1.0, (t - start) / POP)
-                grow = 1 - (1 - grow) ** 3  # quick at first, settling into place
+            for pic, back, f, move, (x, y, tw, th) in zip(pictures, backs, framed, moves, places):
+                tile = collage_tile(pic, back, tw, th, f, move, p)
                 if grow >= 1.0:
-                    frame[y:y + tile.shape[0], x:x + tile.shape[1]] = tile
+                    frame[y:y + th, x:x + tw] = tile
                     continue
                 scale = 0.82 + 0.18 * grow
-                th, tw = tile.shape[:2]
                 small = cv2.resize(tile, (max(1, round(tw * scale)), max(1, round(th * scale))))
                 oy, ox = y + (th - small.shape[0]) // 2, x + (tw - small.shape[1]) // 2
                 region = frame[oy:oy + small.shape[0], ox:ox + small.shape[1]]
                 frame[oy:oy + small.shape[0], ox:ox + small.shape[1]] = (region * (1 - grow) + small * grow).astype(np.uint8)
             if layer is not None:
                 frame = _with_title(frame, item.overlay, layer, t, seconds)
-            pipe.write(frame.tobytes())
+            pipe.write(np.ascontiguousarray(frame).tobytes())
 
     inputs = [
         "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}", "-r", str(FPS), "-i", "pipe:0",

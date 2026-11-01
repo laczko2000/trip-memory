@@ -606,6 +606,18 @@ class Trip:
             self.db.commit()
         return new
 
+    def replace_first(self, old: str, new: str) -> str:
+        """Swap the collage's (or side by side's) first picture for another one that isn't on this cut: the cut
+        keeps its place, length and the others; the old first picture leaves the video. Returns the new path."""
+        key, members = self.together(old)
+        if not key or new == old or new in members:
+            return old
+        self.checkpoint("swapping the first picture of a collage")
+        out = self.replace_lead(old, new, key, members)
+        self.execute("UPDATE items SET included = 1, chosen = 1, cut_out = 0 WHERE path = ?", (new,))
+        self.execute("UPDATE items SET cut_out = 1, position = NULL WHERE path = ?", (old,))
+        return out
+
     def split_collage(self, path: str) -> None:
         """Show a collage's photos one after another again, each for the time it popped in for."""
         row = self.query("SELECT effects, position, seconds FROM items WHERE path = ?", (path,))
@@ -1142,8 +1154,9 @@ class Trip:
             used.update(fx.get("collage") or [])
             used.update(fx.get("side") or [])
         used.add(me.get("part_of") or old)
+        shown = self.in_video_family([old])  # (and never a double, crop or Live Photo twin of a shot in it)
         cands = [dict(r) for r in self.query("SELECT * FROM items WHERE removed = 0 AND part_of IS NULL")
-                 if r["path"] not in used and r["thumb"]]
+                 if r["path"] not in used and r["thumb"] and not (self.family(dict(r)) & shown)]
         if not cands:
             return []
 
@@ -2198,6 +2211,35 @@ class Trip:
                     out.add(r["path"])
                     break
             seen.append((start, end, r))  # a repeat of a repeat is a repeat too
+        return out
+
+    @staticmethod
+    def family(r: dict) -> set[tuple]:
+        """What makes two files the same picture: the file itself, the shot it was cut from (a crop or a part),
+        its look-alike set (doubles and triples) and its name in its folder (a Live Photo's photo and video)."""
+        p = Path(r.get("path") or "")
+        keys: set[tuple] = {("p", str(p)), ("n", str(p.parent), p.stem.lower())}
+        for k in ("shot_of", "part_of"):
+            if r.get(k):
+                keys.add(("p", r[k]))
+        if r.get("similar_set") is not None:
+            keys.add(("s", r["similar_set"]))
+        return keys
+
+    def in_video_family(self, extra: list[str] = ()) -> set[tuple]:
+        """The family keys (see family) of everything on the storyboard, its collages and side videos, and extra."""
+        rows = {r["path"]: dict(r) for r in self.query("SELECT * FROM items")}
+        paths: set[str] = set(extra)
+        for r in self.storyboard():
+            paths.add(r["path"])
+            if r.get("part_of"):
+                paths.add(r["part_of"])
+            fx = json.loads(r["effects"]) if r.get("effects") else {}
+            paths.update(fx.get("collage") or [])
+            paths.update(fx.get("side") or [])
+        out: set[tuple] = set()
+        for p in paths:
+            out |= self.family(rows.get(p) or {"path": p})
         return out
 
     @staticmethod

@@ -297,7 +297,7 @@ def test_a_phone_video_fills_the_upright_frame_around_the_people(tmp_path):
         assert middle[..., 0].mean() > 150 and middle[..., 2].mean() < 80, item.kind  # the red band is in view
 
 
-def test_a_collage_pops_its_photos_in_one_after_another(tmp_path):
+def test_a_collage_shows_all_its_photos_at_once_and_they_move(tmp_path):
     from trip_memory.render import collage_tiles
 
     trip = tmp_path / "trip"
@@ -312,10 +312,27 @@ def test_a_collage_pops_its_photos_in_one_after_another(tmp_path):
     assert abs(float(probe(str(out))["format"]["duration"]) - 2.0) < 0.1
     tiles = collage_tiles(4, 640, 360)
     centre = lambda t, k: _frame(out, t)[tiles[k][1] + tiles[k][3] // 2, tiles[k][0] + tiles[k][2] // 2].astype(int)  # noqa: E731
-    assert centre(0.8, 1)[1] > 150  # the second photo (green) is in by 0.8 s
-    assert centre(0.8, 3).max() < 60  # the fourth is not yet
-    yellow = centre(1.75, 3)  # ... and is by the end (as the video fades out)
+    assert centre(0.4, 1)[1] > 150  # the second photo (green) is in at once ...
+    yellow = centre(0.4, 3)  # ... and so is the fourth (no waiting for the "appear" times)
     assert yellow[0] > yellow[2] + 40 and yellow[1] > yellow[2] + 40
+
+
+def test_collage_photos_drift_gently_around_your_framing():
+    import numpy as np
+
+    from trip_memory.render import COLLAGE_DRIFT, collage_tile, drift
+
+    start, end = drift({"x": 0.2, "y": 0.5, "z": 2.0}, "in", 0.0), drift({"x": 0.2, "y": 0.5, "z": 2.0}, "in", 1.0)
+    assert start["z"] == 2.0 and abs(end["z"] - 2.0 * (1 + COLLAGE_DRIFT)) < 1e-6 and start["x"] == 0.2
+    assert drift(None, "out", 0.0)["z"] > drift(None, "out", 1.0)["z"] == 1.0
+    assert drift(None, "left", 0.0)["x"] > drift(None, "left", 1.0)["x"]
+    pic = np.zeros((200, 300, 3), np.uint8)
+    pic[:, :150] = 255  # white left half, black right half
+    a, b = collage_tile(pic, None, 120, 80, None, "left", 0.0), collage_tile(pic, None, 120, 80, None, "left", 1.0)
+    assert a.shape == (80, 120, 3) and abs(a.mean() - b.mean()) > 3  # it moved
+    back = np.full((80, 120, 3), 7, np.uint8)
+    small = collage_tile(pic, back, 120, 80, {"x": 0.5, "y": 0.5, "z": 0.5}, "in", 0.5)
+    assert (small[0, 0] == 7).all() and small.shape == (80, 120, 3)  # zoomed out: on its blurred copy
 
 
 def test_timeline_titles_show_at_their_time_and_follow_their_shot(tmp_path):

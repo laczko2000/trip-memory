@@ -534,6 +534,31 @@ def test_a_collage_shows_as_one_shot_and_can_be_split(tmp_path, monkeypatch):
     assert [r["seconds"] for r in board[:3]] == [0.5, 0.5, 0.5]
 
 
+def test_the_first_picture_of_a_collage_can_be_swapped_and_doubles_are_never_offered(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    folder = tmp_path / "trip"
+    folder.mkdir()
+    for n in range(5):
+        _gps_photo(folder / f"{n}.jpg", f"2025:07:03 10:0{n}:00", 38.7, -9.1, "red")
+    trip = catalog.Trip(folder)
+    trip.prepare()
+    p = [str(folder / f"{n}.jpg") for n in range(5)]
+    trip.execute("UPDATE items SET position = 0, seconds = 3, effects = ? WHERE path = ?",
+                 (json.dumps({"collage": p[1:3]}), p[0]))
+    trip.execute("UPDATE items SET similar_set = 9 WHERE path IN (?, ?)", (p[1], p[3]))  # 3 is a double of 1
+    trip.execute("UPDATE items SET position = 5 WHERE path = ?", (p[4],))
+    shown = trip.in_video_family()
+    assert catalog.Trip.family(dict(trip.query("SELECT * FROM items WHERE path = ?", (p[3],))[0])) & shown
+    assert catalog.Trip.family({"path": str(folder / "4.HEIC")}) & shown  # a Live Photo twin of one in the video
+    assert all(r["path"] != p[3] for r in trip.alternatives(p[4], 3.0))
+    lead = trip.replace_first(p[0], p[4])
+    assert lead == p[4] and trip.together(lead) == ("collage", p[1:3])
+    assert p[0] not in [r["path"] for r in trip.storyboard()]
+
+
 def test_a_clip_you_cut_only_ever_uses_the_part_you_kept(tmp_path, monkeypatch):
     from trip_memory import autoedit
 
