@@ -442,3 +442,17 @@ def test_a_picture_framed_in_its_collage_place():
     for count, layouts in LAYOUTS.items():
         for name in layouts:
             assert len(collage_tiles(count, 1920, 1080, name)) == count
+
+
+def test_a_picture_can_be_smaller_than_its_place():
+    from PIL import Image
+    from trip_memory.render import fit_frame, frame_box
+
+    img = Image.new("RGB", (400, 300), (250, 20, 20))
+    full = fit_frame(img, 200, 100, {"z": 1.0})
+    assert full.shape == (100, 200, 3) and full[50, 100, 0] > 240
+    assert frame_box(200, 100, {"z": 0.5, "x": 0.0, "y": 1.0}) == (0, 50, 100, 50)
+    small = fit_frame(img, 200, 100, {"z": 0.5, "x": 0.0, "y": 1.0})
+    assert small[75, 50, 0] > 240  # the picture, bottom left
+    assert small[10, 190, 0] < 200  # around it: its blurred, darker copy
+    assert frame_box(200, 100, {"z": 0.1}) == frame_box(200, 100, {"z": 0.4})  # (never smaller than 40%)

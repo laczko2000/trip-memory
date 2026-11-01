@@ -272,12 +272,22 @@ def _side_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
         inputs += ["-ss", f"{at:.3f}", "-t", f"{length:.3f}", "-i", path]
         delay = SIDE_STAGGER * k
         f = frame or {}
-        z, fx_, fy_ = max(1.0, float(f.get("z") or 1.0)), float(f.get("x", 0.5)), float(f.get("y", 0.5))
+        z, fx_, fy_ = max(1.0, frame_zoom(f)), float(f.get("x", 0.5)), float(f.get("y", 0.5))
         # (as you framed it: zoomed in, the visible part where you moved it; see frame_crop)
         graph.append(f"[{n}:v]{look}{rotate_filter(turn)}setpts=PTS-STARTPTS+{delay:.3f}/TB,"
                      f"scale={2 * round(tw * z / 2)}:{2 * round(th * z / 2)}:force_original_aspect_ratio=increase,setsar=1,"
-                     f"crop={tw}:{th}:(iw-{tw})*{fx_:.4f}:(ih-{th})*{fy_:.4f},fps={FPS},"
-                     f"tpad=stop_mode=clone:stop_duration={length:.3f},format=yuva420p[s{k}]")
+                     f"crop={tw}:{th}:(iw-{tw})*{fx_:.4f}:(ih-{th})*{fy_:.4f}[c{k}]")
+        left, top, bw, bh = frame_box(tw, th, f)
+        if (bw, bh) != (tw, th):  # zoomed out: smaller, on a blurred darker copy of itself (see fit_frame)
+            bw, bh = 2 * round(bw / 2), 2 * round(bh / 2)
+            graph.append(f"[c{k}]split[cb{k}][cf{k}]")
+            graph.append(f"[cb{k}]boxblur={max(8, tw // 30)}:2,eq=brightness=-0.22[bb{k}]")
+            graph.append(f"[cf{k}]scale={bw}:{bh}[ff{k}]")
+            graph.append(f"[bb{k}][ff{k}]overlay={left}:{top}[c{k}b]")
+            src = f"c{k}b"
+        else:
+            src = f"c{k}"
+        graph.append(f"[{src}]fps={FPS},tpad=stop_mode=clone:stop_duration={length:.3f},format=yuva420p[s{k}]")
         graph.append(f"[{prev}][s{k}]overlay={x}:{y}:eof_action=pass:format=auto[o{k}]")
         prev = f"o{k}"
     graph.append(f"[{prev}]trim=duration={length:.3f},setpts=PTS-STARTPTS,format=yuv420p[v]")
@@ -483,8 +493,34 @@ def frame_crop(iw: int, ih: int, tw: int, th: int, frame: dict | None) -> tuple[
     return left, top, left + w, top + h
 
 
+SMALLEST = 0.4  # a picture can shrink to 40% of its place (a soft, blurred copy of it fills around it)
+
+
+def frame_zoom(frame: dict | None) -> float:
+    return min(4.0, max(SMALLEST, float((frame or {}).get("z") or 1.0)))
+
+
+def frame_box(tw: int, th: int, frame: dict | None) -> tuple[int, int, int, int]:
+    """Where a picture smaller than its place (zoomed out, z < 1) sits in it: (left, top, width, height), at "x",
+    "y" of the room around it (like CSS scale(z) with transform-origin x% y%). The whole place when z >= 1."""
+    f = frame or {}
+    z = frame_zoom(f)
+    if z >= 1.0:
+        return 0, 0, tw, th
+    w, h = max(2, round(tw * z)), max(2, round(th * z))
+    return round(float(f.get("x", 0.5)) * (tw - w)), round(float(f.get("y", 0.5)) * (th - h)), w, h
+
+
 def fit_frame(img: Image.Image, tw: int, th: int, frame: dict | None) -> np.ndarray:
-    return np.asarray(img.resize((tw, th), Image.LANCZOS, box=frame_crop(img.width, img.height, tw, th, frame)))
+    full = img.resize((tw, th), Image.LANCZOS, box=frame_crop(img.width, img.height, tw, th, frame))
+    left, top, w, h = frame_box(tw, th, frame)
+    if (w, h) == (tw, th):
+        return np.asarray(full)
+    # Zoomed out: the picture smaller in its place, on a blurred, darker copy of itself.
+    from PIL import ImageEnhance, ImageFilter
+    back = ImageEnhance.Brightness(full.filter(ImageFilter.GaussianBlur(max(8, tw // 30)))).enhance(0.55)
+    back.paste(full.resize((w, h), Image.LANCZOS), (left, top))
+    return np.asarray(back)
 
 
 def _collage_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:

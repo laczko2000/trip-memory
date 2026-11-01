@@ -437,7 +437,7 @@ class Trip:
     def set_tile_frame(self, path: str, x: float, y: float, z: float) -> None:
         frames = self.tile_frames()
         frames[path] = {"x": round(min(1.0, max(0.0, x)), 4), "y": round(min(1.0, max(0.0, y)), 4),
-                        "z": round(min(4.0, max(1.0, z)), 3)}
+                        "z": round(min(4.0, max(0.4, z)), 3)}  # (below 1: smaller than its place)
         self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('tile_frames', ?)", (json.dumps(frames),))
 
     def collage_layouts(self) -> dict[str, str]:
