@@ -5004,6 +5004,10 @@ class Page:
                 ui.button(icon="swap_horiz", on_click=lambda r=r: self.theme_menu(r)) \
                     .props("round dense size=sm color=white text-color=primary").classes("shadow") \
                     .tooltip("Move to another theme")
+            with ui.element("div").classes("absolute top-2 right-11 z-10").on("click.stop", lambda: None):
+                ui.button(icon="delete", on_click=lambda p=r["path"]: self.remove_theme_shot(p)) \
+                    .props("round dense size=sm color=white text-color=negative").classes("shadow") \
+                    .tooltip("Remove from the trip (as in the clean-up; the file stays on your computer)")
             if r["kind"] == "video":
                 with ui.element("div").classes("absolute top-11 right-2").on("click.stop", lambda: None):
                     self.lock_area(r, "compact")
@@ -5014,6 +5018,21 @@ class Page:
                     .classes("font-semibold text-gray-800 truncate")
                 ui.label(where).classes("text-gray-500 truncate")
                 ui.label(when).classes("text-gray-500")
+
+    async def remove_theme_shot(self, path: str) -> None:
+        """🗑 on a Themes tile: the shot leaves the trip (as in the clean-up) and its tile goes at once."""
+        r = self.theme_rows_shown.pop(path, None)
+        tile = self.theme_tiles.pop(path, None)
+        if tile is not None:
+            tile.set_visibility(False)
+        self.theme_selected.discard(path)
+        if r is not None:
+            self.theme_counts[1] -= 1
+            self._theme_summary(-1 if r["theme_ok"] else 0)
+        ui.notify(f"Removed {Path(path).name} from the trip. To bring it back: Choose files, show 'Removed from the trip'.",
+                  type="info", timeout=5)
+        await run.io_bound(self.trip.remove, [path])
+        self.all_items = [it for it in self.all_items if it.get("path") != path]
 
     def _show_tick(self, path: str, ok: bool) -> None:
         tick, mark, sure = self.theme_ticks[path]

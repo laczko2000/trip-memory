@@ -734,6 +734,19 @@ class Trip:
         self._group_stories()
         return n
 
+    def remove(self, paths: list[str]) -> None:
+        """Take these files out of the trip (as the clean-up does): gone from every tab, files stay on disk."""
+        with self._lock:
+            self.db.executemany("UPDATE items SET chosen = 0 WHERE path = ?", [(p,) for p in paths])
+            self.db.commit()
+        self._move_links_off_removed()
+        with self._lock:
+            self.db.executemany("UPDATE items SET removed = 1, included = 0, position = NULL WHERE path = ?",
+                                [(p,) for p in paths])
+            self.db.executemany("DELETE FROM faces WHERE path = ?", [(p,) for p in paths])
+            self.db.commit()
+        self._group_stories()
+
     def _move_links_off_removed(self) -> None:
         """Before files are removed: a link that starts at one of them moves to the next file of the same story,
         or goes if that whole story is removed (so the stories around it stay apart)."""

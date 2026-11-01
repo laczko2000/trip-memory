@@ -1134,3 +1134,19 @@ def test_mark_upright_without_preview():
     rows = [{"thumb": None}, {}, {"thumb": "/nowhere.jpg"}]
     Trip._mark_upright(rows)
     assert [r["upright"] for r in rows] == [False, False, False]
+
+
+def test_remove_one_shot_from_themes(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    for n, colour in enumerate(("red", "red", "blue")):
+        _gps_photo(trip_dir / f"{n}.jpg", f"2025:07:03 10:0{n}:00", 38.7223, -9.1393, colour)
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    gone = str(trip_dir / "0.jpg")
+    trip.remove([gone])  # even while ticked
+    assert gone not in [i["path"] for i in trip.items()]
+    assert [i["path"] for i in trip.items(removed=True)] == [gone]
+    assert (trip_dir / "0.jpg").exists()

@@ -59,6 +59,8 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.19** Themes: every picture has a red 🗑 button that takes it out of the trip, like the clean-up does (bring it back in Choose files under "Removed from the trip").
+
 - **1.18** Auto-edit no longer stops with "'NoneType' object has no attribute 'read'" when some shots have no preview picture yet.
 
 - **1.17:** Pressing **Level 1, 2 or 3** now shows only that level's doubles, at the top (no scrolling through everything else). When a level is sorted out it says so, with a button to go on to the next level (or Show everything).
