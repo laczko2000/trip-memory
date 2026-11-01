@@ -178,6 +178,80 @@ def blend(frame: np.ndarray, layer: np.ndarray, amount: float) -> np.ndarray:
     return (frame * (1 - alpha) + layer[..., :3] * alpha).astype(np.uint8)
 
 
+# Title animations (the style packages): how the words come on. "reveal": slowly from left to right; "type": letter
+# by letter like a typewriter; "flicker": like a neon sign, letters coming on left to right with flickers;
+# "flicker-rl": the same from right to left. (Without "anim" a title just fades in.)
+ANIM_SECONDS = {"reveal": 1.1, "type": 0.06, "flicker": 0.9, "flicker-rl": 0.9}  # ("type": per letter)
+
+
+def anim_length(title: dict) -> float:
+    anim = title.get("anim") or ""
+    if anim == "type":
+        return min(2.2, ANIM_SECONDS["type"] * max(1, len((title.get("text") or "") + (title.get("sub") or ""))))
+    return ANIM_SECONDS.get(anim, 0.0)
+
+
+def _flick(n: int) -> bool:  # a steady-looking but irregular flicker, frame by frame
+    return (n * 7919 + n * n * 31) % 7 not in (0, 3)
+
+
+def anim_share(title: dict, t: float) -> tuple[float, bool]:
+    """(how much of the title is showing, 0..1 from its start side; whether it's lit) t seconds after it starts."""
+    anim = title.get("anim") or ""
+    span = anim_length(title)
+    if not anim or span <= 0 or t >= span + 0.35:
+        return 1.0, True
+    if t < 0:
+        return 0.0, True
+    share = min(1.0, t / span)
+    if anim == "type":
+        letters = max(1, len((title.get("text") or "") + (title.get("sub") or "")))
+        share = int(share * letters + 0.999) / letters
+        return share, True
+    if anim == "reveal":
+        return 1 - (1 - share) ** 2, True
+    n = int(t * 30)
+    steps = 8
+    share = int(share * steps + 0.999) / steps  # letters coming on in groups
+    return share, _flick(n) or t >= span  # (then a last flicker or two as it settles)
+
+
+def anim_layer(title: dict, layer: np.ndarray, t: float) -> np.ndarray:
+    """The title's picture (RGBA array) as it shows t seconds after it starts, for its animation."""
+    share, lit = anim_share(title, t)
+    if share >= 1.0 and lit:
+        return layer
+    out = layer.copy()
+    if not lit:
+        out[..., 3] = (out[..., 3] * 0.15).astype(out.dtype)
+    cols = np.nonzero(layer[..., 3].max(axis=0))[0]
+    if not len(cols):
+        return out
+    x0, x1 = int(cols[0]), int(cols[-1]) + 1
+    cut = x0 + round((x1 - x0) * share)
+    if (title.get("anim") or "").endswith("-rl"):
+        cut = x1 - round((x1 - x0) * share)
+        out[:, :cut, 3] = 0
+    else:
+        out[:, cut:, 3] = 0
+    if title.get("anim") == "reveal" and share < 1.0:  # (a soft edge as it reveals)
+        edge = max(1, (x1 - x0) // 25)
+        lo = max(x0, cut - edge)
+        ramp = np.linspace(1.0, 0.0, cut - lo, endpoint=False) if cut > lo else np.zeros(0)
+        out[:, lo:cut, 3] = (out[:, lo:cut, 3] * ramp[None, :]).astype(out.dtype)
+    return out
+
+
+def anim_strength(title: dict, t: float, length: float) -> float:
+    """How visible an animated title is at time t of its shot: no fade in (the animation brings it on), the usual
+    fade out."""
+    start, end = timing(length)
+    if t < start or t > end:
+        return 0.0
+    fade_out = min(FADE_OUT, (end - start) / 3)
+    return float(min(1.0, (end - t) / fade_out if fade_out else 1.0))
+
+
 def ffmpeg_fades(length: float) -> str:
     """The same fades as an FFmpeg filter on the title picture (for videos)."""
     start, end = timing(length)

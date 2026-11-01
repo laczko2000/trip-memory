@@ -97,6 +97,10 @@ class RenderSettings:
     # Titles on the video's own timeline (the editor under the video): {"text", "sub", "style", "where",
     # "length", "fade_in", "fade_out", and "start" (seconds into the video) or "shot" (its number) + "offset"}.
     titles: list = dataclasses.field(default_factory=list)
+    # The style package's effects on the whole video (see packages.py): {"flash": [seconds] (a quick flash of light on
+    # the music's big hits), "hue": True (the colours swing into each cut), "glitch": True (a short glitch on some
+    # cuts)}.
+    fx: dict = dataclasses.field(default_factory=dict)
 
 
 def _fit_with_blur(src: str, w: int, h: int, out: str) -> str:
@@ -201,8 +205,7 @@ def _video_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
     inputs = ["-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", str(item.path)]
     title_png = None
     if item.overlay and (item.overlay.get("text") or item.overlay.get("sub")):
-        title_png = out.with_suffix(".title.png")
-        titles.draw(item.overlay, s.width, s.height).save(title_png)
+        title_png = _title_input(item.overlay, s.width, s.height, length, out)
     if item.has_audio and item.sound and s.keep_clip_sound and not item.reverse:  # (backwards: no clip sound)
         level = f"aformat=sample_rates=48000:channel_layouts=stereo,volume={item.volume * s.clip_volume:.2f}"
         if effects.get("ramp"):
@@ -220,9 +223,9 @@ def _video_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
         graph += ";[1:a]anull[a]"
     if title_png is not None:  # the title, fading in and out over the shot
         n = inputs.count("-i")  # the next input's number
-        inputs += ["-loop", "1", "-t", f"{length + 0.5:.3f}", "-i", str(title_png)]
+        inputs += title_png[0]
         graph = graph.replace(",format=yuv420p[v]", ",format=yuv420p[v0]", 1)
-        graph += (f";[{n}:v]format=rgba,setpts=PTS-STARTPTS,{titles.ffmpeg_fades(length)}[title];"
+        graph += (f";[{n}:v]format=rgba,setpts=PTS-STARTPTS,{title_png[1]}[title];"
                   f"[v0][title]overlay=0:0:shortest=1:format=auto,format=yuv420p[v]")
     if held(effects) and effects.get("label"):  # the name on the freeze-frame, appearing as it freezes
         name_png = out.with_suffix(".name.png")
@@ -429,7 +432,7 @@ def _photo_segment(item: MediaItem, s: RenderSettings, out: Path, workdir: Path)
         for n in range(frames):
             frame = _photo_frame(canvas, w, h, move, n / max(1, frames - 1))
             if layer is not None:
-                frame = titles.blend(frame, layer, titles.strength(n / FPS, frames / FPS))
+                frame = _with_title(frame, item.overlay, layer, n / FPS, frames / FPS)
             pipe.write(frame.tobytes())
 
     inputs = [
@@ -523,6 +526,51 @@ def fit_frame(img: Image.Image, tw: int, th: int, frame: dict | None) -> np.ndar
     return np.asarray(back)
 
 
+def _with_title(frame: np.ndarray, title: dict, layer: np.ndarray, t: float, length: float) -> np.ndarray:
+    """A shot's title over one of its frames: fading in and out, or (with an animation) coming on its own way."""
+    if title.get("anim"):
+        start = titles.timing(length)[0]
+        return titles.blend(frame, titles.anim_layer(title, layer, t - start), titles.anim_strength(title, t, length))
+    return titles.blend(frame, layer, titles.strength(t, length))
+
+
+def _title_input(title: dict, w: int, h: int, length: float, out: Path) -> tuple[list[str], str]:
+    """The title of a video shot as an FFmpeg input and the filter that shows it: one picture that fades in and out,
+    or (animated) the few pictures of its animation, each for its moment, then fading out."""
+    layer = titles.draw(title, w, h)
+    if not title.get("anim"):
+        png = out.with_suffix(".title.png")
+        layer.save(png)
+        return ["-loop", "1", "-t", f"{length + 0.5:.3f}", "-i", str(png)], titles.ffmpeg_fades(length)
+    full = np.asarray(layer)
+    start, end = titles.timing(length)
+    steps, t, last, k = [], 0.0, None, 0
+    lines = ["ffconcat version 1.0"]
+    blank = out.with_suffix(".t-blank.png")
+    Image.new("RGBA", (w, h), (0, 0, 0, 0)).save(blank)
+    lines += [f"file '{blank.name}'", f"duration {start:.4f}"]
+    span = titles.anim_length(title) + 0.4
+    while t < span:  # (a picture each time it changes, at 30 a second)
+        shown = titles.anim_share(title, t)
+        if shown != last:
+            png = out.with_suffix(f".t{k}.png")
+            Image.fromarray(titles.anim_layer(title, full, t)).save(png)
+            lines += [f"file '{png.name}'", f"duration {1 / FPS:.4f}"]
+            last, k = shown, k + 1
+        else:  # (the same picture a frame longer)
+            dur = float(lines[-1].split()[1]) + 1 / FPS
+            lines[-1] = f"duration {dur:.4f}"
+        t += 1 / FPS
+    png = out.with_suffix(".title.png")
+    layer.save(png)
+    lines += [f"file '{png.name}'", f"duration {max(0.1, length + 0.5 - start - span):.4f}", f"file '{png.name}'"]
+    listing = out.with_suffix(".title.txt")
+    listing.write_text("\n".join(lines) + "\n")
+    fade_out = min(titles.FADE_OUT, (end - start) / 3)
+    return (["-f", "concat", "-safe", "0", "-i", str(listing)],
+            f"fps={FPS},fade=t=out:st={end - fade_out:.3f}:d={fade_out:.3f}:alpha=1")
+
+
 def _collage_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
     """Several photos on screen together, popping in one after another (on the beats where they'd have been cut)."""
     fx = item.effects or {}
@@ -572,7 +620,7 @@ def _collage_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
                     k = since / RESHUFFLE_FADE
                     frame = (view(done - 1) * (1 - k) + frame * k).astype(np.uint8)
                 if layer is not None:
-                    frame = titles.blend(frame, layer, titles.strength(t, seconds))
+                    frame = _with_title(frame, item.overlay, layer, t, seconds)
                 pipe.write(np.ascontiguousarray(frame).tobytes())
                 continue
             frame = np.full((h, w, 3), 12, np.uint8)
@@ -591,7 +639,7 @@ def _collage_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
                 region = frame[oy:oy + small.shape[0], ox:ox + small.shape[1]]
                 frame[oy:oy + small.shape[0], ox:ox + small.shape[1]] = (region * (1 - grow) + small * grow).astype(np.uint8)
             if layer is not None:
-                frame = titles.blend(frame, layer, titles.strength(t, seconds))
+                frame = _with_title(frame, item.overlay, layer, t, seconds)
             pipe.write(frame.tobytes())
 
     inputs = [
@@ -1006,6 +1054,31 @@ def _write_report(out: Path, segments, lengths, styles, total: float, tries: lis
     return path
 
 
+HUE_SWING = 0.3  # seconds before and after a cut that the colours swing round
+GLITCH = 0.13  # seconds a glitch lasts
+FLASH_DECAY = 12  # how quickly a flash fades (higher: shorter)
+
+
+def package_fx(fx: dict, cuts: list[float], total: float) -> str:
+    """The style package's effects as one FFmpeg filter over the joined video ("" for none)."""
+    chain = []
+    flashes = [t for t in fx.get("flash") or [] if 0 < t < total]
+    if flashes:
+        kick = "+".join(f"gte(t,{t:.3f})*exp(-(t-{t:.3f})*{FLASH_DECAY})" for t in flashes[:60])
+        chain.append(f"eq=brightness='min(0.5,0.45*({kick}))':eval=frame")
+    if fx.get("hue") and cuts:
+        swing = "+".join(f"max(0,1-abs(t-{c:.3f})/{HUE_SWING})" for c in cuts[:120])
+        chain.append(f"hue=h='120*({swing})'")
+    if fx.get("glitch") and cuts:
+        picked = cuts[1::3][:40]  # (every third cut: often enough to feel it, not so often it tires)
+        if picked:
+            on = "+".join(f"between(t,{c - GLITCH / 2:.3f},{c + GLITCH / 2:.3f})" for c in picked)
+            if has_filter("rgbashift"):
+                chain.append(f"rgbashift=rh=-14:bh=14:gv=4:enable='{on}'")
+            chain.append(f"noise=alls=28:allf=t:enable='{on}'")
+    return ",".join(chain)
+
+
 def _join_once(
     segments: list[Path],
     lengths: list[float],
@@ -1030,6 +1103,7 @@ def _join_once(
     # Everything is counted in whole frames, so every transition starts and ends exactly on a frame.
     frames = [max(1, round(length * FPS)) for length in lengths]
     v_prev, a_prev, total_frames = "sv0", "sa0", frames[0]
+    cuts: list[float] = []  # (the middle of each cut, in the joined video)
     for k in range(1, n):
         style, seconds = styles[k - 1]
         # A transition is never longer than ~40% of either clip.
@@ -1038,9 +1112,14 @@ def _join_once(
         t, offset = t_frames / FPS, offset_frames / FPS
         parts.append(f"[{v_prev}][sv{k}]xfade={xfade_args(style or 'fade')}:duration={t:.6f}:offset={offset:.6f}[v{k}]")
         parts.append(f"[{a_prev}][sa{k}]acrossfade=d={t:.6f}[a{k}]")
+        cuts.append(offset + t / 2)
         v_prev, a_prev = f"v{k}", f"a{k}"
         total_frames = offset_frames + frames[k]
     total = total_frames / FPS
+    fx = package_fx(s.fx or {}, cuts, total)
+    if fx:
+        parts.append(f"[{v_prev}]{fx}[pfx]")
+        v_prev = "pfx"
 
     # The opening card over the start of the first shot: the shot blurred (or black) with the trip's title,
     # then it clears to the shot.

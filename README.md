@@ -59,6 +59,8 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.27** Style packages (Make video): one click sets the whole video's style. 🎬 Calm & cinematic, ⚡ Neon energy, 🏄 Fast action, 📔 Travel journal. Each picks the transitions for every cut (soft ones on calm music, lively ones on lively music, clean cuts on the beat), the colour look, the opening and ending cards and title style, and place names that come on screen as each new place starts. New title animations: slow reveal, typed letter by letter, neon flicker (left to right or right to left). New effects for the lively ones: a flash on the music's biggest hits, a colour swing into the cuts, a short glitch. Under the packages you can turn each part off or change it; 'No package' stops the extras.
+
 - **1.26** Make the song longer (Music & audio): type the length you want (m:ss) and press Make it longer. The intro and the ending stay as they are; parts of the middle play again, joined on bar lines with a tiny cross-fade so the beat never stumbles. Your pins come along (a part that plays twice has its pins twice). Listen to it; 'Back to the original song' undoes it. Your song file is never changed.
 
 - **1.25** Recent trips: under the folder box, your other trips (last opened first), one click opens one. Moved or renamed a trip folder? Open it where it is now: the app recognises it and asks to carry all your work over (choices, themes, story, cuts, music). A trip whose folder is gone shows as '(moved?)'.

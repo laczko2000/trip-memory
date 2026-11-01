@@ -31,6 +31,7 @@ from . import music as free_music
 from . import songmap
 from . import musicmood
 from . import pinfill
+from . import packages as style_packages
 from . import themes
 from . import moments
 from . import highlights
@@ -534,7 +535,7 @@ class Page:
     def refresh_all(self) -> None:
         slow = []
         for name in ("reload", "sync_video_size", "choose_view", "filters_view", "gallery", "people_view",
-                     "video_summary", "editor_card", "titles_card", "looks_card", "storyboard_view", "themes_view",
+                     "video_summary", "editor_card", "titles_card", "packages_card", "looks_card", "storyboard_view", "themes_view",
                      "stories_view", "director_card"):
             started = time.time()
             part = getattr(self, name)
@@ -6191,6 +6192,7 @@ class Page:
     def build_video(self) -> None:
         self.video_summary()
         self.editor_card()
+        self.packages_card()
         self.looks_card()
         self.titles_card()
         with ui.card().classes("w-full"):
@@ -7215,8 +7217,9 @@ class Page:
         dialog.open()
         ui.run_javascript("setTimeout(tmTrDemos, 100)")
 
-    async def suggest_transitions(self) -> None:
-        """A transition for every cut, from the music (lively: fun ones; calm: soft ones), the days and stories."""
+    async def suggest_transitions(self, package: str = "") -> None:
+        """A transition for every cut, from the music (lively: fun ones; calm: soft ones), the days and stories
+        (with a style package: from its own sets)."""
         board = self.trip.storyboard()
         if len(board) < 2:
             return
@@ -7247,6 +7250,14 @@ class Page:
                                         energy_after=energy(at + 1), hit=hit(at),
                                         room=0.4 * min(times[k]["length"], times[k + 1]["length"])))
         seconds = self.t_len.value if getattr(self, "t_len", None) else 0.8
+        if package in style_packages.PACKAGES:
+            chosen = style_packages.transitions_for(package, cuts, seconds)
+            for r, (name, why) in zip(board, chosen):
+                self.trip.set_transition(r["path"], name, None, why)
+            p = style_packages.PACKAGES[package]
+            self.draft_changed(f"{p['emoji']} {p['label']}: its look, titles, cards and a transition for every cut. "
+                               "Change anything you like; choosing the style again sets it all back.")
+            return
         chosen = transitions.exciting(cuts, seconds)
         for r, (name, why) in zip(board, chosen):
             style = transitions.STYLES.get(name, transitions.Style("fade"))
@@ -7786,6 +7797,7 @@ class Page:
         settings.end_black, settings.end_title = self.trip.end_card()
         settings.opening = self.trip.opening_card()
         settings.closing = self.trip.closing_card()
+        settings.fx = self.trip.render_fx(settings.music_path)
         return settings, None
 
     async def make_draft(self) -> None:
@@ -7856,6 +7868,68 @@ class Page:
                         ui.label(("✓ " if on else "") + label).classes("text-sm" + (" font-semibold" if on else ""))
                     if sample:
                         self.show_look_preview(image, sample, name)
+
+    @ui.refreshable
+    def packages_card(self) -> None:
+        """Style packages: one click sets the whole video's style (transitions, colours, titles and cards, place
+        titles with their animation, effects on the music). Then each part can be changed or turned off."""
+        if not self.trip or not self.items or not self.showing("Make video"):
+            return
+        pack = self.trip.package()
+        with ui.card().classes("w-full"):
+            with ui.row().classes("w-full items-center gap-2"):
+                ui.label("Style package").classes("text-lg font-semibold")
+                ui.label("One click sets the whole video's style. You can still change any part of it afterwards.") \
+                    .classes("text-sm text-gray-600")
+                if pack["name"]:
+                    ui.space()
+                    ui.button("No package", on_click=lambda: (self.trip.set_package(""), self.packages_card.refresh(),
+                                                              self.storyboard_view.refresh())) \
+                        .props("flat dense no-caps size=sm").tooltip("Stop the package's place titles and effects "
+                                                                     "(the look, titles and transitions stay as they are)")
+            with ui.element("div").classes("w-full grid grid-cols-4 gap-3"):
+                for key, p in style_packages.PACKAGES.items():
+                    on = pack["name"] == key
+                    with ui.column().classes("gap-1 p-3 rounded-lg cursor-pointer border-2 " +
+                                             ("border-purple-600 bg-purple-50" if on else "border-gray-200 hover:border-purple-300")) \
+                            .on("click", lambda k=key: self.use_package(k)):
+                        ui.label(f"{p['emoji']} {p['label']}" + ("  ✓" if on else "")).classes("font-semibold")
+                        ui.label(p["what"]).classes("text-xs text-gray-600")
+            if not pack["name"]:
+                return
+            with ui.row().classes("w-full items-center gap-4 mt-1"):
+                ui.switch("Place names as each new place starts", value=bool(pack["place_titles"]),
+                          on_change=lambda e: self.package_option(place_titles=e.value)).props("dense")
+                ui.select({2: "Every new place", 3: "Most places", 6: "Fewer"}, value=int(pack.get("place_gap") or 3),
+                          on_change=lambda e: self.package_option(place_gap=int(e.value))) \
+                    .props("dense options-dense").classes("w-40").bind_visibility_from(pack, "place_titles")
+                ui.select({"": "Fade in", **{k: v for k, v in style_packages.ANIMS.items() if k != "fade"}},
+                          value=pack.get("anim") or "", label="Titles come on",
+                          on_change=lambda e: self.package_option(anim=e.value)).props("dense options-dense").classes("w-60")
+                fx = dict(pack.get("fx") or {})
+                for key, label, tip in (("flash", "⚡ Flash on big hits", "A quick flash of light on the music's "
+                                         "biggest hits in its lively parts"),
+                                        ("hue", "🌈 Colour swing at cuts", "The colours swing round into each cut"),
+                                        ("glitch", "📺 Glitch", "A short glitch on every third cut")):
+                    ui.switch(label, value=bool(fx.get(key)),
+                              on_change=lambda e, k=key: self.package_option(fx={**fx, k: e.value})) \
+                        .props("dense").tooltip(tip)
+
+    async def use_package(self, key: str) -> None:
+        p = style_packages.PACKAGES[key]
+        self.trip.set_package(key)
+        if getattr(self, "t_len", None):
+            self.t_len.value = p["seconds"]
+        self.packages_card.refresh()
+        self.looks_card.refresh()
+        self.titles_card.refresh()
+        await self.suggest_transitions(key)
+
+    def package_option(self, **values) -> None:
+        self.trip.set_package_options(**values)
+        self.storyboard_view.refresh()
+        self.packages_card.refresh()
+        ui.notify("Saved: you see it in the next draft.", timeout=1500)
 
     def show_look_preview(self, image, sample: str, name: str) -> None:
         key = (sample, name)
@@ -8138,6 +8212,7 @@ class Page:
         settings.end_black, settings.end_title = self.trip.end_card()
         settings.opening = self.trip.opening_card()
         settings.closing = self.trip.closing_card()
+        settings.fx = self.trip.render_fx(settings.music_path)
         settings.titles = self.resolved_titles()
         title = (self.name_input.value or "").strip() or self.trip.folder.name or "My trip"
         safe = "".join(c for c in title if c.isalnum() or c in " -_").strip() or "My trip"

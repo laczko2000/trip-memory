@@ -708,6 +708,54 @@ class Trip:
         saved = {**(json.loads(rows[0]["value"]) if rows else {}), **values}
         self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('titles', ?)", (json.dumps(saved),))
 
+    def package(self) -> dict:
+        """The style package you chose (see packages.py): {"name" ("" = none), "place_titles", "place_gap", "anim",
+        "fx" {flash, hue, glitch}}. Changing one of its settings keeps the rest."""
+        from .packages import PACKAGES
+
+        rows = self.query("SELECT value FROM meta WHERE key = 'package'")
+        saved = json.loads(rows[0]["value"]) if rows else {}
+        p = PACKAGES.get(saved.get("name") or "")
+        base = {"name": "", "place_titles": False, "place_gap": 3, "anim": "", "fx": {}}
+        if p:
+            base.update(place_titles=p["place_titles"], anim=p["anim"], fx=dict(p["fx"]))
+        return {**base, **saved}
+
+    def set_package(self, name: str) -> None:
+        """Choose a style package: its look, titles and cards, place titles and effects all at once (the
+        transitions are set by the app, which knows the music). "" = none (your own settings stay)."""
+        from .packages import PACKAGES
+
+        p = PACKAGES.get(name)
+        if not p:
+            self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('package', ?)", (json.dumps({"name": ""}),))
+            return
+        self.checkpoint(f"choosing the {p['label']} style")
+        self.set_look(p["look"])
+        self.set_title_settings(card=p["card"], end_card=p["end_card"], style=p["style"], story_style=p["story_style"])
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('package', ?)",
+                     (json.dumps({"name": name, "place_titles": p["place_titles"], "place_gap": 3,
+                                  "anim": p["anim"], "fx": dict(p["fx"])}),))
+
+    def render_fx(self, music: str | None) -> dict:
+        """The style package's effects for making the video (render.RenderSettings.fx): its flashes on the big hits
+        of the music's lively parts, its colour swings and glitches at the cuts."""
+        fx = dict(self.package().get("fx") or {})
+        if fx.pop("flash", False) and music:
+            from . import songmap
+            from .packages import flash_times
+
+            try:
+                song = songmap.analyse(music, app_dir() / "music-maps")
+                fx["flash"] = flash_times(song.beat_times(), song.accents, song.sections, song.duration)
+            except Exception:  # (no flashes rather than no video)
+                traceback.print_exc()
+        return {k: v for k, v in fx.items() if v}
+
+    def set_package_options(self, **values) -> None:
+        now = self.package()
+        self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('package', ?)", (json.dumps({**now, **values}),))
+
     def look(self) -> str:
         """The colour mood of the whole video (a key of looks.LOOKS)."""
         rows = self.query("SELECT value FROM meta WHERE key = 'look'")
@@ -762,6 +810,19 @@ class Trip:
                 result[r["path"]] = {"text": names.get(r["story"], ""), "sub": sub, "style": t["story_style"],
                                      "where": "", "auto": "story"}
             previous = r["story"]
+        pack = self.package()
+        if pack["place_titles"]:  # the style package's place names, as each new place starts
+            from .packages import place_changes
+
+            for k in place_changes(board, int(pack.get("place_gap") or 3)):
+                r = board[k]
+                if r["path"] in result:
+                    continue
+                when = datetime.fromisoformat(r["taken_at"]).astimezone()
+                result[r["path"]] = {"text": r.get("place") or r.get("country") or "",
+                                     "sub": (r.get("country") or "") if r.get("place") and r.get("country") != r.get("place")
+                                     else f"{when:%a %-d %b}",
+                                     "style": t["story_style"], "where": "", "auto": "place"}
         if t["opening"] and (t["trip_title"] or t["trip_sub"]) and t["card"] not in titles.CARDS:
             result[board[0]["path"]] = {"text": t["trip_title"], "sub": t["trip_sub"], "style": t["style"],
                                         "where": "center", "auto": "opening"}
@@ -769,6 +830,9 @@ class Trip:
             # (with a black ending, the end card shows on the black instead: see end_card)
             result[board[-1]["path"]] = {"text": t["end_text"], "sub": t["end_sub"], "style": "elegant",
                                          "where": "center", "auto": "ending"}
+        if pack["anim"]:  # (the package's own way of bringing words on, for its automatic titles)
+            for value in result.values():
+                value["anim"] = pack["anim"]
         for r in board:
             if r["title_text"] or r["title_sub"]:
                 result[r["path"]] = {"text": r["title_text"] or "", "sub": r["title_sub"] or "",
