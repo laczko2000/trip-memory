@@ -36,6 +36,7 @@ from . import moments
 from . import highlights
 from . import timeshift
 from . import taps as song_taps
+from . import longer as song_longer
 from .beats import song_length
 from .autoedit import CUT_ON, shot_value
 from .autoedit import Limits as AutoLimits
@@ -3098,6 +3099,7 @@ class Page:
                 .classes("text-gray-500")
             return
         can_trim = self.trim_card(music)
+        self.longer_card(music)
         saved = song_taps.load(music, app_dir() / "music-taps")
         ui.label("Trim, fade and pin the song").classes("font-semibold mt-2")
         if can_trim:
@@ -3263,6 +3265,54 @@ class Page:
             ui.button("Trim again from the whole song", icon="content_cut",
                       on_click=lambda: self.music_input.set_value(whole)).props("flat dense no-caps")
         return False
+
+    def longer_card(self, music: str) -> None:
+        """Make the song longer: type the length you want; the app keeps the intro and the ending and plays parts of
+        the middle again, cut on bar lines. Listen, then keep it (it's your track now) or go back to the song."""
+        made = song_longer.longer_from(music, app_dir() / "music-taps")
+        with ui.row().classes("w-full items-center gap-2 p-2 rounded bg-violet-50"):
+            if made:
+                source, again = made
+                ui.label(f"✓ This track is {Path(source).name} made longer to {fmt_length(song_length(music))}: "
+                         f"{again} part{'s' if again != 1 else ''} of the middle play again (intro and ending as they "
+                         "were). Press Play to listen.").classes("text-sm text-violet-900 flex-1")
+                ui.button("Back to the original song", icon="undo",
+                          on_click=lambda: self.music_input.set_value(source)).props("flat dense no-caps")
+                return
+            now = song_length(music)
+            ui.label(f"Song too short for your video? It's {fmt_length(now)}. Make it").classes("text-sm text-violet-900")
+            field = ui.input(value=fmt_length(max(now + 30, round(now * 1.5 / 10) * 10)), placeholder="m:ss") \
+                .props("dense outlined").classes("w-24")
+            ui.label("long:").classes("text-sm text-violet-900")
+            ui.button("Make it longer", icon="unfold_more",
+                      on_click=lambda: self.make_song_longer(music, field.value)).props("unelevated dense no-caps color=purple") \
+                .tooltip("Keeps the intro and the ending; parts of the middle play again, cut on the beat. Your pins "
+                         "come along. Your song file is not changed")
+
+    async def make_song_longer(self, music: str, text: str) -> None:
+        m = re.fullmatch(r"\s*(\d{1,2}):([0-5]\d)\s*", text or "")
+        if not m:
+            ui.notify("Write the length as minutes:seconds, for example 3:30.", type="warning")
+            return
+        target = int(m.group(1)) * 60 + int(m.group(2))
+        if target <= song_length(music) + 2:
+            ui.notify("That's not longer than the song. To make it shorter, drag the green handles on the line.",
+                      type="warning")
+            return
+        await self.autosave_taps()  # (your pins come along)
+        n = ui.notification("Making the song longer…", spinner=True, timeout=None)
+        try:
+            track = await run.io_bound(song_longer.make_longer, music, float(target), app_dir() / "music-longer",
+                                       app_dir() / "music-taps", app_dir() / "music-maps")
+        except Exception as exc:
+            traceback.print_exc()
+            n.dismiss()
+            ui.notify(f"Couldn't make it longer: {exc}", type="negative")
+            return
+        n.dismiss()
+        self.music_input.set_value(track)
+        ui.notify(f"Done: {fmt_length(song_length(track))} (as close to {text} as whole bars allow). Press Play to "
+                  "listen; 'Back to the original song' undoes it.", type="positive", timeout=6000)
 
     async def trim_song(self, music: str) -> None:
         try:
