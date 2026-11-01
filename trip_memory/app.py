@@ -6531,7 +6531,16 @@ class Page:
                              "they are smaller)")
                 self.draft_status = ui.label("").classes("text-sm text-gray-600")
         if self.editor_full:  # (after the card: its status line and button are the editor's own)
-            self.editor_window(draft, board, now, changed)
+            try:
+                self.editor_window(draft, board, now, changed)
+            except Exception as e:  # (never a stuck, frozen page: the editor closes and says why)
+                import traceback
+
+                traceback.print_exc()
+                self.editor_full = False
+                ui.run_javascript("document.body.style.overflow = ''")
+                ui.notify(f"The editor couldn't open: {e}. Please send me the Terminal lines.", type="negative",
+                          multi_line=True, timeout=0, close_button="OK")
 
     ZOOMS = {0: "Whole video", 20: "Wide", 40: "Normal", 80: "Close", 160: "Very close"}  # pixels per second
 
@@ -8570,6 +8579,11 @@ function tmSeekRuler(e, el, total) {
 window.tmInst = window.tmInst || {};
 // The collage window: drag a picture to move it in its place, scroll (or pinch) to zoom, drag the ⠿ handle onto
 // another place to swap them. Each change goes to the app as a 'tmframe' or 'tmswap' event on the stage.
+// The full-screen editor stops the page scrolling while it's open; whenever it isn't, the page scrolls again
+// (a stuck "no scrolling" made every tab look frozen).
+setInterval(() => {
+  if (document.body.style.overflow === 'hidden' && !document.querySelector('.tm-editor')) document.body.style.overflow = '';
+}, 700);
 function tmCollageEdit(stageId) {
   const stage = document.getElementById(stageId);
   if (!stage || stage._ready) return;
