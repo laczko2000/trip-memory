@@ -36,6 +36,7 @@ from . import themes
 from . import moments
 from . import highlights
 from . import timeshift
+from . import sharephone
 from . import taps as song_taps
 from . import longer as song_longer
 from .beats import song_length
@@ -6491,7 +6492,10 @@ class Page:
 
         with ui.card().classes("w-full"):
             self.name_input = ui.input("Video name", placeholder="My trip").classes("w-full")
-            self.make_button = ui.button("Make my video", icon="movie", on_click=self.make).props("size=lg")
+            with ui.row().classes("items-center gap-2"):
+                self.make_button = ui.button("Make my video", icon="movie", on_click=self.make).props("size=lg")
+                ui.button("Send a video to my phone", icon="phone_android", on_click=self.phone_pick) \
+                    .props("outline no-caps").tooltip("A QR code: scan it with your phone's camera (same Wi-Fi)")
             self.render_progress = ui.linear_progress(value=0, show_value=False).classes("w-full")
             self.render_status = ui.label("")
             self.result_box = ui.column().classes("w-full")
@@ -8562,13 +8566,52 @@ class Page:
                 self.render_status.text += f" (music credit saved in {credits.name})"
             with self.result_box:
                 ui.video(f"/videos/{result.name}").classes("w-full")
-                ui.button("Show in Finder", icon="folder", on_click=lambda: reveal(result)).props("outline")
+                with ui.row():
+                    ui.button("Show in Finder", icon="folder", on_click=lambda: reveal(result)).props("outline")
+                    ui.button("Send to my phone", icon="phone_android", on_click=lambda: self.phone_send(result)) \
+                        .props("outline no-caps")
         except Exception as exc:  # show any problem on screen instead of failing silently
             traceback.print_exc()
             self.render_status.text = f"Something went wrong: {exc}"
         finally:
             r["busy"] = False
             self.make_button.enable()
+
+    def phone_pick(self) -> None:
+        """Choose one of your finished videos (newest first) to send to your phone."""
+        videos = sorted(OUTPUT_DIR.glob("*.mp4"), key=lambda f: f.stat().st_mtime, reverse=True)[:8]
+        if not videos:
+            ui.notify("No finished video yet: make one first.", type="warning")
+            return
+        with self.window_box, ui.dialog() as dialog, ui.card().classes("w-[36rem] max-w-full"):
+            ui.label("Which video?").classes("text-lg font-semibold")
+            for f in videos:
+                mb = f.stat().st_size / 1e6
+                ui.button(f"{f.stem}  ·  {mb:.0f} MB", icon="movie",
+                          on_click=lambda f=f: (dialog.close(), self.phone_send(f))) \
+                    .props("flat no-caps align=left").classes("w-full")
+            ui.button("Cancel", on_click=dialog.close).props("flat no-caps")
+        dialog.open()
+
+    def phone_send(self, video: Path) -> None:
+        """A QR code your phone's camera reads: it downloads the video straight from this Mac over the Wi-Fi."""
+        try:
+            link = sharephone.share(video)
+        except OSError as exc:
+            ui.notify(str(exc), type="warning")
+            return
+        with self.window_box, ui.dialog() as dialog, ui.card().classes("w-[30rem] max-w-full items-center"):
+            ui.label("Send to my phone").classes("text-lg font-semibold")
+            ui.html(sharephone.qr_svg(link)).style("width:16rem;height:16rem").classes("[&>svg]:w-full [&>svg]:h-full")
+            ui.label(video.name).classes("text-sm font-semibold text-center")
+            ui.markdown("1. Phone on the **same Wi-Fi** as this Mac.\n"
+                        "2. Open the phone's **camera**, point it at the code, tap the link.\n"
+                        "3. The video goes to **Downloads**; it shows in **Gallery** too.\n\n"
+                        f"The link works for {sharephone.OPEN_MINUTES} minutes. If your Mac asks whether Trip Memory "
+                        "(or Python) may accept incoming connections, click **Allow**.").classes("text-sm")
+            ui.label(link).classes("text-xs text-gray-500 break-all")
+            ui.button("Done", on_click=dialog.close).props("no-caps")
+        dialog.open()
 
 
 _served: dict[str, str] = {}
