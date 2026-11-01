@@ -1126,3 +1126,11 @@ def test_doubles_level_one_bursts_then_a_second_cleaning(tmp_path, monkeypatch):
     assert s["a"] == s["b"] == s["c"] != s["d"]  # a few minutes apart; 20 minutes later is another picture
     assert trip.accept_sets() == (1, 2)  # a set you didn't touch (all ticked): only its ⭐ stays
     assert sum(i["chosen"] for i in trip.items()) == 2  # the ⭐ of the set, and d
+
+
+def test_mark_upright_without_preview():
+    from trip_memory.catalog import Trip
+
+    rows = [{"thumb": None}, {}, {"thumb": "/nowhere.jpg"}]
+    Trip._mark_upright(rows)
+    assert [r["upright"] for r in rows] == [False, False, False]

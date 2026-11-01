@@ -2633,7 +2633,7 @@ class Page:
         try:
             with Image.open(it["thumb"]) as img:
                 ratio = img.width / img.height
-        except (OSError, TypeError):
+        except (OSError, TypeError, AttributeError, ValueError):
             ratio = 1.5
         key = f"tm-crop-{clip_id(path)}"
         # Sharp when zoomed in: the photo itself (if the browser can show it and it isn't turned), else its preview.
@@ -5891,7 +5891,7 @@ class Page:
         try:
             with Image.open(it["thumb"]) as img:
                 return ImageOps.fit(img.convert("RGB"), (w, h)).convert("RGBA")
-        except (OSError, TypeError):
+        except (OSError, TypeError, AttributeError, ValueError):
             return Image.new("RGBA", (w, h), (60, 70, 80, 255))
 
     def save_title(self, it: dict, text: str, sub: str, style: str, where: str) -> None:

@@ -59,6 +59,8 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.18** Auto-edit no longer stops with "'NoneType' object has no attribute 'read'" when some shots have no preview picture yet.
+
 - **1.17:** Pressing **Level 1, 2 or 3** now shows only that level's doubles, at the top (no scrolling through everything else). When a level is sorted out it says so, with a button to go on to the next level (or Show everything).
 - **1.16:** Turning a picture in *Sort out doubles* / *Choose files* keeps you exactly where you were: the picture you turned stays in the same spot on the screen (it used to jump elsewhere).
 - **1.15:** **Doubles in three levels, and Accept all.** Three buttons in *Sort out doubles*: **Level 1** seconds apart (at most 30 s), near-identical, the same people and view; **Level 2** within a minute, the same shot; **Level 3** a few minutes apart (up to 3 min between shots), more loosely alike. Never more than 10 minutes apart. Start with level 1, accept, then go on: the shots you kept can pair up again at the next level. **✓ Accept all markings** (top) and **✓ Accept all in this story** (each story): every look-alike set is done with the ticks as they are; a set you didn't touch keeps only its ⭐.

@@ -1933,7 +1933,7 @@ class Trip:
             try:
                 with Image.open(r["thumb"]) as img:
                     w, h = img.size
-            except (OSError, TypeError, KeyError):
+            except (OSError, TypeError, KeyError, AttributeError, ValueError):  # no preview (yet)
                 r["upright"] = False
                 continue
             r["upright"] = h > w * 1.1
