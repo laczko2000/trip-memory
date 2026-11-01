@@ -59,6 +59,8 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.30** Photos that stay on screen longer move more: up to 2 seconds the gentle move as before, then each extra second makes the zoom, slide or tilt go further (a 5-second photo moves about 2.5 times as far). Collage photos too, and the editor's preview follows.
+
 - **1.29** Collages: all the photos come on at once and each one keeps moving gently (a little zoom or drift) around the way you framed it, in the video and in the editor. The collage window has Turn left / Turn right under every picture, the first picture can be swapped too, and zooming (scroll, pinch, or − +) zooms the picture itself towards where you point, never the whole page. Swapping or adding a picture (and Find an alternative) never offers one that's already in the video, nor its double, cropped copy or Live Photo twin. Two fingers on the trackpad now move a picture in its place (pinch zooms), so trying to move a picture up no longer shrinks it onto the dimmed background; it tells you to zoom in first when there's no room to move. Videos side by side: double-click one to watch it big and choose the part it plays.
 
 - **1.28.1** Fixed: a song with no steady beat at all could stop the app reading it; it now gets an even grid of beats.

@@ -473,3 +473,14 @@ def test_a_picture_can_be_smaller_than_its_place():
     assert small[75, 50, 0] > 240  # the picture, bottom left
     assert small[10, 190, 0] < 200  # around it: its blurred, darker copy
     assert frame_box(200, 100, {"z": 0.1}) == frame_box(200, 100, {"z": 0.4})  # (never smaller than 40%)
+
+
+def test_a_longer_photo_moves_further():
+    import numpy as np
+
+    from trip_memory.render import _photo_frame, move_strength
+
+    assert move_strength(1.5) == move_strength(2.0) == 1.0 < move_strength(3) < move_strength(5) <= 2.6
+    canvas = np.repeat(np.linspace(0, 255, 464)[None, :, None], 290, 0).repeat(3, 2).astype(np.uint8)
+    left_edge = lambda strength: int(_photo_frame(canvas, 320, 200, "in", 1.0, strength)[100, 0, 0])  # noqa: E731
+    assert left_edge(move_strength(5)) > left_edge(move_strength(2)) + 5  # zoomed in further by the end

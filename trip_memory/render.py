@@ -39,7 +39,7 @@ AUDIO = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
 ProgressFn = Callable[[float, str], None]
 
 # Bump when the way clips are prepared changes, so old remembered clips are not reused.
-SEGMENT_VERSION = 8
+SEGMENT_VERSION = 9
 OVERLAP_SHARE = 0.5  # a transition takes at most half of either clip around it
 TITLE_SECONDS = 3.0
 FONTS = [
@@ -430,7 +430,7 @@ def _photo_segment(item: MediaItem, s: RenderSettings, out: Path, workdir: Path)
 
     def feed(pipe) -> None:
         for n in range(frames):
-            frame = _photo_frame(canvas, w, h, move, n / max(1, frames - 1))
+            frame = _photo_frame(canvas, w, h, move, n / max(1, frames - 1), move_strength(seconds))
             if layer is not None:
                 frame = _with_title(frame, item.overlay, layer, n / FPS, frames / FPS)
             pipe.write(frame.tobytes())
@@ -577,22 +577,23 @@ def _ease(p: float) -> float:
     return p * p * (3 - 2 * p) * 0.35 + p * 0.65
 
 
-def drift(frame: dict | None, move: str, p: float) -> dict:
+def drift(frame: dict | None, move: str, p: float, strength: float = 1.0) -> dict:
     """How a collage photo is framed at moment p (0 = start, 1 = end) of its gentle move: your framing (x, y, z),
     zoomed a little in or out and drifting a little sideways or up/down around it."""
     f = dict(frame or {})
     z = frame_zoom(f)
     e = _ease(p)
-    grow = 1 + COLLAGE_DRIFT * (e if move.startswith("in") or move in ("left", "right") else 1 - e)
+    grow = 1 + COLLAGE_DRIFT * strength * (e if move.startswith("in") or move in ("left", "right") else 1 - e)
     x, y = float(f.get("x", 0.5)), float(f.get("y", 0.5))
+    pan = min(0.8, 0.3 * strength)
     if move == "left":
-        x += 0.3 * (0.5 - e)
+        x += pan * (0.5 - e)
     elif move == "right":
-        x -= 0.3 * (0.5 - e)
+        x -= pan * (0.5 - e)
     elif move == "in-up":
-        y += 0.3 * (0.5 - e)
+        y += pan * (0.5 - e)
     elif move == "out-down":
-        y -= 0.3 * (0.5 - e)
+        y -= pan * (0.5 - e)
     return {"x": min(1.0, max(0.0, x)), "y": min(1.0, max(0.0, y)), "z": z * grow}
 
 
@@ -605,10 +606,10 @@ def _warp(pic: np.ndarray, tw: int, th: int, frame: dict) -> np.ndarray:
 
 
 def collage_tile(pic: np.ndarray, back: np.ndarray | None, tw: int, th: int, frame: dict | None, move: str,
-                 p: float) -> np.ndarray:
+                 p: float, strength: float = 1.0) -> np.ndarray:
     """One place of a collage at moment p of its move: filled as you framed it, or (zoomed out) the smaller
     picture on its blurred copy (back), the picture itself still moving gently inside its box."""
-    f = drift(frame, move, p)
+    f = drift(frame, move, p, strength)
     if frame_zoom(frame) >= 1.0:
         return _warp(pic, tw, th, f)
     left, top, w, h = frame_box(tw, th, frame)
@@ -634,7 +635,7 @@ def _collage_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
         with Image.open(path) as img:
             img = ImageOps.exif_transpose(img).convert("RGB").rotate(-turn, expand=True)
         # Just big enough for the closest it gets (sharp, and quick to move every frame).
-        need = max(tw / img.width, th / img.height) * max(1.0, frame_zoom(frame)) * (1 + COLLAGE_DRIFT) * 1.15
+        need = max(tw / img.width, th / img.height) * max(1.0, frame_zoom(frame)) * (1 + COLLAGE_DRIFT * move_strength(seconds)) * 1.15
         if need < 1:
             img = img.resize((max(2, round(img.width * need)), max(2, round(img.height * need))), Image.LANCZOS)
         pictures.append(np.asarray(img))
@@ -655,7 +656,7 @@ def _collage_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
             grow = 1 - (1 - min(1.0, t / POP)) ** 3  # all pop in together, quick at first, settling
             frame = np.full((h, w, 3), 12, np.uint8)
             for pic, back, f, move, (x, y, tw, th) in zip(pictures, backs, framed, moves, places):
-                tile = collage_tile(pic, back, tw, th, f, move, p)
+                tile = collage_tile(pic, back, tw, th, f, move, p, move_strength(seconds))
                 if grow >= 1.0:
                     frame[y:y + th, x:x + tw] = tile
                     continue
@@ -678,9 +679,17 @@ def _collage_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
 
 # Photos move gently while on screen (the "Ken Burns" look). Each photo gets one of these moves, chosen from
 # its file name so it stays the same every time you make the video.
-ZOOM = 1.15  # how far in the moves go (15%)
+ZOOM = 1.15  # how far in the moves go (15%) for a photo on screen up to 2 seconds ...
+STRONGER_PER_SECOND = 0.5  # ... and this much more for each second longer (a 5 s photo moves 2.5 times as far)
+STRONGEST = 2.6
+
+
+def move_strength(seconds: float) -> float:
+    """How far a photo moves, from 1 (up to 2 s on screen: a gentle move) to 2.6 (6 s or more: a bold one),
+    so a longer photo keeps moving instead of nearly standing still."""
+    return min(STRONGEST, max(1.0, 1 + (float(seconds or 0) - 2.0) * STRONGER_PER_SECOND))
 MOVES = ["in", "out", "left", "right", "in-up", "out-down"]
-CANVAS = 1.25  # the photo is prepared this much bigger than the video, so zooming in stays sharp
+CANVAS = 1.45  # the photo is prepared this much bigger than the video, so zooming in stays sharp
 
 
 def _is_tall(still: Path) -> bool:
@@ -719,24 +728,27 @@ def _photo_canvas(img: Image.Image, w: int, h: int, focus: float | None = None, 
     return np.asarray(bg)
 
 
-def _photo_frame(canvas: np.ndarray, w: int, h: int, move: str, t: float) -> np.ndarray:
-    """One frame of the move, t from 0 (start) to 1 (end). Positions are not rounded to whole pixels,
-    so the picture glides instead of shaking."""
+def _photo_frame(canvas: np.ndarray, w: int, h: int, move: str, t: float, strength: float = 1.0) -> np.ndarray:
+    """One frame of the move, t from 0 (start) to 1 (end); strength (see move_strength) makes it go further.
+    Positions are not rounded to whole pixels, so the picture glides instead of shaking."""
     ch, cw = canvas.shape[:2]
     t = t * t * (3 - 2 * t) * 0.35 + t * 0.65  # a little gentler at the start and end
-    zoom_in = 1 + (ZOOM - 1) * t
-    zoom = {"in": zoom_in, "in-up": zoom_in, "out": ZOOM - (ZOOM - 1) * t, "out-down": ZOOM - (ZOOM - 1) * t}.get(move, 1.1)
+    far = 1 + (ZOOM - 1) * strength
+    zoom_in = 1 + (far - 1) * t
+    zoom_out = far - (far - 1) * t
+    zoom = {"in": zoom_in, "in-up": zoom_in, "out": zoom_out, "out-down": zoom_out}.get(move, 1 + 0.1 * strength)
     vw, vh = cw / zoom, ch / zoom  # the part of the canvas in view
     room_x, room_y = cw - vw, ch - vh
     x0, y0 = room_x / 2, room_y / 2
+    tilt = min(0.45, 0.2 * strength)  # longer photos also travel up or down while zooming
     if move == "left":
         x0 = room_x * (1 - t)  # the view travels left: the picture slides right
     elif move == "right":
         x0 = room_x * t
     elif move == "in-up":
-        y0 = room_y * 0.3
+        y0 = room_y * (0.5 - tilt * t)
     elif move == "out-down":
-        y0 = room_y * 0.7
+        y0 = room_y * (0.5 + tilt * (t - 1) + tilt)
     m = np.float32([[vw / w, 0, x0], [0, vh / h, y0]])
     return cv2.warpAffine(canvas, m, (w, h), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, borderMode=cv2.BORDER_REFLECT)
 

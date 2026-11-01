@@ -8811,11 +8811,11 @@ function tmInstant(id, data, onTime) {
       } else {
         if (c.tiles) {  // the collage's first photo moves gently inside its own place, like the others
           const f = c.tiles[0].f || {}, p = Math.min(1, Math.max(0, local / Math.max(0.1, c.len)));
-          const css = tmFrameCss({x: f.x, y: f.y, z: (f.z || 1) * (f.z < 1 ? 1 : 1 + 0.07 * p)});
+          const css = tmFrameCss({x: f.x, y: f.y, z: (f.z || 1) * (f.z < 1 ? 1 : 1 + 0.07 * Math.min(2.6, Math.max(1, 1 + (c.len - 2) * 0.5)) * p)});
           css.split(';').forEach(kv => { const i = kv.indexOf(':'); if (i > 0) im.style.setProperty(kv.slice(0, i), kv.slice(i + 1)); });
           im.style.transform = '';
         } else
-        im.style.transform = look(s, c) + ` scale(${1 + 0.05 * local / Math.max(0.1, c.len)})`;  // a gentle push in
+        im.style.transform = look(s, c) + ` scale(${1 + 0.15 * Math.min(2.6, Math.max(1, 1 + (c.len - 2) * 0.5)) * local / Math.max(0.1, c.len)})`;  // a push in (further for a longer photo, as in the video)
       }
       (s._extra || []).forEach(({el, t}) => {
         if (t.k === 'v') {
@@ -8833,8 +8833,8 @@ function tmInstant(id, data, onTime) {
           // All on at once, each one moving gently around how you framed it (as in the video).
           el.style.opacity = 1;
           const p = Math.min(1, Math.max(0, local / Math.max(0.1, c.len))), f = t.f || {};
-          const grow = 1 + 0.07 * (t.mv === 'out' ? 1 - p : p);
-          const x = Math.min(1, Math.max(0, (f.x === undefined ? 0.5 : f.x) + (t.mv === 'left' ? 0.3 * (0.5 - p) : t.mv === 'right' ? -0.3 * (0.5 - p) : 0)));
+          const strong = Math.min(2.6, Math.max(1, 1 + (c.len - 2) * 0.5)), grow = 1 + 0.07 * strong * (t.mv === 'out' ? 1 - p : p);
+          const x = Math.min(1, Math.max(0, (f.x === undefined ? 0.5 : f.x) + (t.mv === 'left' ? Math.min(0.8, 0.3 * strong) * (0.5 - p) : t.mv === 'right' ? -Math.min(0.8, 0.3 * strong) * (0.5 - p) : 0)));
           const css = tmFrameCss({x: x, y: f.y, z: (f.z || 1) * (f.z < 1 ? 1 : grow)});
           css.split(';').forEach(kv => { const i = kv.indexOf(':'); if (i > 0) el.style.setProperty(kv.slice(0, i), kv.slice(i + 1)); });
           el.style.transform = '';
