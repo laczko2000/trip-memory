@@ -1413,6 +1413,22 @@ class Trip:
                           "thumb": thumb or self.moment_picture(dict(rows[0]), float(p["t"]))})
         self.execute("UPDATE items SET postits = ? WHERE path = ?", (json.dumps(clean) if clean else None, path))
 
+    def big_picture(self, path: str, size: int = 1800) -> Path:
+        """A big, turned-the-right-way JPEG of a photo for looking at it full screen (any format, HEIC too).
+        Made once per turn and kept in the trip's folder; your photo is not touched."""
+        row = self.query("SELECT rotation FROM items WHERE path = ?", (path,))
+        rotation = (row[0]["rotation"] or 0) if row else 0
+        folder = self.dir / "big"
+        folder.mkdir(exist_ok=True)
+        out = folder / f"{hashlib.sha1(path.encode()).hexdigest()[:16]}_{rotation}.jpg"
+        if not out.exists():
+            with Image.open(path) as img:
+                img.draft("RGB", (size, size))
+                img = ImageOps.exif_transpose(img).convert("RGB").rotate(-rotation, expand=True)
+                img.thumbnail((size, size))
+                img.save(out, quality=88)
+        return out
+
     def starred(self, path: str) -> bool:
         """A photo you starred: it is always in the video."""
         return bool(self.postits(path))

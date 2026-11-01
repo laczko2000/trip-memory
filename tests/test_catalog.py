@@ -1257,3 +1257,22 @@ def test_quality_check_suggests_and_remembers_what_you_keep(tmp_path, monkeypatc
     assert [Path(r["path"]).name for r in found] == ["a.jpg"] and found[0]["reason"]
     trip.keep_quality([found[0]["path"]])
     assert trip.quality_suggestions() == []  # kept: never suggested again
+
+
+def test_a_big_picture_is_made_the_right_way_round(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    monkeypatch.setattr(catalog, "FaceFinder", FakeFaces)
+    monkeypatch.setattr(catalog, "SceneTagger", FakeScenes)
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    from PIL import Image
+    Image.new("RGB", (3000, 2000), "red").save(trip_dir / "wide.jpg")
+    trip = catalog.Trip(trip_dir)
+    trip.analyse()
+    path = str(trip_dir / "wide.jpg")
+    with Image.open(trip.big_picture(path)) as img:
+        assert img.size == (1800, 1200)
+    trip.rotate(path, 90)
+    with Image.open(trip.big_picture(path)) as img:
+        assert img.size == (1200, 1800)  # turned: a new big picture, upright

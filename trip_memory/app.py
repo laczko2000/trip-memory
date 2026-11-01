@@ -217,6 +217,7 @@ class Page:
         self.draft_busy = False
         self.bb_mark = None  # the Best bits viewer's "mark this moment", while it is open
         self.bb_move = None  # ... and its "move this mark to where the video is now"
+        self.bp_key = None  # the Best pictures window's keys (Shift: favourite, Delete: remove)
         self.lock_views: dict[str, list[tuple]] = {}  # clip -> the places on screen that show its locked moments
         self.library_focus: dict | None = None  # one shot opened by double-click: {path, tab, name, scroll}
         self.pending_click = None  # a single click waiting to see whether it becomes a double-click
@@ -325,6 +326,7 @@ class Page:
         ui.on("tm_postit", self.postit_key)
         ui.on("tm_bbmark", lambda e: self.bb_mark and self.bb_mark(e))
         ui.on("tm_bbmove", lambda e: self.bb_move and self.bb_move(e))
+        ui.on("tm_bp", lambda e: self.bp_key and self.bp_key(e))
         ui.timer(1.0, self.auto_update_tick)  # (here, outside every redrawn part, so it keeps running)
         self.window_box = ui.element("div")  # the shot window lives here: redrawing a tab never closes it
         self.window_timers = ui.element("div")
@@ -567,6 +569,9 @@ class Page:
         ("Best bits", "Choose files", "tm-step-bestbits",
          "Watch your videos one by one and tap Shift at every great moment. After 20-30 videos, let the app mark the "
          "rest. The final cut always uses the seconds around your marks."),
+        ("Best pictures", "Choose files", "tm-step-bestpics",
+         "Look through your pictures one by one: Shift marks a favourite (always in the video), Delete takes a bad one "
+         "out, → goes on."),
         ("Themes", "Themes", None,
          "Confirm what each shot is: tick the right ones, ⇄ moves a wrong one. Run the Second check."),
         ("Music", "Music & audio", None, "Choose the song, trim it, and put pins where you want the cuts."),
@@ -647,6 +652,8 @@ class Page:
         self.guide_bar.refresh()
         if self.GUIDE[self.guide_step][0] == "Best bits" and self.trip and self.best_bits_videos():
             self.best_bits_window()  # (straight into the videos)
+        if self.GUIDE[self.guide_step][0] == "Best pictures" and self.trip and self.best_pictures():
+            self.best_pictures_window()  # (straight into the pictures)
         if anchor:
             ui.run_javascript(f"setTimeout(() => {{ const e = document.getElementById('{anchor}'); "
                               f"if (e) e.scrollIntoView({{behavior: 'smooth', block: 'start'}}); }}, 400)")
@@ -905,6 +912,162 @@ class Page:
                      "videos for you to check. The final cut always uses the seconds around every mark.") \
                 .classes("text-sm text-gray-700")
             self.highlight_ideas_box()
+
+    def best_pictures_card(self) -> None:
+        """After the best bits of the videos: the photos one by one, big. ⭐ marks a favourite (always in the video),
+        🗑 takes one out of the trip, or just go on to the next."""
+        photos = self.best_pictures()
+        if not photos:
+            return
+        starred = sum(1 for it in photos if it.get("postits"))
+        with ui.card().classes("w-full mt-2 bg-sky-50").props('id="tm-step-bestpics"'):
+            with ui.row().classes("w-full items-center gap-3"):
+                ui.label("⭐ Best pictures").classes("text-lg font-semibold")
+                ui.label(f"{starred} of {len(photos)} pictures are favourites").classes("text-sm text-gray-600")
+                ui.space()
+                ui.button("From the first picture", icon="first_page",
+                          on_click=lambda: self.best_pictures_window(0)).props("flat color=light-blue-9 no-caps")
+                ui.button("Continue", icon="play_circle", on_click=lambda: self.best_pictures_window()) \
+                    .props("unelevated color=light-blue-8 no-caps")
+            ui.label("Each picture opens big, from the first one you took. Shift (or ⭐) marks a favourite: it is "
+                     "always in the video. Delete (or 🗑) takes it out of the trip (the file stays on your Mac). → or › "
+                     "just goes on to the next one, ← goes back.").classes("text-sm text-gray-700")
+
+    def best_pictures(self) -> list[dict]:
+        """The photos to look through, in the order you took them (only the ones in your selection)."""
+        return sorted((it for it in self.all_items if it["kind"] != "video" and it["chosen"]),
+                      key=lambda it: (it.get("taken_at") or "", it["path"]))
+
+    def best_pictures_window(self, k: int | None = None) -> None:
+        photos = self.best_pictures()
+        if not photos:
+            ui.notify("No pictures in your selection.", type="info")
+            return
+        if k is None:  # where you left off
+            last = self.trip._meta_json("best_pictures_at", None)
+            k = next((n for n, it in enumerate(photos) if it["path"] == last), 0)
+        state = {"k": max(0, min(k, len(photos) - 1)), "changed": False}
+        for old in list(self.window_box):
+            if isinstance(old, ui.dialog) and not old.value:
+                old.delete()
+
+        def src(it: dict) -> str:
+            try:
+                big = self.trip.big_picture(it["path"])
+                return "/data/" + big.relative_to(app_dir()).as_posix()
+            except Exception:  # noqa: BLE001 - (unreadable: its preview)
+                return data_url(it["thumb"]) if it.get("thumb") else ""
+
+        def warm(n: int) -> None:  # make the next picture ready while you look at this one
+            if 0 <= n < len(photos):
+                background_tasks.create(run.io_bound(lambda: src(photos[n])))
+
+        def go(n: int) -> None:
+            if n >= len(photos):
+                ui.notify("That was the last picture. ✓", type="positive")
+                dialog.close()
+                return
+            state["k"] = max(0, n)
+            self.trip._set_meta_json("best_pictures_at", photos[state["k"]]["path"])
+            body.refresh()
+
+        def star() -> None:
+            it = photos[state["k"]]
+            on = not it.get("postits")
+            self.trip.set_star(it["path"], on)
+            it["postits"] = [{"t": 0.0}] if on else []
+            state["changed"] = True
+            if on:
+                ui.notify("⭐ Favourite", timeout=700, type="positive")
+                go(state["k"] + 1)
+            else:
+                ui.notify("Not a favourite any more", timeout=900)
+                body.refresh()
+
+        def remove() -> None:
+            it = photos.pop(state["k"])
+            self.trip.remove([it["path"]])
+            state["changed"] = True
+            ui.notify(f"Removed {Path(it['path']).name} from the trip (See removed brings it back).", timeout=1200)
+            if not photos:
+                dialog.close()
+                return
+            go(min(state["k"], len(photos) - 1)) if state["k"] < len(photos) else go(len(photos))
+
+        async def turn(degrees: int) -> None:
+            it = photos[state["k"]]
+            await run.io_bound(self.trip.rotate, it["path"], degrees)
+            it["rotation"] = ((it.get("rotation") or 0) + degrees) % 360
+            state["changed"] = True
+            body.refresh()
+
+        def key(e) -> None:
+            what = (e.args or {}).get("a")
+            if what == "star":
+                star()
+            elif what == "remove":
+                remove()
+
+        def closed() -> None:
+            self.bp_key = None
+            if state["changed"]:
+                self.reload()
+                self.choose_keep_scroll = True
+                self.refresh_all()
+                self.choose_keep_scroll = False
+
+        with self.window_box, ui.dialog().props("maximized transition-show=none transition-hide=none") as dialog, \
+                ui.card().classes("w-full h-full gap-2 p-3 tm-bigwin bg-neutral-900 text-white").props("data-bestpics"):
+            @ui.refreshable
+            def body() -> None:
+                it = photos[state["k"]]
+                on = bool(it.get("postits"))
+                favourites = [x for x in photos if x.get("postits")]
+                with ui.row().classes("w-full items-center gap-3 no-wrap"):
+                    ui.label(f"⭐ Best pictures · Picture {state['k'] + 1} of {len(photos)}").classes("text-lg font-semibold")
+                    ui.label(f"{Path(it['path']).name} · {fmt_time(it['taken_at']) if it.get('taken_at') else ''}") \
+                        .classes("text-sm text-gray-300 truncate")
+                    ui.space()
+                    ui.label(f"{len(favourites)} favourites").classes("text-sm text-sky-300")
+                    ui.button(icon="rotate_left", on_click=lambda: turn(-90)).props("flat round dense color=grey-3") \
+                        .tooltip("Turn anti-clockwise")
+                    ui.button(icon="rotate_right", on_click=lambda: turn(90)).props("flat round dense color=grey-3") \
+                        .tooltip("Turn clockwise")
+                    ui.html('<button onclick="tmBB.fullscreen()" title="Full screen (Esc to leave)" style="color:#fff;'
+                            'border:1px solid #fff8;border-radius:4px;padding:5px 10px;font-size:14px">⛶ Full screen</button>')
+                    ui.button("Done", icon="check", on_click=dialog.close).props("unelevated no-caps color=primary")
+                with ui.element("div").classes("w-full flex justify-center items-center") \
+                        .style("height:calc(100vh - 250px);flex:none"):
+                    ui.html(f'<img id="tm-bp" src="{src(it)}" draggable="false" style="max-width:calc(100vw - 180px);'
+                            f'max-height:calc(100vh - 260px);object-fit:contain;border-radius:4px;'
+                            f'{"outline:4px solid #fbbf24;" if on else ""}">', sanitize=False)
+                with ui.row().classes("w-full items-center justify-center gap-3 no-wrap"):
+                    ui.button("Remove from trip", icon="delete", on_click=remove) \
+                        .props("outline no-caps color=red-4 size=lg").tooltip("Delete key · the file stays on your Mac")
+                    ui.button("⭐ Favourite" if not on else "★ Favourite (click to take off)", on_click=star) \
+                        .props(("unelevated color=amber-8" if not on else "unelevated color=amber-10") + " no-caps size=lg") \
+                        .tooltip("Shift · always in the video")
+                    ui.button("Next", icon="arrow_forward", on_click=lambda: go(state["k"] + 1)) \
+                        .props("outline no-caps color=grey-3 size=lg").tooltip("→ · no mark")
+                with ui.row().classes("w-full items-center gap-2 no-wrap overflow-x-auto").style("min-height:64px"):
+                    ui.label("Favourites:" if favourites else "Your favourites show here.").classes("text-xs text-gray-400")
+                    for x in favourites[-30:]:
+                        n = photos.index(x)
+                        ui.image(data_url(x["thumb"])).classes("h-14 w-20 rounded cursor-pointer flex-none") \
+                            .props("fit=cover no-spinner").style("outline:2px solid #fbbf24" if n == state["k"] else "") \
+                            .on("click", lambda n=n: go(n)).tooltip("Go there")
+                ui.label("Shift ⭐ favourite · Delete 🗑 remove · → next · ← back").classes("text-xs text-gray-400")
+                for side, step, icon in (("left", -1, "chevron_left"), ("right", 1, "chevron_right")):
+                    if 0 <= state["k"] + step < len(photos) or step == 1:
+                        ui.button(icon=icon, on_click=lambda s=step: go(state["k"] + s)) \
+                            .props(f"round unelevated color=grey-8 size=xl data-nav={step}") \
+                            .style(f"position:fixed;{side}:10px;top:45%;transform:translateY(-50%);z-index:20;opacity:.9")
+                warm(state["k"] + 1)
+
+            body()
+        self.bp_key = key
+        dialog.on("hide", closed)
+        dialog.open()
 
     def highlight_ideas_box(self) -> None:
         """The app learns your highlights (all trips) and suggests more in orange: keep or drop each one."""
@@ -1634,6 +1797,7 @@ class Page:
         self.sort_out_card()
         self.camera_clocks_card()
         self.postit_card()
+        self.best_pictures_card()
         with ui.row().classes("w-full items-center gap-3"):
             ui.label("Analyse:" if getattr(self, "guided", False) else "Step 2:").classes("text-lg font-semibold")
             ui.button(
@@ -9654,6 +9818,12 @@ function tmCropDown(e, box) {
   };
   box.addEventListener('pointermove', move); box.addEventListener('pointerup', up);
 }
+// The Best pictures window: Shift marks a favourite, Delete (or Backspace) takes the picture out of the trip.
+document.addEventListener('keydown', (e) => {
+  if (!document.getElementById('tm-bp') || e.repeat || ['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
+  if (e.key === 'Shift') emitEvent('tm_bp', {a: 'star'});
+  else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); emitEvent('tm_bp', {a: 'remove'}); }
+}, true);
 // ← → walk through the shots in the big window; hold the key to keep going (one shot every 0.35 s).
 function tmNavKey(e) {
   const all = document.querySelectorAll(`.q-dialog [data-nav="${e.key === 'ArrowLeft' ? -1 : 1}"]`);
