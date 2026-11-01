@@ -1276,3 +1276,22 @@ def test_a_big_picture_is_made_the_right_way_round(tmp_path, monkeypatch):
     trip.rotate(path, 90)
     with Image.open(trip.big_picture(path)) as img:
         assert img.size == (1200, 1800)  # turned: a new big picture, upright
+
+
+def test_the_app_sorts_the_other_shots_into_real_themes_when_asked(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    folder = tmp_path / "trip"
+    folder.mkdir()
+    for n in range(3):
+        Image.new("RGB", (160, 90), "red").save(folder / f"p{n}.jpg")
+    trip = catalog.Trip(folder)
+    trip.prepare()
+    rng = np.random.default_rng(3)
+    for r in trip.items():  # pictures like none of the themes' words: Other
+        v = rng.normal(size=512).astype(np.float32)
+        trip.execute("UPDATE items SET clip = ? WHERE path = ?", ((v / np.linalg.norm(v)).tobytes(), r["path"]))
+    trip.execute("UPDATE items SET theme_auto = 'Other'")  # (as the app had them)
+    trip.set_sort_other(True)
+    assert all(r["theme"] != "Other" and not r["theme_ok"] for r in trip.theme_rows())  # each in a real theme
+    assert trip.sort_other_on()

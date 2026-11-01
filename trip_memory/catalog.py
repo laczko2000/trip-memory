@@ -1883,8 +1883,11 @@ class Trip:
         seen = [r for r in rows if r["clip"] is not None]
         vectors = np.array([np.frombuffer(r["clip"], dtype=np.float32) for r in seen]) if seen else np.zeros((0, 512))
         confirmed = [(i, r["theme"]) for i, r in enumerate(seen) if r["theme"] in names]
-        guesses = {r["path"]: g for r, g in zip(seen, themes.suggest(vectors, activities, confirmed,
-                                                                     self._earlier_examples(activities)))}
+        # "Sort the Other shots": every picture the app can see goes to its most likely real theme, however unsure.
+        sorting = self.sort_other_on() and seen
+        choose_from = [a for a in activities if a["name"] != themes.OTHER] if sorting else activities
+        guesses = {r["path"]: g for r, g in zip(seen, themes.suggest(vectors, choose_from, confirmed,
+                                                                     self._earlier_examples(choose_from)))}
         updates = []
         for r in rows:
             if r["path"] in guesses:
@@ -1897,6 +1900,15 @@ class Trip:
         with self._lock:
             self.db.executemany("UPDATE items SET theme_auto = ?, theme_sure = ? WHERE path = ?", updates)
             self.db.commit()
+
+    def sort_other_on(self) -> bool:
+        return bool(self._meta_json("sort_other", False))
+
+    def set_sort_other(self, on: bool) -> None:
+        """On: no shot the app has seen stays in Other; each goes to the theme it looks most like (you check them).
+        Off: the unsure ones go back to Other."""
+        self._set_meta_json("sort_other", bool(on))
+        self.suggest_themes()
 
     def theme_check(self) -> dict:
         """The second check, run now: {"agree" (0..1), "shots": [{"path", "now", "better", "why", "yours"}],

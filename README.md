@@ -59,6 +59,8 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.35** Themes: when many shots sit in Other, **Let the app sort them** puts each one into the theme it looks most like, even when unsure; you then check them theme by theme (or run the Second check). Your confirmed shots stay as they are, and **Put the unsure ones back in Other** undoes it. Needs Analyse first (the button says so).
+
 - **1.34.3** People is back in the guided steps, right after Analyse: name the faces the app found, then go on to Themes.
 
 - **1.34.2** Favourite pictures carry a gold ★ badge (top right) wherever they show: Choose files, Library, Themes, Storyboard and the pickers.

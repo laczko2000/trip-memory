@@ -5290,6 +5290,20 @@ class Page:
 
     THEME_PAGE = 60
 
+    async def sort_other(self, on: bool) -> None:
+        before = sum(1 for r in self.trip.theme_rows() if r["theme"] == themes.OTHER and not r["theme_ok"])
+        note = ui.notification("Sorting the Other shots into themes…", spinner=True, timeout=None)
+        try:
+            await self.activity_vectors()  # (what each theme's words look like to the app)
+            await run.io_bound(self.trip.set_sort_other, on)
+        finally:
+            note.dismiss()
+        self.theme_shown = None  # (show the first theme with shots)
+        after = sum(1 for r in self.trip.theme_rows() if r["theme"] == themes.OTHER and not r["theme_ok"])
+        ui.notify(f"Sorted {before - after} shots into themes: check them theme by theme." if on else
+                  f"{after} unsure shots are back in Other.", type="positive")
+        self.themes_view.refresh()
+
     @ui.refreshable
     def themes_view(self) -> None:
         if not self.showing("Themes"):
@@ -5331,6 +5345,30 @@ class Page:
         if not self.trip.has_fingerprints():
             ui.label("Tip: run Analyse in Choose files first. The app then judges each picture itself; until then it "
                      "only guesses from tags.").classes("text-sm text-orange-700")
+        other = [r for r in rows if r["theme"] == themes.OTHER and not r["theme_ok"]]
+        if self.trip.sort_other_on():
+            with ui.row().classes("w-full items-center gap-2"):
+                ui.label("✨ The app put every shot it could into a real theme, even when unsure: check them theme by "
+                         "theme (tick the right ones, ⇄ the wrong ones), or run the Second check.") \
+                    .classes("text-sm text-indigo-700 flex-1")
+                ui.button("Put the unsure ones back in Other", on_click=lambda: self.sort_other(False)) \
+                    .props("flat dense no-caps size=sm")
+        elif len(other) >= 5:
+            with ui.card().classes("w-full bg-indigo-50"):
+                with ui.row().classes("w-full items-center gap-3"):
+                    ui.label(f"❔ {len(other)} shots are in Other.").classes("font-semibold")
+                    ui.label("The app can put each one into the theme it looks most like, even when it isn't sure; "
+                             "you then check them theme by theme. Shots you confirmed stay as they are.") \
+                        .classes("text-sm text-gray-700 flex-1")
+                    if self.trip.has_fingerprints():
+                        ui.button("Let the app sort them", icon="auto_awesome", on_click=lambda: self.sort_other(True)) \
+                            .props("unelevated no-caps color=indigo-7")
+                    else:
+                        ui.button("Analyse first", icon="search",
+                                  on_click=lambda: self.go_step(next(n for n, g in enumerate(self.GUIDE)
+                                                                     if g[0] == "Analyse"))) \
+                            .props("unelevated no-caps color=green-8") \
+                            .tooltip("The app needs to look at each picture (Analyse) before it can sort them")
         saved_moments = self.trip.moments()
         # Like folders: drag a sub-theme onto another theme, or out (to the box below) to make it a theme of its
         # own; drag a theme onto another to put it inside as a sub-theme.
