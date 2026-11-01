@@ -833,7 +833,8 @@ class Page:
                     .tooltip("Every look-alike set: the ticks as they are (a set you didn't touch keeps only its ⭐), "
                              "and the set is done")
                 ui.button("Keep only the ⭐ of every set", icon="star", on_click=self.suggest).props("outline") \
-                    .tooltip("Untick every double or triple except the best one (sharpest, best exposed)")
+                    .tooltip("Keep only the best of every double or triple (sharpest, best exposed): the rest, and anything else "
+                             "unticked, leave the trip at once (files stay on the Mac)")
                 self.remove_button = ui.button(f"Remove {total - chosen} unticked from the trip", icon="delete_sweep",
                                                on_click=self.confirm_remove).props("color=negative")
                 self.remove_button.set_visibility(total > chosen)
@@ -2213,8 +2214,12 @@ class Page:
         self.storyboard_view.refresh()  # only drawn when you are on the Storyboard
 
     def suggest(self) -> None:
-        n = self.trip.untick_doubles()
-        ui.notify(f"Unticked {n} doubles: only the ⭐ of each set stays ticked. Everything else you chose is unchanged.")
+        """Keep only the ⭐ of every set: the other doubles (and anything else you unticked) leave the trip at once,
+        no second button. Files stay on the Mac; See removed brings them back."""
+        self.trip.untick_doubles()
+        n = self.trip.remove_unchosen()
+        ui.notify(f"Kept only the ⭐ of each set: {n} files left the trip (See removed brings them back).",
+                  type="positive")
         self.refresh_all()
 
     async def link_story(self, number: int, to_next: bool) -> None:
