@@ -59,6 +59,8 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.23** Upright videos side by side: never the same video twice next to itself. The partner is another upright video, from the same part of the story first, else the nearest in time from anywhere in the trip; with no other upright video it plays alone.
+
 - **1.22** Editor: while you drag a clip near the right (or left) end of the clip strip, the strip scrolls towards the end (or the start).
 
 - **1.21** Find an alternative: in the editor (click a clip, or double-click it to open it big) the app suggests shots that could take its place, best first: they look alike, were taken around the same time, share the theme, are sharp, aren't in the video yet and (videos) are long enough. 4 ideas at a time, 'Only this theme' switch, one click swaps it in with the same length.

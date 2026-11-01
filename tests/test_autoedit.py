@@ -412,20 +412,17 @@ def test_an_upright_video_in_a_landscape_video_always_gets_company():
     shots = [Shot(path="/v0.mp4", kind="video", start=0.0, seconds=3.0),
              Shot(path="/v1.mp4", kind="video", start=0.0, seconds=3.0)]
     # Every upright video is already a shot of its own, even in Normal: another moment of the other one goes next
-    # to it, never the seconds the video already shows.
+    # to it, never the seconds the video already shows, and never the same video twice side by side.
     out = pack(shots, rows, Limits(pack="normal", landscape=True), {})
-    assert all(s.effects.get("side") for s in out)
-    first = out[0].effects
-    assert len(first["side"]) == 2 and "/v0.mp4" in first["side"]  # three moments: one of them its own
-    own = first["starts"][first["side"].index("/v0.mp4")]
-    assert own >= 3.0 + 0.5  # another moment of itself, never the seconds it shows
+    assert out[0].effects["side"] == ["/v1.mp4"] and out[1].effects["side"] == ["/v0.mp4"]
+    assert out[0].effects["starts"][0] >= 3.0  # (v1's first seconds are its own shot)
     short = pack([Shot(path="/v0.mp4", kind="video", start=0.0, seconds=1.6)], rows[:1],
                  Limits(pack="normal", landscape=True), {})
-    assert short[0].effects["side"] == ["/v0.mp4"]  # alone in the trip: two of its own moments side by side
+    assert not short[0].effects.get("side")  # alone in the trip: alone, never next to itself
     assert _free_part(4.0, 3.0, [(0.0, 3.0)]) is None
 
 
-def test_upright_videos_side_by_side_only_come_from_the_same_part_of_the_story():
+def test_upright_videos_side_by_side_never_the_same_video_twice():
     from trip_memory.autoedit import Limits, Shot, pack
     rows = [{"path": "/a.mp4", "kind": "video", "upright": True, "duration": 10.0, "story": 1, "chapter": 0,
              "taken_at": "2025-07-03T10:00:00"},
@@ -435,8 +432,8 @@ def test_upright_videos_side_by_side_only_come_from_the_same_part_of_the_story()
              "taken_at": "2025-07-03T10:00:30"}]
     out = pack([Shot(path="/a.mp4", kind="video", start=0.0, seconds=3.0)], rows,
                Limits(pack="normal", landscape=True), {})
-    # Neither the landscape video nor the upright one of another part: its own moments next to it instead.
-    assert out[0].effects["side"] == ["/a.mp4", "/a.mp4"]
+    # Never the landscape video, never itself: another upright video, from another part of the story if need be.
+    assert out[0].effects["side"] == ["/b.mp4"]
 
 
 def test_room_for_the_opening_and_ending_cards():

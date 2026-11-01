@@ -915,36 +915,28 @@ def pack(shots: list[Shot], candidates: list[dict], limits: Limits, curves: dict
                 picked = [(g, None) for g in room[:extra]]
                 spare[key] = [x for x in spare.get(key, []) if x not in room[:extra]]
             if len(picked) < want - 1:
-                # ... else other moments of upright videos of the same part of the story already in the video, this
-                # one's own first (never the seconds already shown): one clip cut into three moments side by side.
-                # Never from another part of the story, and never a landscape video.
+                # ... else other upright videos already in the video (the seconds not shown yet): first from the
+                # same part of the story, then the nearest in time from anywhere. Never this same video again next to
+                # itself (two copies of one clip side by side look wrong), and never a landscape video.
                 used = _used_windows(out + shots[len(out):], rows)
                 for g, a in picked:
                     if a is not None:
                         used.setdefault(_source(g["path"]), []).append((a, a + shot.seconds))
-                own = rows.get(shot.path)
+                taken = {_source(shot.path)} | {_source(g["path"]) for g, _ in picked}
                 others = sorted((x for x in candidates if x.get("upright") is True and x["kind"] == "video"
-                                 and _group_of(x) == _group_of(r) and "#" not in x["path"] and not x.get("locks") and not x.get("locked")
-                                 and _source(x["path"]) != _source(shot.path)
-                                 and x["path"] not in {g["path"] for g, _ in picked}),
-                                key=lambda x: abs(_when(x) - when))
-                for g in others + ([own, own] if own else []):
+                                 and "#" not in x["path"] and not x.get("locks") and not x.get("locked")
+                                 and _source(x["path"]) not in taken),
+                                key=lambda x: (_group_of(x) != _group_of(r), abs(_when(x) - when)))
+                for g in others:
                     if len(picked) >= want - 1:
                         break
+                    if _source(g["path"]) in taken:
+                        continue
                     a = _free_part(g.get("duration") or 0.0, shot.seconds, used.get(_source(g["path"]), []))
                     if a is not None:
                         picked.append((g, a))
+                        taken.add(_source(g["path"]))
                         used.setdefault(_source(g["path"]), []).append((a, a + shot.seconds))
-            if not picked and own:
-                # A short clip with no other upright video in its part of the story: itself again, a moment later
-                # (the same clip in two timings rather than alone with black sides).
-                length = own.get("duration") or shot.seconds
-                if length > shot.seconds + 0.2:
-                    lag = min(length - shot.seconds, max(0.4, shot.seconds * 0.5))
-                    a = shot.start + lag if shot.start + lag + shot.seconds <= length + 1e-3 else max(0.0, shot.start - lag)
-                else:  # (shorter than its cut: the other half of it, holding its last picture at the end)
-                    a = length * 0.5
-                picked.append((own, round(a, 2)))
             group = [g for g, _ in picked]
             if group:
                 starts = []
