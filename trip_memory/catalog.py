@@ -1534,22 +1534,31 @@ class Trip:
         self._set_meta_json("highlight_ideas", [i for i in self.highlight_ideas()
                                                 if not (i["path"] == path and abs(i["t"] - t) < 0.05)])
 
-    def keep_idea(self, path: str, t: float, suggested: float | None = None) -> None:
+    def keep_idea(self, path: str, t: float, suggested: float | None = None, learn: bool = True) -> None:
         """A suggestion was right: it becomes a ⭐ highlight (and the app learns from it). suggested: the second
-        the app suggested, when you put the highlight a little before or after it."""
+        the app suggested, when you put the highlight a little before or after it. learn=False: just the answer
+        (learn_highlights later)."""
         self._forget_idea(path, t if suggested is None else suggested)
         self.add_postit(path, t)
+        if not learn:
+            return
         try:
             self.learn_highlights()
         except Exception:  # (without the picture model now: it learns the next time it looks)
             traceback.print_exc()
 
-    def drop_idea(self, path: str, t: float) -> None:
-        """A suggestion was wrong: it goes, and the app learns what is not a highlight for you."""
+    def drop_idea(self, path: str, t: float, learn: bool = True) -> None:
+        """A suggestion was wrong: it goes, and the app learns what is not a highlight for you (learn=False: just
+        the answer; learn_drop later)."""
         self._forget_idea(path, t)
         drops = self._meta_json("highlight_drops", {})
         drops.setdefault(path, []).append(round(t, 2))
         self._set_meta_json("highlight_drops", drops)
+        if learn:
+            self.learn_drop(path, t)
+
+    def learn_drop(self, path: str, t: float) -> None:
+        """Remember what this wrong suggestion looked like, so the app suggests fewer like it."""
         rows = [dict(r) for r in self.query("SELECT * FROM items WHERE path = ?", (path,))]
         if not rows:
             return

@@ -59,6 +59,8 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.31** Best bits is its own step now (step 3, right after Doubles), and it opens straight into a new big video viewer: only your videos, from the first one you took, with ‹ › (or ← →) to go back and on, and the usual controls (play/pause, ±1 s and ±5 s, one frame at a time, ¼× to 2× speed, sound, Full screen). Tap Shift (or 📌 Mark this moment) at every great moment: your marks show on the timeline and as pictures underneath (click to go there, ✕ to take one off). After 20-30 videos press Let the app mark the rest: it learns from your marks, marks the other videos, and you check its marks in the same viewer (Keep, Not this, or Keep all). The final cut always uses the seconds around every mark.
+
 - **1.30.4** Second check, simpler: under each shot just click its theme. Four boxes: the theme the check suggests, the one it's in now (keeps it), the next best guess, and Other… for any other theme. (Run the Second check again to get the third guess.)
 
 - **1.30.3** Themes › Second check: each shot now has Move (to the theme the check suggests) on the left, Change in the middle (opens a list of all your themes, pick any other one) and Keep on the right.

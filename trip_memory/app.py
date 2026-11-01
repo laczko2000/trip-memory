@@ -213,6 +213,7 @@ class Page:
         self.update_due: float | None = None
         self.draft_resume = 0.0
         self.draft_busy = False
+        self.bb_mark = None  # the Best bits viewer's "mark this moment", while it is open
         self.lock_views: dict[str, list[tuple]] = {}  # clip -> the places on screen that show its locked moments
         self.library_focus: dict | None = None  # one shot opened by double-click: {path, tab, name, scroll}
         self.pending_click = None  # a single click waiting to see whether it becomes a double-click
@@ -319,6 +320,7 @@ class Page:
         ui.on("tm_title_click", self.title_click)
         ui.on("tm_title_menu", self.title_menu)
         ui.on("tm_postit", self.postit_key)
+        ui.on("tm_bbmark", lambda e: self.bb_mark and self.bb_mark(e))
         ui.timer(1.0, self.auto_update_tick)  # (here, outside every redrawn part, so it keeps running)
         self.window_box = ui.element("div")  # the shot window lives here: redrawing a tab never closes it
         self.window_timers = ui.element("div")
@@ -555,9 +557,11 @@ class Page:
          "don't want in the video."),
         ("Doubles", "Choose files", "tm-step-doubles",
          "Look-alike shots are grouped: keep the best of each (⭐ is the app's pick), leave the rest out."),
-        ("Themes & best bits", "Themes", None,
-         "Confirm what each shot is: tick the right ones, ⇄ moves a wrong one. Run the Second check. Mark the best "
-         "bits in your videos with post-its."),
+        ("Best bits", "Choose files", "tm-step-bestbits",
+         "Watch your videos one by one and tap Shift at every great moment. After 20-30 videos, let the app mark the "
+         "rest. The final cut always uses the seconds around your marks."),
+        ("Themes", "Themes", None,
+         "Confirm what each shot is: tick the right ones, ⇄ moves a wrong one. Run the Second check."),
         ("Music", "Music & audio", None, "Choose the song, trim it, and put pins where you want the cuts."),
         ("Story", "Storyboard", None,
          "Choose how the story runs (As it happened, By theme or My story) and press Make the first cut."),
@@ -598,9 +602,10 @@ class Page:
             with ui.row().classes("w-full items-center gap-3 no-wrap"):
                 ui.label(f"Step {k + 1} of {len(self.GUIDE)}: {title}").classes("text-lg font-semibold flex-none")
                 ui.label(words).classes("text-sm text-gray-700 flex-1")
-                if k == 2:
-                    ui.button("📌 Mark the best bits", on_click=self.guide_best_bits).props("outline dense no-caps")
-                if k == 5:
+                if self.GUIDE[k][0] == "Best bits":
+                    ui.button("📌 Open the video viewer", on_click=lambda: self.best_bits_window()) \
+                        .props("unelevated dense no-caps color=amber-8")
+                if self.GUIDE[k][0] == "Watch & finish":
                     ui.button("Open the editor", icon="movie_edit", on_click=lambda: self.open_editor(True)) \
                         .props("unelevated dense no-caps color=positive")
                 if k:
@@ -633,6 +638,8 @@ class Page:
         _, tab, anchor, _ = self.GUIDE[self.guide_step]
         self.panels.set_value(self.guide_tab(tab))
         self.guide_bar.refresh()
+        if self.GUIDE[self.guide_step][0] == "Best bits" and self.trip and self.best_bits_videos():
+            self.best_bits_window()  # (straight into the videos)
         if anchor:
             ui.run_javascript(f"setTimeout(() => {{ const e = document.getElementById('{anchor}'); "
                               f"if (e) e.scrollIntoView({{behavior: 'smooth', block: 'start'}}); }}, 400)")
@@ -766,11 +773,20 @@ class Page:
                     .classes("text-lg font-semibold")
                 ui.label(f"{marked} of {len(videos)} videos marked").classes("text-sm text-gray-600")
                 ui.space()
-                ui.button("Mark the best bits", icon="sticky_note_2",
-                          on_click=lambda: self.postit_dialog(0)).props("unelevated color=amber-8 no-caps")
-            ui.label("Watch each video and tap the Shift key at every exciting bit (a jump, a splash, a laugh) to stick "
-                     "a post-it there. Your first post-it becomes the video's picture everywhere, which makes sorting "
-                     "themes much quicker, and the first cut uses the seconds around it. Optional: skip any video.") \
+                waiting = len({i["path"] for i in self.trip.highlight_ideas()})
+                if waiting:
+                    ui.button(f"Check the app's marks ({waiting} videos)", icon="auto_awesome",
+                              on_click=lambda: self.best_bits_window(0, only_ideas=True)) \
+                        .props("outline color=orange-8 no-caps")
+                if marked:
+                    ui.button("From the first video", icon="first_page",
+                              on_click=lambda: self.best_bits_window(0)).props("flat color=amber-9 no-caps")
+                ui.button("Continue marking" if marked else "Start marking", icon="play_circle",
+                          on_click=lambda: self.best_bits_window()).props("unelevated color=amber-8 no-caps")
+            ui.label("Each video opens big, from the first one you took, with the usual video controls. Tap Shift at "
+                     "every great moment (a jump, a splash, a laugh); ‹ › go to the previous or next video. After "
+                     "20-30 videos, press Let the app mark the rest: it learns from your marks and marks the other "
+                     "videos for you to check. The final cut always uses the seconds around every mark.") \
                 .classes("text-sm text-gray-700")
             self.highlight_ideas_box()
 
@@ -1032,13 +1048,211 @@ class Page:
     BEST_BITS = "Mark the best bits"
 
     def postit_dialog(self, k: int) -> None:
-        """Mark the best bits: the chosen videos one after the other in the same big window as everywhere (full
-        screen, the strip to look through with the mouse, Shift for a ⭐, big ‹ › on the sides and ← →)."""
-        videos = [it["path"] for it in self.all_items if it["kind"] == "video" and it["chosen"]]
+        self.best_bits_window(k)
+
+    def best_bits_videos(self) -> list[dict]:
+        """The videos to mark, in the order you took them (only the ones in your selection)."""
+        return sorted((it for it in self.all_items if it["kind"] == "video" and it["chosen"] and not it.get("part_of")),
+                      key=lambda it: (it.get("taken_at") or "", it["path"]))
+
+    def best_bits_window(self, k: int | None = None, only_ideas: bool = False) -> None:
+        """Best bits: every video big, one after the other from the first, with the usual video controls. Shift
+        (or 📌 Mark) marks a great moment; the final cut always uses the seconds around your marks. After 20-30
+        videos, Let the app mark the rest learns from your marks and marks the others for you to check here."""
+        videos = self.best_bits_videos()
         if not videos:
+            ui.notify("No videos in your selection.", type="info")
             return
-        self.nav_order[self.BEST_BITS] = videos
-        self.shot_window(videos[max(0, min(k, len(videos) - 1))], self.BEST_BITS)
+        if only_ideas:  # (checking the app's marks: just the videos it marked)
+            have = {i["path"] for i in self.trip.highlight_ideas()}
+            videos = [v for v in videos if v["path"] in have]
+            if not videos:
+                ui.notify("No marks from the app left to check.", type="info")
+                return
+        if k is None:  # where you left off: the first video without a mark
+            k = next((n for n, v in enumerate(videos) if not v.get("postits")), 0)
+        k = max(0, min(k, len(videos) - 1))
+        it = videos[k]
+        path = it["path"]
+        state = {"nav": False}
+        for old in list(self.window_box):
+            if isinstance(old, ui.dialog) and not old.value:
+                old.delete()
+        try:
+            src = self.video_src(Path(path))
+        except ValueError:
+            src = ""
+        rot = it.get("rotation") or 0
+
+        def go(to: int, dialog) -> None:
+            state["nav"] = True
+            dialog.close()
+            with self.window_timers:
+                ui.timer(0.02, lambda: self.best_bits_window(to, only_ideas), once=True)
+
+        def closed() -> None:
+            if self.bb_mark is marked:
+                self.bb_mark = None
+            if not state["nav"]:
+                self.reload()
+                self.choose_keep_scroll = True
+                self.refresh_all()
+                self.choose_keep_scroll = False
+
+        with self.window_box, ui.dialog().props("maximized transition-show=none transition-hide=none") as dialog, \
+                ui.card().classes("w-full h-full gap-2 p-3 tm-bigwin bg-neutral-900 text-white").props("data-bestbits"):
+            def count_words() -> str:
+                done = self.trip.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'video' AND chosen = 1 "
+                                       "AND removed = 0 AND part_of IS NULL AND postits IS NOT NULL")[0]["n"]
+                return f"{done} of {len(self.best_bits_videos())} videos marked"
+
+            with ui.row().classes("w-full items-center gap-3 no-wrap"):
+                ui.label(("✨ The app's marks to check · " if only_ideas else "📌 Best bits · ")
+                         + f"Video {k + 1} of {len(videos)}").classes("text-lg font-semibold")
+                ui.label(f"{Path(path).name} · {fmt_time(it['taken_at']) if it.get('taken_at') else ''}"
+                         f" · {fmt_length(it.get('duration') or 0)}").classes("text-sm text-gray-300 truncate")
+                ui.space()
+                counter = ui.label(count_words()).classes("text-sm text-amber-300")
+                learned = self.trip.highlights_learned()[0]
+                ready = learned >= highlights.START_FROM
+                ui.button("Let the app mark the rest", icon="auto_awesome",
+                          on_click=lambda: self.mark_the_rest(dialog)) \
+                    .props("unelevated no-caps color=orange-8" + ("" if ready else " outline")) \
+                    .tooltip("Learns from your marks and marks the videos you haven't marked yet; you then check its "
+                             "marks here. Best after 20-30 videos." if ready else
+                             f"Mark at least {highlights.START_FROM} moments first (20-30 videos is best).")
+                ui.html('<button onclick="tmBB.fullscreen()" title="Full screen (Esc to leave)" style="color:#fff;'
+                        'border:1px solid #fff8;border-radius:4px;padding:5px 10px;font-size:14px">⛶ Full screen</button>')
+                ui.button("Done", icon="check", on_click=dialog.close).props("unelevated no-caps color=primary")
+            with ui.element("div").classes("w-full flex justify-center").style("flex:1 1 auto;min-height:0"):
+                ui.html(f'<video id="tm-bb-video" src="{src}" controls muted autoplay playsinline preload="auto" '
+                        f'style="width:100%;height:calc(100vh - 260px);background:#000;'
+                        f'object-fit:contain;{f"rotate:{rot}deg;" if rot else ""}"></video>')
+            # Your marks on the timeline (amber), the app's marks to check (orange, dashed).
+            ui.html(f'<div id="tm-bb-bar" data-len="{float(it.get("duration") or 0):.3f}" style="position:relative;'
+                    'width:100%;height:22px;border-radius:4px;background:#374151;cursor:pointer" '
+                    'title="Your marks (yellow) and the app\'s marks to check (orange): click to go there"></div>') \
+                .classes("w-full")
+            with ui.row().classes("w-full items-center gap-1 justify-center no-wrap"):
+                for label, js, tip in (("−5 s", "tmBB.skip(-5)", "Back 5 seconds"),
+                                       ("−1 s", "tmBB.skip(-1)", "Back 1 second"),
+                                       ("◀ frame", "tmBB.frame(-1)", "One frame back (,)"),
+                                       ("Play / pause", "tmBB.toggle()", "Space"),
+                                       ("frame ▶", "tmBB.frame(1)", "One frame on (.)"),
+                                       ("+1 s", "tmBB.skip(1)", "On 1 second"),
+                                       ("+5 s", "tmBB.skip(5)", "On 5 seconds")):
+                    ui.button(label, on_click=lambda js=js: ui.run_javascript(js)) \
+                        .props("dense no-caps outline color=white").tooltip(tip)
+                ui.separator().props("vertical dark")
+                for speed, word in ((0.25, "¼×"), (0.5, "½×"), (1, "1×"), (2, "2×")):
+                    ui.button(word, on_click=lambda sp=speed: ui.run_javascript(f"tmBB.speed({sp})")) \
+                        .props("dense no-caps flat color=grey-4").tooltip(f"Play at {speed:g}× speed")
+                ui.button("Sound", icon="volume_up", on_click=lambda: ui.run_javascript("tmBB.sound()")) \
+                    .props("dense no-caps flat color=grey-4").tooltip("Sound on / off")
+                ui.separator().props("vertical dark")
+                ui.button("📌 Mark this moment", on_click=lambda: ui.run_javascript("tmBB.mark()")) \
+                    .props("unelevated no-caps color=amber-8").tooltip("Or tap Shift")
+                ui.label("").props("id=tm-bb-time").classes("text-sm text-gray-300 w-24 text-right")
+
+            @ui.refreshable
+            def marks_row() -> None:
+                mine = self.trip.postits(path)
+                ideas = self.trip.highlight_ideas(path)
+                ui.run_javascript(f"tmBB.marks({json.dumps([m['t'] for m in mine])}, "
+                                  f"{json.dumps([i['t'] for i in ideas])})")
+                with ui.row().classes("w-full items-center gap-2 no-wrap overflow-x-auto").style("min-height:96px"):
+                    if not mine and not ideas:
+                        ui.label("Play the video and tap Shift (or 📌 Mark this moment) at every great moment: a jump, a "
+                                 "splash, a laugh. The final cut always uses the seconds around your marks. No great "
+                                 "moment? Just go on with ›.").classes("text-sm text-gray-300")
+                    for n, m in enumerate(mine):
+                        with ui.column().classes("gap-0 p-1 rounded border-2 border-amber-400 bg-neutral-800 "
+                                                 "items-center flex-none"):
+                            if m.get("thumb"):
+                                ui.image(data_url(m["thumb"])).classes("w-28 rounded cursor-pointer") \
+                                    .style("aspect-ratio:16/10").props("fit=cover no-spinner") \
+                                    .on("click", lambda t=m["t"]: ui.run_javascript(f"tmBB.at({t:.2f})")) \
+                                    .tooltip("Go there")
+                            with ui.row().classes("items-center gap-0 no-wrap"):
+                                ui.label(f"📌 {clock(m['t'])}").classes("text-xs font-semibold text-amber-300")
+                                ui.button(icon="close", on_click=lambda n=n: take_off(n)) \
+                                    .props("flat dense round size=xs color=grey-4").tooltip("Take this mark off")
+                    for i in ideas:
+                        with ui.column().classes("gap-0 p-1 rounded border-2 border-orange-500 border-dashed "
+                                                 "bg-neutral-800 items-center flex-none"):
+                            picture = self.trip.moment_picture(it, i["t"])
+                            if picture:
+                                ui.image(data_url(picture)).classes("w-28 rounded cursor-pointer") \
+                                    .style("aspect-ratio:16/10").props("fit=cover no-spinner") \
+                                    .on("click", lambda t=i["t"]: ui.run_javascript(f"tmBB.at({t:.2f})")) \
+                                    .tooltip("Go there")
+                            ui.label(f"✨ the app's mark · {clock(i['t'])}").classes("text-xs text-orange-300")
+                            with ui.row().classes("items-center gap-1 no-wrap"):
+                                ui.button("Keep", on_click=lambda t=i["t"]: answer(t, True)) \
+                                    .props("dense no-caps unelevated size=sm color=orange-8")
+                                ui.button("Not this", on_click=lambda t=i["t"]: answer(t, False)) \
+                                    .props("dense no-caps flat size=sm color=grey-4")
+                    if ideas and len(ideas) > 1:
+                        ui.button("Keep all of the app's marks here", icon="done_all",
+                                  on_click=lambda: keep_all([i["t"] for i in ideas])) \
+                            .props("dense no-caps outline color=orange-4")
+
+            def keep_all(times: list[float]) -> None:
+                for t in times:
+                    answer(t, True, quiet=True)
+                background_tasks.create(run.io_bound(self.learn_quietly))
+                ui.notify(f"📌 Kept {len(times)}.", timeout=1200)
+
+            def take_off(n: int) -> None:
+                self.trip.change_postit(path, n, remove=True)
+                counter.text = count_words()
+                marks_row.refresh()
+
+            def answer(t: float, keep: bool, quiet: bool = False) -> None:
+                (self.trip.keep_idea if keep else self.trip.drop_idea)(path, t, learn=False)
+                # (learning from it looks at the video's frames: slow, so it happens in the background)
+                if not quiet:
+                    background_tasks.create(run.io_bound(self.learn_quietly if keep else self.trip.learn_drop,
+                                                         *(() if keep else (path, t))))
+                counter.text = count_words()
+                if not quiet:
+                    ui.notify("📌 Kept." if keep else "Not this one: the app learns from it.", timeout=1200)
+                marks_row.refresh()
+
+            def marked(e) -> None:
+                try:
+                    t = float((e.args or {}).get("t"))
+                except (TypeError, ValueError, AttributeError):
+                    return
+                self.trip.add_postit(path, round(t, 2))
+                ui.notify(f"📌 Marked at {clock(t)}", timeout=1000, type="positive")
+                counter.text = count_words()
+                marks_row.refresh()
+
+            marks_row()
+            self.bb_mark = marked
+            for side, step, icon in (("left", -1, "chevron_left"), ("right", 1, "chevron_right")):
+                if 0 <= k + step < len(videos):
+                    ui.button(icon=icon, on_click=lambda s=step: go(k + s, dialog)) \
+                        .props(f"round unelevated color=grey-8 size=xl data-nav={step}") \
+                        .style(f"position:fixed;{side}:10px;top:45%;transform:translateY(-50%);z-index:20;opacity:.9") \
+                        .tooltip(("Previous" if step < 0 else "Next") + " video (← →)")
+            ui.label("Space plays and pauses · Shift marks · , and . step one frame · ← → previous / next video") \
+                .classes("text-xs text-gray-400")
+        dialog.on("hide", closed)
+        dialog.open()
+        ui.run_javascript("setTimeout(() => tmBB.start(), 60)")
+
+    async def mark_the_rest(self, dialog) -> None:
+        """Learn from your marks and mark the videos you haven't marked yet; then check them in the viewer."""
+        if self.trip.highlights_learned()[0] < highlights.START_FROM:
+            ui.notify(f"Mark at least {highlights.START_FROM} moments first; 20-30 videos marked works best.",
+                      type="warning")
+            return
+        dialog.close()
+        await self.suggest_highlights()
+        if self.trip.highlight_ideas():
+            self.best_bits_window(0, only_ideas=True)
 
     def postit_strip_html(self, it: dict, found: list[dict], start: float, end: float, picture) -> str:
         span = max(0.1, end - start)
@@ -8458,6 +8672,59 @@ function tmTitleDown(e, el) {
   };
   el.addEventListener('pointermove', move); el.addEventListener('pointerup', up);
 }
+// The Best bits viewer: the usual video controls, Shift (or 📌) marks the moment, the bar shows the marks.
+window.tmBB = {
+  v: () => document.getElementById('tm-bb-video'),
+  skip(s) { const v = this.v(); if (v) v.currentTime = Math.max(0, Math.min(v.duration || 1e9, v.currentTime + s)); },
+  frame(n) { const v = this.v(); if (v) { v.pause(); v.currentTime = Math.max(0, v.currentTime + n / 30); } },
+  toggle() { const v = this.v(); if (v) { if (v.paused) v.play().catch(() => {}); else v.pause(); } },
+  speed(x) { const v = this.v(); if (v) v.playbackRate = x; },
+  sound() { const v = this.v(); if (v) v.muted = !v.muted; },
+  fullscreen() {  // the whole page: it stays full screen as you go from video to video
+    if (document.fullscreenElement) document.exitFullscreen();
+    else {
+      const el = document.documentElement, go = el.requestFullscreen || el.webkitRequestFullscreen;
+      const r = go && go.call(el);
+      if (r && r.catch) r.catch(() => {});
+    }
+  },
+  at(t) { const v = this.v(); if (v) { v.pause(); v.currentTime = t; } },
+  mark() { const v = this.v(); if (v) emitEvent('tm_bbmark', {t: v.currentTime}); },
+  marks(mine, ideas) { this._mine = mine; this._ideas = ideas; this.draw(); },
+  draw() {
+    const bar = document.getElementById('tm-bb-bar'), v = this.v();
+    if (!bar) return;
+    const len = (v && v.duration) || parseFloat(bar.dataset.len) || 1;
+    const pin = (t, colour, dash) => `<div style="position:absolute;top:0;bottom:0;left:calc(${100 * t / len}% - 2px);` +
+      `width:4px;background:${colour};${dash ? 'opacity:.8;outline:1px dashed #fff;' : ''}"></div>`;
+    const now = v ? `<div style="position:absolute;top:-3px;bottom:-3px;left:${100 * v.currentTime / len}%;width:2px;background:#ef4444"></div>` : '';
+    bar.innerHTML = (this._ideas || []).map(t => pin(t, '#f97316', true)).join('') +
+      (this._mine || []).map(t => pin(t, '#fbbf24', false)).join('') + now;
+    const label = document.getElementById('tm-bb-time');
+    if (label && v) label.textContent = `${Math.floor(v.currentTime / 60)}:${(v.currentTime % 60).toFixed(1).padStart(4, '0')}`;
+  },
+  start() {
+    const v = this.v(), bar = document.getElementById('tm-bb-bar');
+    if (!v || v._bb) return;
+    v._bb = true;
+    v.addEventListener('timeupdate', () => this.draw());
+    v.addEventListener('loadedmetadata', () => this.draw());
+    v.addEventListener('seeked', () => this.draw());
+    if (bar) bar.addEventListener('click', e => {
+      const r = bar.getBoundingClientRect(), len = v.duration || parseFloat(bar.dataset.len) || 1;
+      v.currentTime = Math.max(0, Math.min(len, (e.clientX - r.left) / r.width * len));
+    });
+    this.draw();
+  },
+};
+document.addEventListener('keydown', (e) => {
+  const v = document.getElementById('tm-bb-video');
+  if (!v || e.repeat || ['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
+  if (e.key === 'Shift') { tmBB.mark(); }
+  else if (e.code === 'Space') { e.preventDefault(); e.stopPropagation(); tmBB.toggle(); }
+  else if (e.key === ',') tmBB.frame(-1);
+  else if (e.key === '.') tmBB.frame(1);
+}, true);
 // The post-it window: Shift sticks a post-it at the video's current second; the strip scrubs through it.
 document.addEventListener('keydown', (e) => {
   const v = document.getElementById('tm-pi');
