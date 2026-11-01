@@ -1206,7 +1206,16 @@ def _join_once(
             parts.append(f"[{v_prev}]split=2[ecm][ecb]")
             parts.append(f"[ecb]trim=start={start:.3f},setpts=PTS-STARTPTS,"
                          f"{titles.card_filter(card['card'], s.height)},format=rgba,"
-                         f"fade=t=in:st=0:d={fade:.3f}:alpha=1,setpts=PTS+{start:.3f}/TB[ecbg]")
+                         f"fade=t=in:st=0:d={fade:.3f}:alpha=1[ecbg0]")
+            # (an empty, see-through picture until the card begins: without it, joining had to hold the whole
+            # video in memory until the last seconds, waiting for the card to start, and a long video ran the
+            # Mac out of memory)
+            if start >= 1 / FPS:
+                parts.append(f"color=c=black@0.0:s={s.width}x{s.height}:r={FPS}:d={start:.3f},format=rgba,"
+                             f"setsar=1[ecpad]")
+                parts.append("[ecbg0]setsar=1[ecbg1];[ecpad][ecbg1]concat=n=2:v=1:a=0[ecbg]")
+            else:
+                parts.append("[ecbg0]null[ecbg]")
             parts.append("[ecm][ecbg]overlay=0:0:eof_action=pass:format=auto,format=yuv420p[ecv]")
             v_in = "ecv"
         png = out.with_name(f"{out.stem}.closing.png")
