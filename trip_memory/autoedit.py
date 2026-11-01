@@ -811,6 +811,20 @@ def _source(path: str) -> str:
     return path.split("#")[0]
 
 
+def _family(r: dict) -> set[tuple]:
+    """What makes two files the same picture (as catalog.Trip.family): the file, the shot it was cut from, its
+    look-alike set and its name in its folder (a Live Photo's photo and video)."""
+    from pathlib import Path
+    p = Path(_source(r.get("path") or ""))
+    keys: set[tuple] = {("p", str(p)), ("n", str(p.parent), p.stem.lower())}
+    for k in ("shot_of", "part_of"):
+        if r.get(k):
+            keys.add(("p", r[k]))
+    if r.get("similar_set") is not None:
+        keys.add(("s", r["similar_set"]))
+    return keys
+
+
 def _used_windows(shots: list[Shot], rows: dict[str, dict]) -> dict[str, list[tuple[float, float]]]:
     """The seconds of each video the cut already shows (in the time Auto-edit sees it), side tiles included."""
     used: dict[str, list[tuple[float, float]]] = {}
@@ -856,9 +870,15 @@ def pack(shots: list[Shot], candidates: list[dict], limits: Limits, curves: dict
     rows = {r["path"]: r for r in candidates}
     taken = {_source(s.path) for s in shots}
     taken |= {_source(p) for s in shots for key in ("collage", "side") for p in s.effects.get(key, [])}
+    # Never the same picture twice anywhere in the video: not a file already shown, nor its double, crop or
+    # Live Photo twin (its "family").
+    shown: set[tuple] = set()
+    for p in taken:
+        shown |= _family(rows.get(p) or {"path": p})
     spare: dict[tuple, list[dict]] = {}
     for r in candidates:
-        if _source(r["path"]) in taken or "#" in r["path"] or r.get("locks") or r.get("locked"):
+        if (_source(r["path"]) in taken or "#" in r["path"] or r.get("locks") or r.get("locked")
+                or _family(r) & shown):
             continue
         spare.setdefault((_group_of(r), r["kind"], bool(r.get("upright")) if r["kind"] == "video" else None), []).append(r)
     most = limits.pack == "max"
@@ -915,28 +935,24 @@ def pack(shots: list[Shot], candidates: list[dict], limits: Limits, curves: dict
                 picked = [(g, None) for g in room[:extra]]
                 spare[key] = [x for x in spare.get(key, []) if x not in room[:extra]]
             if len(picked) < want - 1:
-                # ... else other upright videos already in the video (the seconds not shown yet): first from the
-                # same part of the story, then the nearest in time from anywhere. Never this same video again next to
-                # itself (two copies of one clip side by side look wrong), and never a landscape video.
-                used = _used_windows(out + shots[len(out):], rows)
-                for g, a in picked:
-                    if a is not None:
-                        used.setdefault(_source(g["path"]), []).append((a, a + shot.seconds))
-                taken = {_source(shot.path)} | {_source(g["path"]) for g, _ in picked}
+                # ... else spare upright videos from other parts of the story, nearest in time. Never a video already
+                # in the video, not even another moment of it (one video plays once), never this one next to itself,
+                # and never a landscape video.
+                for g, _ in picked:
+                    taken.add(_source(g["path"]))
+                    shown |= _family(g)
                 others = sorted((x for x in candidates if x.get("upright") is True and x["kind"] == "video"
                                  and "#" not in x["path"] and not x.get("locks") and not x.get("locked")
-                                 and _source(x["path"]) not in taken),
+                                 and _source(x["path"]) not in taken and not _family(x) & shown
+                                 and (x.get("duration") or 0) >= shot.seconds),
                                 key=lambda x: (_group_of(x) != _group_of(r), abs(_when(x) - when)))
-                for g in others:
-                    if len(picked) >= want - 1:
-                        break
-                    if _source(g["path"]) in taken:
-                        continue
-                    a = _free_part(g.get("duration") or 0.0, shot.seconds, used.get(_source(g["path"]), []))
-                    if a is not None:
-                        picked.append((g, a))
-                        taken.add(_source(g["path"]))
-                        used.setdefault(_source(g["path"]), []).append((a, a + shot.seconds))
+                for g in others[:want - 1 - len(picked)]:
+                    picked.append((g, None))
+            for g, _ in picked:  # (each one once)
+                taken.add(_source(g["path"]))
+                shown |= _family(g)
+                for k in spare:
+                    spare[k] = [x for x in spare[k] if x["path"] != g["path"]]
             group = [g for g, _ in picked]
             if group:
                 starts = []

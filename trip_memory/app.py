@@ -7841,8 +7841,7 @@ class Page:
     def together_pick(self, r: dict, key: str, members: list[str], replacing: str | None,
                       after: Callable[[], None] | None = None) -> None:
         """Choose a shot for this cut's collage (photos) or to play next to it (upright videos): best first (same
-        theme, nearest in time, not in the video yet), 8 at a time. Videos already in the video can lend another
-        moment, but never the same video twice on one cut."""
+        theme, nearest in time), 8 at a time. Never anything already in the video: one picture or video plays once."""
         board = self.trip.storyboard()
         busy = {x["part_of"] or x["path"] for x in board}
         for x in board:
@@ -7850,12 +7849,11 @@ class Page:
         here = {r.get("part_of") or r["path"], *members}  # (on this cut already: never twice)
         theme = self.theme_of(r)
         kind = "photo" if key == "collage" else "video"
-        # Never the same picture twice: not a double, a crop or a Live Photo twin of one already shown (photos:
-        # anywhere in the video; videos: on this cut, though another moment of a video elsewhere is fine).
-        same = self.trip.in_video_family(list(here)) if key == "collage" else set().union(
-            *(Trip.family(next((x for x in self.items if x["path"] == p), {"path": p})) for p in here))
+        # Never the same picture twice: not one already in the video (another moment of a video included), nor
+        # a double, a crop or a Live Photo twin of one.
+        same = self.trip.in_video_family(list(here))
         others = [it for it in self.items if it["path"] not in here and it["thumb"] and it["kind"] == kind
-                  and (it["path"] not in busy or key == "side") and not (Trip.family(it) & same)]
+                  and it["path"] not in busy and not (Trip.family(it) & same)]
         if key == "side":
             Trip._mark_upright(others)
             others = [it for it in others if it["upright"]]
@@ -7888,14 +7886,13 @@ class Page:
                 return f"{a / 3600:.1f} h {'after' if g > 0 else 'before'}"
             return fmt_time(it["taken_at"])
 
-        others.sort(key=lambda it: (it["path"] in busy, when(it), not it["chosen"]))
+        others.sort(key=lambda it: (when(it), not it["chosen"]))
         state = {"page": 0}
         with self.window_box, ui.dialog() as dialog, ui.card().classes("w-[60rem] max-w-full"):
             ui.label(("Swap this photo" if replacing else "Add a photo to the collage") if key == "collage" else
                      ("Swap this video" if replacing else "Add an upright video next to it")).classes("text-lg font-semibold")
             ui.label("Nearest in time first: what you took just before and after it, not in the video yet. "
-                     "Hover a video to play it."
-                     + (" Videos already in the video lend another moment." if key == "side" else "")) \
+                     "Hover a video to play it.") \
                 .classes("text-sm text-gray-600")
 
             def use(it: dict) -> None:
@@ -7917,7 +7914,7 @@ class Page:
             @ui.refreshable
             def grid() -> None:
                 if not others:
-                    ui.label(("Every other photo is in the video already." if key == "collage" else "No other upright videos in this trip.")) \
+                    ui.label(("Every other photo is in the video already." if key == "collage" else "Every other upright video is in the video already.")) \
                         .classes("text-sm text-gray-600 py-6")
                     return
                 pages = -(-len(others) // 8)
@@ -7927,8 +7924,6 @@ class Page:
                         with ui.element("div").classes("rounded p-1 cursor-pointer hover:bg-purple-50") as tile:
                             self.preview(it, "width:100%;aspect-ratio:16/10", start=self.hover_start(it), view="swap")
                             ui.label(f"{near_words(it)} · {self.theme_of(it)}").classes("text-xs text-gray-600")
-                            if it["path"] in busy:
-                                ui.label("in the video: another moment of it").classes("text-xs text-orange-700")
                         tile.on("click", lambda it=it: use(it))
                 with ui.row().classes("w-full items-center"):
                     ui.label(f"{k * 8 + 1}-{min(len(others), k * 8 + 8)} of {len(others)}").classes("text-xs text-gray-500")

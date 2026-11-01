@@ -405,17 +405,22 @@ def test_more_moments_pack_spare_photos_into_collages_and_upright_videos_side_by
     assert not phone[2].effects  # in a phone video upright videos stay full screen
 
 
-def test_an_upright_video_in_a_landscape_video_always_gets_company():
+def test_side_by_side_never_a_video_already_in_the_video():
     from trip_memory.autoedit import Limits, Shot, pack, _free_part
     rows = [{"path": f"/v{n}.mp4", "kind": "video", "upright": True, "duration": 10.0, "story": 1,
-             "taken_at": f"2025-07-03T10:0{n}:00"} for n in range(2)]
+             "taken_at": f"2025-07-03T10:0{n}:00"} for n in range(3)]
     shots = [Shot(path="/v0.mp4", kind="video", start=0.0, seconds=3.0),
              Shot(path="/v1.mp4", kind="video", start=0.0, seconds=3.0)]
-    # Every upright video is already a shot of its own, even in Normal: another moment of the other one goes next
-    # to it, never the seconds the video already shows, and never the same video twice side by side.
+    # Both upright videos are shots of their own: neither lends another moment to the other. The one spare video
+    # goes next to one of them, once.
     out = pack(shots, rows, Limits(pack="normal", landscape=True), {})
-    assert out[0].effects["side"] == ["/v1.mp4"] and out[1].effects["side"] == ["/v0.mp4"]
-    assert out[0].effects["starts"][0] >= 3.0  # (v1's first seconds are its own shot)
+    sides = [p for s in out for p in s.effects.get("side", [])]
+    assert sides == ["/v2.mp4"]
+    twin = dict(rows[2], path="/IMG_1.mp4", similar_set=7)
+    look = dict(rows[1], path="/IMG_2.mp4", similar_set=7)
+    out = pack([Shot(path="/IMG_1.mp4", kind="video", start=0.0, seconds=3.0)], [twin, look],
+               Limits(pack="normal", landscape=True), {})
+    assert not out[0].effects.get("side")  # never its double next to it
     short = pack([Shot(path="/v0.mp4", kind="video", start=0.0, seconds=1.6)], rows[:1],
                  Limits(pack="normal", landscape=True), {})
     assert not short[0].effects.get("side")  # alone in the trip: alone, never next to itself
@@ -455,3 +460,15 @@ def test_more_moments_puts_lone_photos_together_when_no_spare_photos_are_left():
     out = collages(shots, slots, rows, 0.5, everywhere=True)
     assert len(out) < 5 and out[0].effects["collage"]
     assert {p for s in out for p in [s.path, *s.effects.get("collage", [])]} == {s.path for s in shots}  # all still in
+
+
+def test_collages_never_show_a_double_of_a_shot_in_the_video():
+    def row(path, minute, **extra):
+        return {"path": path, "kind": "photo", "taken_at": f"2026-10-03T10:{minute:02d}:00", "story": 1, **extra}
+    candidates = [row("/a.jpg", 0, similar_set=3), row("/a2.jpg", 0, similar_set=3), row("/b.HEIC", 1),
+                  row("/c.jpg", 9), row("/d.jpg", 10)]
+    shots = [autoedit.Shot(path="/a.jpg", kind="photo", seconds=2.0), autoedit.Shot(path="/b.jpg", kind="photo", seconds=2.0)]
+    out = autoedit.pack(shots, candidates, autoedit.Limits(pack="more"), {})
+    used = [p for s in out for p in s.effects.get("collage", [])]
+    assert "/a2.jpg" not in used and "/b.HEIC" not in used  # (a's double, b's twin by name)
+    assert used and set(used) <= {"/c.jpg", "/d.jpg"}

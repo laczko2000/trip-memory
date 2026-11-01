@@ -59,6 +59,8 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.31.3** No picture or video plays twice: collages and side-by-side videos (made by Auto-edit or chosen by you) never use a shot that is already anywhere in the video, not even another moment of a video, and never its double, crop or Live Photo twin. Swap lists show only shots not in the video yet, nearest in time first.
+
 - **1.31.2** Fixed the real cause of "ran out of memory" while joining: an ending card with a blurred background (the Calm, Neon, Action and Journal styles use one) made the app hold the whole video in memory until the last seconds. A one-minute test video needed 6.3 GB; now it needs about 0.5 GB, whatever the length.
 
 - **1.31.1** Fixed: a long final video could fail with "ffmpeg failed" at the very end (joining all the clips at once needed more memory than the Mac had). The clips are now joined a dozen at a time, then the parts; the result is the same to the frame. If FFmpeg is ever stopped again, the message says so instead of just "ffmpeg failed".
