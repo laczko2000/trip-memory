@@ -59,6 +59,8 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.32.2** A Trip Memory app with its own icon. Run once in Terminal: `cd "$(ls -td ~/Downloads/trip-memory-main*/ | head -1)" && bash "Make Trip Memory app.command"`. It puts Trip Memory in your Applications folder; drag it to the Dock. One click then starts the newest copy in Downloads (no more typing).
+
 - **1.32.1** Watch & finish has an **Open my videos folder** button: it opens Movies › Trip Memory in Finder, where every video you made is kept.
 
 - **1.32** Send a video to your phone: **Send a video to my phone** (in Watch & finish, and under each finished video) shows a QR code. With the phone on the same Wi-Fi as the Mac, point its camera at the code and tap the link: the video downloads straight from the Mac (Downloads, and it shows in Gallery). Works with any phone, Samsung included; no account, no upload. Only that one video is offered, under a secret link that ends after 30 minutes. The first time, if the Mac asks whether to accept incoming connections, click Allow.
