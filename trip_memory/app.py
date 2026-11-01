@@ -575,6 +575,9 @@ class Page:
         ("Analyse", "Choose files", "tm-step-analyse",
          "Your selection is done: analyse what's left (faces, places, scenes, themes). Only the files still in the "
          "trip are analysed."),
+        ("People", "People", None,
+         "Name the faces the app found (after Analyse): pick a name or type a new one, Unknown for strangers. Names "
+         "help the themes and the story (e.g. 'Kitesurfing · Laszlo')."),
         ("Themes", "Themes", None,
          "Confirm what each shot is: tick the right ones, ⇄ moves a wrong one. Run the Second check."),
         ("Music", "Music & audio", None, "Choose the song, trim it, and put pins where you want the cuts."),
@@ -586,7 +589,7 @@ class Page:
 
     def guide_tab(self, name: str):
         return {"Choose files": self.choose_tab, "Themes": self.themes_tab, "Music & audio": self.music_tab,
-                "Storyboard": self.storyboard_tab, "Make video": self.video_tab}[name]
+                "Storyboard": self.storyboard_tab, "Make video": self.video_tab, "People": self.people_tab}[name]
 
     @ui.refreshable
     def guide_bar(self) -> None:

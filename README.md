@@ -59,6 +59,8 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.34.3** People is back in the guided steps, right after Analyse: name the faces the app found, then go on to Themes.
+
 - **1.34.2** Favourite pictures carry a gold ★ badge (top right) wherever they show: Choose files, Library, Themes, Storyboard and the pickers.
 
 - **1.34.1** Analyse comes after your selection: the steps are now Files, Quality, Doubles, Best bits, Best pictures, then **Analyse** (its own green card), then Themes. Only the files still in the trip are analysed, so the cleaner your selection, the faster.
