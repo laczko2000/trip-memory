@@ -59,7 +59,9 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
-- **1.32.3** Fixed: while the app was still comparing look-alikes, Sort out doubles said almost every file was a double (2119 of 2120). It now counts only real doubles found so far. Photos whose end is missing (a copy cut short) now get a preview instead of "image file is truncated".
+- **1.32.4** Damaged files leave the trip by themselves: a photo or video the app can't read (a copy cut short, a broken file) is taken out of the trip, as if you removed it in the clean-up, and the app says which. See removed brings one back. The files on your Mac are never touched.
+
+- **1.32.3** Fixed: while the app was still comparing look-alikes, Sort out doubles said almost every file was a double (2119 of 2120). It now counts only real doubles found so far.
 
 - **1.32.2** A Trip Memory app with its own icon. Run once in Terminal: `cd "$(ls -td ~/Downloads/trip-memory-main*/ | head -1)" && bash "Make Trip Memory app.command"`. It puts Trip Memory in your Applications folder; drag it to the Dock. One click then starts the newest copy in Downloads (no more typing).
 

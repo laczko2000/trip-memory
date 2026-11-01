@@ -1221,3 +1221,23 @@ def test_a_moved_trip_keeps_its_work(tmp_path, monkeypatch):
     assert str(moved.resolve() / "1.jpg") in again.tile_frames()
     assert all(Path(i["thumb"]).exists() for i in again.items() if i["thumb"])
     assert catalog.find_moved_trip(moved) is None
+
+
+def test_damaged_files_leave_the_trip_by_themselves(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    monkeypatch.setattr(catalog, "FaceFinder", FakeFaces)
+    monkeypatch.setattr(catalog, "SceneTagger", FakeScenes)
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    _gps_photo(trip_dir / "a.jpg", "2025:07:03 10:00:00", 38.7223, -9.1393, "red")
+    _gps_photo(trip_dir / "b.jpg", "2025:07:03 10:05:00", 38.7223, -9.1393, "blue")
+    whole = (trip_dir / "b.jpg").read_bytes()
+    (trip_dir / "b.jpg").write_bytes(whole[: len(whole) // 3])  # a copy cut short
+
+    trip = catalog.Trip(trip_dir)
+    trip.analyse()
+    assert [Path(i["path"]).name for i in trip.items()] == ["a.jpg"]
+    assert [Path(i["path"]).name for i in trip.items(removed=True)] == ["b.jpg"]  # (See removed brings it back)
+    assert "damaged" in trip.progress.notes[0] and "b.jpg" in trip.progress.notes[0]
+    assert (trip_dir / "b.jpg").exists()  # your file stays

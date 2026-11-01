@@ -2724,6 +2724,7 @@ class Trip:
                 self.db.executemany("UPDATE items SET thumb = NULL WHERE path = ?", [(path,) for path in stale])
                 self.db.commit()
         todo = self.query("SELECT path, kind, duration, rotation FROM items WHERE thumb IS NULL AND removed = 0 ORDER BY taken_at")
+        damaged: list[str] = []
         for i, row in enumerate(todo):
             p.fraction = i / len(todo)
             p.message = f"Making previews: {i + 1} of {len(todo)}"
@@ -2731,8 +2732,15 @@ class Trip:
                 notify()
             try:
                 self.execute("UPDATE items SET thumb = ? WHERE path = ?", (str(self._make_thumb(row)), row["path"]))
-            except Exception as exc:
-                p.notes.append(f"No preview for {Path(row['path']).name}: {exc}")
+            except Exception:
+                damaged.append(row["path"])
+        if damaged:
+            # Damaged or unreadable files (a copy cut short, a broken file) leave the trip by themselves, as if you
+            # removed them in the clean-up: See removed brings them back. The files on your Mac are not touched.
+            self.remove(damaged)
+            names = ", ".join(Path(d).name for d in damaged[:5]) + (f" and {len(damaged) - 5} more" if len(damaged) > 5 else "")
+            p.notes.append(f"Left out {len(damaged)} damaged file{'s' if len(damaged) > 1 else ''} the app can't read "
+                           f"({names}). Your files are not touched; See removed lists them.")
 
         p.message = "Grouping into stories and spotting similar shots…"
         notify()
