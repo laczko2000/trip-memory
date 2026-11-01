@@ -7624,20 +7624,41 @@ class Page:
             Trip._mark_upright(others)
             others = [it for it in others if it["upright"]]
 
-        def when(it: dict) -> float:
-            try:
-                return abs(datetime.fromisoformat(it["taken_at"]).timestamp()
-                           - datetime.fromisoformat(r["taken_at"]).timestamp())
-            except (TypeError, ValueError, KeyError):
-                return 1e12
+        # Nearest in time first: the moments just before and after the picture you swap (or the cut's first one).
+        anchor = next((x for x in self.items if x["path"] == replacing), None) if replacing else None
+        anchor = anchor or r
 
-        others.sort(key=lambda it: (it["path"] in busy, not it["chosen"], self.theme_of(it) != theme,
-                                    it.get("story") != r.get("story"), when(it)))
+        def gap(it: dict) -> float | None:  # seconds after the anchor (before: negative)
+            try:
+                return (datetime.fromisoformat(it["taken_at"]).timestamp()
+                        - datetime.fromisoformat(anchor["taken_at"]).timestamp())
+            except (TypeError, ValueError, KeyError):
+                return None
+
+        def when(it: dict) -> float:
+            g = gap(it)
+            return 1e12 if g is None else abs(g)
+
+        def near_words(it: dict) -> str:
+            g = gap(it)
+            if g is None:
+                return fmt_time(it["taken_at"]) if it.get("taken_at") else ""
+            a = abs(g)
+            if a < 60:
+                return "same moment" if a < 5 else f"{a:.0f} s {'after' if g > 0 else 'before'}"
+            if a < 3600:
+                return f"{a / 60:.0f} min {'after' if g > 0 else 'before'}"
+            if a < 86400:
+                return f"{a / 3600:.1f} h {'after' if g > 0 else 'before'}"
+            return fmt_time(it["taken_at"])
+
+        others.sort(key=lambda it: (it["path"] in busy, when(it), not it["chosen"]))
         state = {"page": 0}
         with self.window_box, ui.dialog() as dialog, ui.card().classes("w-[60rem] max-w-full"):
             ui.label(("Swap this photo" if replacing else "Add a photo to the collage") if key == "collage" else
                      ("Swap this video" if replacing else "Add an upright video next to it")).classes("text-lg font-semibold")
-            ui.label(f"Best first: not in the video yet, {theme}, the nearest in time. Hover a video to play it."
+            ui.label("Nearest in time first: what you took just before and after it, not in the video yet. "
+                     "Hover a video to play it."
                      + (" Videos already in the video lend another moment." if key == "side" else "")) \
                 .classes("text-sm text-gray-600")
 
@@ -7669,7 +7690,7 @@ class Page:
                     for it in others[k * 8:k * 8 + 8]:
                         with ui.element("div").classes("rounded p-1 cursor-pointer hover:bg-purple-50") as tile:
                             self.preview(it, "width:100%;aspect-ratio:16/10", start=self.hover_start(it), view="swap")
-                            ui.label(f"{self.theme_of(it)} · {fmt_time(it['taken_at'])}").classes("text-xs text-gray-600")
+                            ui.label(f"{near_words(it)} · {self.theme_of(it)}").classes("text-xs text-gray-600")
                             if it["path"] in busy:
                                 ui.label("in the video: another moment of it").classes("text-xs text-orange-700")
                         tile.on("click", lambda it=it: use(it))
