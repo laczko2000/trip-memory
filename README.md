@@ -59,6 +59,8 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.32.1** Watch & finish has an **Open my videos folder** button: it opens Movies › Trip Memory in Finder, where every video you made is kept.
+
 - **1.32** Send a video to your phone: **Send a video to my phone** (in Watch & finish, and under each finished video) shows a QR code. With the phone on the same Wi-Fi as the Mac, point its camera at the code and tap the link: the video downloads straight from the Mac (Downloads, and it shows in Gallery). Works with any phone, Samsung included; no account, no upload. Only that one video is offered, under a secret link that ends after 30 minutes. The first time, if the Mac asks whether to accept incoming connections, click Allow.
 
 - **1.31.3** No picture or video plays twice: collages and side-by-side videos (made by Auto-edit or chosen by you) never use a shot that is already anywhere in the video, not even another moment of a video, and never its double, crop or Live Photo twin. Swap lists show only shots not in the video yet, nearest in time first.

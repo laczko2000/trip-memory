@@ -6496,6 +6496,8 @@ class Page:
                 self.make_button = ui.button("Make my video", icon="movie", on_click=self.make).props("size=lg")
                 ui.button("Send a video to my phone", icon="phone_android", on_click=self.phone_pick) \
                     .props("outline no-caps").tooltip("A QR code: scan it with your phone's camera (same Wi-Fi)")
+                ui.button("Open my videos folder", icon="folder_open", on_click=open_videos_folder) \
+                    .props("outline no-caps").tooltip(f"Every video you made: {OUTPUT_DIR}")
             self.render_progress = ui.linear_progress(value=0, show_value=False).classes("w-full")
             self.render_status = ui.label("")
             self.result_box = ui.column().classes("w-full")
@@ -10129,6 +10131,15 @@ def serve_trip_folder(trip: Trip) -> str:
         trip.shots_dir.mkdir(parents=True, exist_ok=True)
         app.add_media_files(_served[key] + "-shots", trip.shots_dir)  # good parts you made into shots of their own
     return _served[key]
+
+
+def open_videos_folder() -> None:
+    """Open the folder with your finished videos in Finder (Movies > Trip Memory)."""
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "darwin":
+        subprocess.run(["open", str(OUTPUT_DIR)])
+    else:
+        ui.notify(f"Your videos are in {OUTPUT_DIR}")
 
 
 def reveal(path: Path | None) -> None:
