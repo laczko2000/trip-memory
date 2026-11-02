@@ -4685,6 +4685,12 @@ class Page:
                              "rare), and upright videos play side by side in a landscape video. As many as fit: up "
                              "to 4 photos and 3 videos on every cut. Normal: one shot a cut.")
             with ui.row().classes("w-full items-center gap-3"):
+                ui.switch("Only my favourites (⭐ pictures and videos with marks)", value=self.trip.only_marked(),
+                          on_change=lambda e: self.trip.set_only_marked(e.value)) \
+                    .tooltip("On: the video uses only your favourite pictures and the videos you marked (best bits "
+                             "or locked parts). Off: they always go in, and the rest of your trip fills the other "
+                             "cuts.")
+            with ui.row().classes("w-full items-center gap-3"):
                 ui.button("Make the first cut", icon="auto_fix_high", on_click=self.run_auto_edit) \
                     .tooltip("Replaces the storyboard's order, trims and transitions; Undo brings them back")
                 ui.button("Update the video", icon="published_with_changes", on_click=self.update_video) \

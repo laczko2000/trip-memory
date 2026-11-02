@@ -1415,3 +1415,23 @@ def test_shots_taken_minutes_after_a_confirmed_one_get_its_theme(tmp_path, monke
     assert auto[paths[3]][0] != "Boat"  # 20 minutes later: not by time
     trip.rest_not_matching("Boat", [paths[2]])  # you said it isn't
     assert {r["path"]: r["theme_auto"] for r in trip.items()}[paths[2]] != "Boat"
+
+
+def test_only_my_favourites_uses_just_the_marked_shots(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    for n in range(4):
+        exif = Image.Exif()
+        exif[306] = f"2025:07:03 1{n}:00:00"
+        Image.new("RGB", (160 + n, 90), "red").save(trip_dir / f"p{n}.jpg", exif=exif)
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    trip.execute("UPDATE items SET chosen = 1, included = 1")
+    paths = sorted(r["path"] for r in trip.items())
+    assert len(trip.auto_edit_pool()) == 4
+    trip.set_only_marked(True)
+    assert len(trip.auto_edit_pool()) == 4  # (nothing marked yet: everything)
+    trip.set_star(paths[1], True)
+    assert [r["path"] for r in trip.auto_edit_pool()] == [paths[1]]

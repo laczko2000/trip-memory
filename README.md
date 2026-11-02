@@ -59,6 +59,8 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.42** Story: **Only my favourites** switch: the video uses just your ⭐ pictures and the videos you marked (best bits or locked parts). Off (as before): they always go in and the rest of the trip fills the other cuts.
+
 - **1.41.1** Best pictures: a favourite shows green (green frame, green ★ Favourite ✓ button); not a favourite, the button is grey.
 
 - **1.41** Collages never put look-alike photos together: not within 2 minutes of each other, not the same scene (setting, background, clothes), not the same people somewhere similar; a collage then has fewer photos instead. An upright video is never alone with blurred sides in a landscape video: another upright video goes next to it, else a shorter one, else an upright photo. Best pictures: Space marks or unmarks a favourite.

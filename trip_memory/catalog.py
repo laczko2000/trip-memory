@@ -1342,7 +1342,21 @@ class Trip:
                             start, end = kept_part(r)
                             r = r | {"duration": end - start, "keep_offset": start, "full_duration": r["duration"]}
                         pool.append(r | {"story_rank": rank, "story_name": story["name"]})
-        return self._with_locks(pool)
+        return self._only_marked(self._with_locks(pool))
+
+    def only_marked(self) -> bool:
+        return bool(self._meta_json("only_marked", False))
+
+    def set_only_marked(self, on: bool) -> None:
+        self._set_meta_json("only_marked", bool(on))
+
+    def _only_marked(self, pool: list[dict]) -> list[dict]:
+        """"Only my favourites": just the ⭐ pictures and the videos with marks or locked parts (all of them when
+        nothing is marked yet)."""
+        if not self.only_marked():
+            return pool
+        marked = [r for r in pool if r.get("forced") or r.get("bookmarks") or r.get("locks")]
+        return marked or pool
 
     @staticmethod
     def _with_locks(pool: list[dict]) -> list[dict]:
@@ -1681,7 +1695,7 @@ class Trip:
                 start, end = kept_part(r)
                 r = r | {"duration": end - start, "keep_offset": start, "full_duration": r["duration"]}
             pool.append(r | {"chapter": chapter, "pace_want": chapters[chapter].get("pace")})
-        return self._with_locks(pool)
+        return self._only_marked(self._with_locks(pool))
 
     # ---------- themes ----------
 
