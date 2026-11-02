@@ -59,6 +59,8 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.40** My story: Claude (your own account, through Claude Code) reads and writes your story whenever it is on the Mac, not the small Mac AI. Before the story is made it corrects your idea: names spelt like your themes, places and people (Hakune → Hakone), grammar, and whether it makes sense. You see the corrected text and can change it before Make my story.
+
 - **1.39.1** Themes rounds: a bar fixed at the bottom of the screen shows the round's themes (click one to open it), the count and Done, next theme, so you never scroll back up.
 
 - **1.39** Themes: a shot taken within 3 minutes of one you confirmed gets the same theme and comes already selected (the nearest confirmed shot wins; never a theme you said it isn't). In each round, the selected shots sit on top and the pool below: a click moves a shot between them.

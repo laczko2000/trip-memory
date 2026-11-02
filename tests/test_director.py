@@ -391,3 +391,18 @@ def test_understood_idea_and_questions():
         "Idea.\nMy answers: How should it end? Big jumps"
     prompt = director.understand_prompt("kite job", ["Kitesurfing · Laszlo"], ["kite jump (in Kitesurfing)"])
     assert "kite jump (in Kitesurfing)" in prompt and "Kitesurfing · Laszlo" in prompt
+
+
+def test_your_names_are_spelt_right_in_the_story_idea():
+    names = ["Hakone", "Kitesurfing", "Lake Ashi", "Laszlo", "Boat"]
+    text = "Start in Hakune with the boat on lake Ashy, then kitesurfin with Laslo"
+    fixed = director.fix_names(text, names)
+    assert fixed == "Start in Hakone with the boat on Lake Ashi, then Kitesurfing with Laszlo"
+    assert director.fix_names("We ate a cake", names) == "We ate a cake"  # (no near name: untouched)
+
+
+def test_the_story_uses_claude_whenever_claude_code_is_there(monkeypatch):
+    monkeypatch.setattr(director, "claude_code_path", lambda: "/usr/local/bin/claude")
+    assert isinstance(director.for_words({"provider": "ollama"}), director.ClaudeCode)
+    monkeypatch.setattr(director, "claude_code_path", lambda: None)
+    assert isinstance(director.for_words({"provider": "ollama", "ollama_model": "gemma3:4b"}), director.Ollama)

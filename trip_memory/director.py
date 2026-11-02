@@ -270,10 +270,14 @@ by speaking (so the text can have dictation mistakes like "kite job" for "kite j
 
 The trip's themes (activities, sometimes with a person): {themes}
 Moments already marked inside themes: {moments}
+Places of the trip: {places}
+People in the trip: {people}
 
-1. Rewrite their description cleanly in their own voice and order, as one short paragraph: fix dictation mistakes,
-   use the exact theme and moment names above where they clearly mean one, and keep everything they said (order,
-   what comes first and last, people, feelings). Don't add ideas of your own.
+1. Rewrite their description cleanly in their own voice and order, as one short paragraph:
+   - correct every misspelt or misheard name to its exact spelling from the lists above (e.g. "Hakune" is
+     "Hakone", "kite job" is "kite jump"), and use the exact theme and moment names where they clearly mean one;
+   - correct the grammar and punctuation so it reads well and makes sense, in their own words and language;
+   - keep everything they said (order, what comes first and last, people, feelings). Don't add ideas of your own.
 2. If something important is unclear, ask up to 3 short questions (fewer is better, none if it's clear), each
    with 2 to 4 short answers to click. Good questions: how it should end, which theme is the highlight, whether
    the rest of the themes can go anywhere, how lively the video should feel. Don't ask what they already said.
@@ -299,9 +303,42 @@ UNDERSTAND_SCHEMA = {
 }
 
 
-def understand_prompt(idea: str, themes: list[str], moments: list[str]) -> str:
+def understand_prompt(idea: str, themes: list[str], moments: list[str], places: list[str] = (),
+                      people: list[str] = ()) -> str:
     return UNDERSTAND_PROMPT.format(idea=" ".join(idea.split())[:2000], themes="; ".join(themes) or "none",
-                                   moments="; ".join(moments) or "none")
+                                   moments="; ".join(moments) or "none", places="; ".join(places) or "none",
+                                   people="; ".join(people) or "none")
+
+
+def fix_names(text: str, names: list[str]) -> str:
+    """Your own names spelt right, whoever wrote the text (dictation, a small AI): a word or words that are almost
+    a name of the trip (a theme, a place, a person: "Hakune" for "Hakone") become that name."""
+    import difflib
+
+    out = text
+    for name in sorted({n.strip() for n in names if n and len(n.strip()) >= 4}, key=len, reverse=True):
+        size = len(name.split())
+        words = re.findall(r"\w[\w'-]*|\W+", out)
+        tokens = [(k, w) for k, w in enumerate(words) if re.match(r"\w", w)]
+        for start in range(len(tokens) - size + 1):
+            group = tokens[start:start + size]
+            said = " ".join(w for _, w in group)
+            if said.lower() == name.lower() or abs(len(said) - len(name)) > 2:
+                continue
+            if said[:1].lower() == name[:1].lower() and \
+                    difflib.SequenceMatcher(None, said.lower(), name.lower()).ratio() >= 0.8:
+                first, last = group[0][0], group[-1][0]
+                words[first:last + 1] = [name] + [""] * (last - first)
+        out = "".join(words)
+    return out
+
+
+def for_words(settings: dict):
+    """The AI for understanding and writing your story: Claude (your own account, through Claude Code) whenever it
+    is on this Mac, as it writes and corrects much better than the small AI on the Mac; else the AI you chose."""
+    if settings.get("provider") != "claude" and claude_code_path():
+        return ClaudeCode(settings.get("ollama_model", ""))
+    return make(settings)
 
 
 def clean_understood(answer: dict, idea: str) -> dict:

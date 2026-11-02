@@ -5023,19 +5023,25 @@ class Page:
             ui.notify("The AI is still busy with the last request. Wait for it, or press Stop.", type="warning")
             return
         idea = (self.wish_box.value or "").strip() if self.wish_box is not None else ""
+        said = idea
         blocks = [b for b in self.trip.storyline_blocks() if b["on"]]
         if not blocks:
             return
         try:
-            ai, failed = director.make(load_settings().get("ai", {})), ""
+            ai, failed = director.for_words(load_settings().get("ai", {})), ""
         except director.DirectorError as exc:
             ai, failed = None, str(exc)
+        places = sorted({it["place"] for it in self.items if it.get("place")})
+        people = list(self.trip.person_names())
+        names = ([a["name"] for a in self.trip.activities()] + [m["name"] for m in self.trip.moments()] + places
+                 + people)
+        idea = director.fix_names(idea, names)  # (your names spelt right, whatever the AI does)
         old = self.trip.storyline().get("story") or {}
         if ai is None or not idea or again:
             await self.write_story(again, idea, old.get("answers") or [] if again else [], ai, failed)
             return
         moments = [f"{m['name']} (in {m['activity']})" for m in self.trip.moments()]
-        prompt = director.understand_prompt(idea, [themes.block_name(b) for b in blocks], moments)
+        prompt = director.understand_prompt(idea, [themes.block_name(b) for b in blocks], moments, places, people)
         try:
             answer = await self._think(ai, ai.understand, prompt, "reading your idea")
         except Exception as exc:  # no reading: straight on to the story
@@ -5045,7 +5051,9 @@ class Page:
         if answer is None:
             ui.notify("Stopped: your story stays as it was. Press Make my story to try again.")
             return
-        self.understood_dialog(director.clean_understood(answer, idea), idea, ai)
+        understood = director.clean_understood(answer, idea)
+        understood["idea"] = director.fix_names(understood["idea"], names)
+        self.understood_dialog(understood, said, ai)
 
     def understood_dialog(self, understood: dict, said: str, ai) -> None:
         """What the AI understood: your idea, cleaned up (change anything), and its few questions to click."""
