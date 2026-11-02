@@ -1076,6 +1076,8 @@ class Page:
                         .classes("text-sm text-gray-300 truncate")
                     ui.space()
                     ui.label(f"{len(favourites)} favourites").classes("text-sm text-sky-300")
+                    ui.button("Take me to the first picture", icon="first_page", on_click=lambda: go(0)) \
+                        .props("outline no-caps dense color=grey-3").tooltip("Back to picture 1, to review them again")
                     ui.button(icon="rotate_left", on_click=lambda: turn(-90)).props("flat round dense color=grey-3") \
                         .tooltip("Turn anti-clockwise")
                     ui.button(icon="rotate_right", on_click=lambda: turn(90)).props("flat round dense color=grey-3") \

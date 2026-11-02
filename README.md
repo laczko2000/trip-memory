@@ -59,6 +59,8 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.43.1** Best pictures: **Take me to the first picture** at the top goes back to picture 1 to review them again.
+
 - **1.43** Story: **Mostly** Video heavy (about 3 of 4 shots are videos, the new default), Balanced (half and half) or Picture heavy (about 3 of 4 are pictures), as far as the trip has them. Your favourites always go in.
 
 - **1.42** Story: **Only my favourites** switch: the video uses just your ⭐ pictures and the videos you marked (best bits or locked parts). Off (as before): they always go in and the rest of the trip fills the other cuts.
