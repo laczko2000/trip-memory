@@ -5598,11 +5598,12 @@ class Page:
         if tile is None:
             return
         on = self.round_ticks.get(path, False)
+        # (never faded: you must see every picture clearly to decide; only the frame and the badge change)
         tile.style("outline:4px solid #16a34a;background:#dcfce7" if on else
-                   "outline:1px solid #d1d5db;background:#f9fafb;opacity:.55")
+                   "outline:2px dashed #9ca3af;background:#f9fafb")
         for child in tile.default_slot.children:
             if "tm-round-check" in child.classes:
-                child.style("background:#16a34a" if on else "background:#9ca3af")
+                child.style("background:#16a34a" if on else "background:#fff;border:2px solid #6b7280")
                 child.set_text("✓" if on else "")
 
     def _round_counted(self) -> None:
