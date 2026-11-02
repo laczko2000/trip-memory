@@ -59,6 +59,8 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.37** Themes: **Rest not matching** next to All correct: the shots you ticked stay, every shot you haven't ticked leaves the theme, is sorted again and never comes back there (look-alikes stay away too). The Second check has a **New theme** button for a shot that fits none of the themes; the app also moves look-alikes after each Second check answer.
+
 - **1.36.1** Suggested themes are one simple list: a smaller group found inside a theme (Deer, Aquarium...) is offered as a theme of its own, never as a sub-theme.
 
 - **1.36** Themes learn as you go: confirm or move shots and the unchecked ones that look like them follow (move temples into Shrines and similar pictures leave Nature too). No sub-themes: groups like Deer or Aquarium are themes of their own (existing ones are turned into themes once). The step bar ticks the steps that are really finished, and the Analyse card folds into "✓ Analyse done" once every chosen file is analysed.

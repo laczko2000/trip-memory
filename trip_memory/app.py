@@ -5526,6 +5526,11 @@ class Page:
                                             ui.menu_item(f"{a['emoji']} {a['name']}",
                                                          on_click=lambda p=shot["path"], n=a["name"]:
                                                          self.answer_theme_check(p, True, n))
+                                ui.button("New theme", icon="add",
+                                          on_click=lambda p=shot["path"]: self.check_new_theme(p)) \
+                                    .props("no-caps dense outline color=positive").classes("w-full text-xs") \
+                                    .tooltip("None of these fits: make a new theme and put it there (the app then "
+                                             "moves look-alikes too)")
                 if len(check["shots"]) > 60:
                     ui.label(f"…and {len(check['shots']) - 60} more after these.").classes("text-xs text-gray-600")
 
@@ -5541,12 +5546,36 @@ class Page:
                   if check.get("agree") is not None else "Analyse the pictures first.", type="positive")
         self.themes_view.refresh()
 
+    def check_new_theme(self, path: str) -> None:
+        """Second check: none of the themes fits, so a new one, with this shot in it."""
+        with ui.dialog() as dialog, ui.card().classes("w-96"):
+            ui.label("A new theme for this shot").classes("text-lg font-semibold")
+            name = ui.input(placeholder="e.g. Kitesurfing, Night market").props("dense outlined autofocus") \
+                .classes("w-full")
+
+            async def add() -> None:
+                new = " ".join((name.value or "").split())[:30]
+                if not new:
+                    ui.notify("Type the new theme's name first.", type="warning")
+                    return
+                dialog.close()
+                await self.add_activity(new, quiet=True)
+                self.answer_theme_check(path, True, new)
+
+            name.on("keydown.enter", add)
+            with ui.row().classes("w-full justify-end gap-2"):
+                ui.button("Cancel", on_click=dialog.close).props("flat no-caps")
+                ui.button("Add and move it here", icon="add", on_click=add).props("unelevated no-caps color=positive")
+        dialog.open()
+
     def answer_theme_check(self, path: str, move: bool, to: str | None = None) -> None:
-        self.trip.answer_theme_check(path, move, to)
+        moved = self.trip.answer_theme_check(path, move, to)
         if to:
             ui.notify(f"Moved to {to}.", type="positive")
         self.reload()
         self.themes_view.refresh()
+        if moved:
+            self.learned_moves(moved)
 
     def new_themes_bar(self) -> None:
         """A new trip: the app proposes its own themes from the shots (not the last trip's)."""
@@ -5769,6 +5798,13 @@ class Page:
         with ui.row().classes("w-full items-center gap-2"):
             ui.button("All correct", icon="done_all", on_click=lambda: self.confirm_themes([r["path"] for r in todo])) \
                 .set_enabled(bool(todo))
+            if name != themes.OTHER or todo:
+                ui.button("Rest not matching", icon="playlist_remove",
+                          on_click=lambda: self.rest_not_matching(name, [r["path"] for r in todo])) \
+                    .props("outline no-caps color=deep-orange") \
+                    .tooltip("The ones you ticked are right; every shot you haven't ticked is NOT this theme: the "
+                             "app sorts them again and they won't come back here") \
+                    .set_enabled(bool(todo))
             move = ui.select({a["name"]: f"{a['emoji']} {a['name']}" for a in activities if a["name"] != name},
                              label="Move selected to…", on_change=lambda e: e.value and self.move_selected(e.value)) \
                 .props("dense outlined").classes("w-56")
@@ -6320,6 +6356,23 @@ class Page:
         ui.notify(f"{len(paths)} shot{'s' * (len(paths) != 1)} confirmed. The app looked again at the rest, "
                   "comparing them with the shots you confirmed.", type="positive")
         self.theme_selected = set()
+        self.themes_view.refresh()
+
+    async def rest_not_matching(self, activity: str, paths: list[str]) -> None:
+        if not paths:
+            return
+        moved = await run.io_bound(self.trip.rest_not_matching, activity, paths)
+        to: dict[str, int] = {}
+        for _, now in moved.values():
+            to[now] = to.get(now, 0) + 1
+        back = sum(1 for r in self.trip.theme_rows() if r["theme"] == activity and not r["theme_ok"])
+        ui.notify(f"{len(paths)} shot{'s' * (len(paths) != 1)} taken out of {activity} and sorted again"
+                  + (": " + ", ".join(f"{n} to {t}" for t, n in sorted(to.items(), key=lambda x: -x[1])) if to else "")
+                  + "." + (f" {back} other look-alike{'s' * (back != 1)} came in to check." if back else
+                           " Only the shots you ticked are left here."),
+                  type="positive", multi_line=True, timeout=6000)
+        self.theme_selected = set()
+        self.reload()
         self.themes_view.refresh()
 
     async def move_selected(self, activity: str) -> None:

@@ -1331,3 +1331,18 @@ def test_suggested_themes_are_one_flat_list_without_sub_themes(tmp_path, monkeyp
     found = trip.theme_proposals()
     assert [(p["name"], p["paths"]) for p in found] == [("Nature", ["a", "b"]), ("Deer", ["c"]), ("Aquarium", ["d"])]
     assert all(not p["subs"] for p in found) and found[0]["sample"] == ["a"]
+
+
+def test_rest_not_matching_keeps_the_unticked_shots_and_their_look_alikes_out_of_the_theme():
+    from trip_memory import themes
+
+    rng = np.random.default_rng(5)
+    boat, sea = rng.normal(size=512), rng.normal(size=512)
+    rows = [boat + 0.1 * rng.normal(size=512) for _ in range(3)] + [sea + 0.1 * rng.normal(size=512) for _ in range(3)]
+    vectors = np.array([v / np.linalg.norm(v) for v in rows], dtype=np.float32)
+    acts = [{"name": "Boat", "vector": None}, {"name": "Beach", "vector": None}, {"name": themes.OTHER, "vector": None}]
+    # Without examples for Beach, everything looks equally likely; you confirmed shot 0 as Boat.
+    out = themes.suggest(vectors, acts, [(0, "Boat")], not_these={3: {"Boat"}})
+    assert out[0] == ("Boat", 1.0)
+    assert out[3][0] != "Boat"  # never there again
+    assert all(out[i][0] != "Boat" for i in (4, 5))  # its look-alikes stay away too

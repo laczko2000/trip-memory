@@ -50,12 +50,15 @@ def day_part(taken_at: str) -> str:
 
 
 def suggest(vectors: np.ndarray, activities: list[dict], confirmed: list[tuple[int, str]],
-            earlier: list[tuple[np.ndarray, str]] = ()) -> list[tuple[str, float]]:
+            earlier: list[tuple[np.ndarray, str]] = (),
+            not_these: dict[int, set[str]] | None = None) -> list[tuple[str, float]]:
     """For each shot (one CLIP vector per row): the most likely activity and how sure (0..1).
 
     confirmed: (row, activity) for the shots you confirmed. Those keep their activity, and the others are compared
     with them: a shot that looks like your confirmed boat shots is a boat shot, whatever the words say.
-    earlier: (vector, activity) of shots you confirmed in earlier trips, which count as examples too."""
+    earlier: (vector, activity) of shots you confirmed in earlier trips, which count as examples too.
+    not_these: {row: activities} you said a shot is not ("Rest not matching"): it never goes there again, and the
+    shots that look just like it are kept away from there too."""
     names = [a["name"] for a in activities]
     n = len(vectors)
     if not n or not names:
@@ -86,7 +89,24 @@ def suggest(vectors: np.ndarray, activities: list[dict], confirmed: list[tuple[i
         closest = near.max(axis=1, keepdims=True)
         trust = np.clip((closest - LOOKS_LIKE) / (SAME - LOOKS_LIKE), 0, 1)
         p = (1 - trust) * p + trust * _softmax(30 * near)
-    out = [(names[int(j)], float(p[i, j])) for i, j in enumerate(p.argmax(axis=1))]
+    if not_these:
+        # The shots you said are not X: never X again, and a shot that looks more like them than like X's own
+        # confirmed shots is not X either (most likely).
+        away: dict[int, list[int]] = {}
+        for row, gone in not_these.items():
+            for name in gone:
+                if name in names and 0 <= row < n:
+                    away.setdefault(names.index(name), []).append(row)
+        for j, rows in away.items():
+            p[rows, j] = -1.0
+            unlike = (vectors @ vectors[rows].T).max(axis=1)
+            own = (vectors @ np.array(examples[j]).T).max(axis=1) if examples.get(j) else np.full(n, -np.inf)
+            pushed = (unlike >= LOOKS_LIKE) & (unlike > own) & (p[:, j] > 0)
+            p[pushed, j] *= 0.2
+        if OTHER in names:  # (nothing left: Other)
+            stuck = p.max(axis=1) <= 0
+            p[stuck, names.index(OTHER)] = 0.5
+    out = [(names[int(j)], float(max(p[i, j], 0.0))) for i, j in enumerate(p.argmax(axis=1))]
     for row, name in confirmed:
         if 0 <= row < n:
             out[row] = (name, 1.0)

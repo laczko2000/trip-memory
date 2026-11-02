@@ -1925,8 +1925,10 @@ class Trip:
         # "Sort the Other shots": every picture the app can see goes to its most likely real theme, however unsure.
         sorting = self.sort_other_on() and seen
         choose_from = [a for a in activities if a["name"] != themes.OTHER] if sorting else activities
+        gone = self.not_themes()
+        not_these = {i: set(gone[r["path"]]) for i, r in enumerate(seen) if r["path"] in gone}
         guesses = {r["path"]: g for r, g in zip(seen, themes.suggest(vectors, choose_from, confirmed,
-                                                                     self._earlier_examples(choose_from)))}
+                                                                     self._earlier_examples(choose_from), not_these))}
         updates = []
         for r in rows:
             if r["path"] in guesses:
@@ -1935,6 +1937,8 @@ class Trip:
                 tags = json.loads(r["tags_user"]) if r["tags_user"] is not None else json.loads(r["tags"] or "[]")
                 name, sure = themes.by_tags(tags, r["scene_user"] or r["scene"]), 0.3
                 name = renamed.get(name, name) if renamed.get(name, name) in names else themes.OTHER
+            if r["path"] not in guesses and name in gone.get(r["path"], ()):  # (you said it's not that one)
+                name = themes.OTHER
             updates.append((name, round(sure, 3), r["path"]))
         moved = {r["path"]: (r["theme_auto"], name) for r, (name, _, _) in zip(rows, updates)
                  if r["theme"] is None and r["theme_auto"] and r["theme_auto"] != name}
@@ -1942,6 +1946,20 @@ class Trip:
             self.db.executemany("UPDATE items SET theme_auto = ?, theme_sure = ? WHERE path = ?", updates)
             self.db.commit()
         return moved
+
+    def not_themes(self) -> dict[str, list[str]]:
+        """{path: themes you said the shot is not} (Rest not matching)."""
+        return self._meta_json("not_themes", {})
+
+    def rest_not_matching(self, activity: str, paths: list[str]) -> dict[str, tuple[str, str]]:
+        """You confirmed what belongs in this theme; the rest (these unconfirmed shots) does not: they are sorted
+        again and never come back here, and shots that look just like them stay away too. Returns what moved."""
+        self.checkpoint(f"rest not matching in {activity}")
+        gone = self.not_themes()
+        for path in paths:
+            gone[path] = sorted({*gone.get(path, []), activity})
+        self._set_meta_json("not_themes", gone)
+        return self.suggest_themes()
 
     def sort_other_on(self) -> bool:
         return bool(self._meta_json("sort_other", False))
@@ -1975,13 +1993,13 @@ class Trip:
     def last_theme_check(self) -> dict | None:
         return self._meta_json("theme_check", None)
 
-    def answer_theme_check(self, path: str, move: bool, to: str | None = None) -> None:
+    def answer_theme_check(self, path: str, move: bool, to: str | None = None) -> dict[str, tuple[str, str]]:
         """Move it (to the theme the check suggests, or to `to`, another theme you chose: confirmed) or keep it
         (confirmed as it is, not asked again)."""
         check = self.last_theme_check() or {"shots": []}
         shot = next((x for x in check["shots"] if x["path"] == path), None)
         if not shot:
-            return
+            return {}
         check["shots"] = [x for x in check["shots"] if x["path"] != path]
         if move:
             check["agree"] = round(min(1.0, (check.get("agree") or 0) + 1 / max(1, check.get("total") or 1)), 3)
@@ -1990,7 +2008,9 @@ class Trip:
             self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('theme_check_keep', ?)",
                          (json.dumps(sorted({*keep, path})),))
         self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('theme_check', ?)", (json.dumps(check),))
-        self.set_theme([path], (to or shot["better"]) if move else shot["now"])
+        moved = self.set_theme([path], (to or shot["better"]) if move else shot["now"])
+        moved.pop(path, None)
+        return moved
 
     def set_theme(self, paths: list[str], activity: str | None) -> dict[str, tuple[str, str]]:
         """Confirm these shots' activity (activity None: the one suggested now), then suggest the rest again.
@@ -2037,6 +2057,8 @@ class Trip:
                 a["name"] = new
         self.save_activities(activities)
         self._save_moments([m | {"activity": new} if m["activity"] == old else m for m in self.moments()])
+        self._set_meta_json("not_themes", {p: [new if t == old else t for t in ts]
+                                           for p, ts in self.not_themes().items()})
         with self._lock:
             self.db.execute("UPDATE items SET theme = ? WHERE theme = ?", (new, old))
             self.db.execute("UPDATE items SET theme_auto = ? WHERE theme_auto = ?", (new, old))
