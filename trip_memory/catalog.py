@@ -1817,6 +1817,19 @@ class Trip:
         are confirmed, the app suggests the rest from them, sub-themes become moments.
         chosen: proposals (renamed, merged) with "vector" (what the name looks like to CLIP, or None)."""
         self.checkpoint("using the suggested themes")
+        # No sub-themes: each kept sub-group (Deer, Aquarium...) becomes a theme of its own, next to its group.
+        split = []
+        for p in chosen:
+            subs = [sub for sub in p.get("subs") or [] if sub.get("paths")]
+            inner = {q for sub in subs for q in sub["paths"]}
+            split.append(p | {"paths": [q for q in p["paths"] if q not in inner], "subs": []})
+            taken = {x["name"].lower() for x in split}
+            for sub in subs:
+                if sub["name"].lower() in taken:
+                    continue
+                split.append({"name": sub["name"], "emoji": p.get("emoji") or "⭐", "describe": [sub["name"].lower()],
+                              "vector": None, "paths": list(sub["paths"]), "subs": [], "moved_in": []})
+        chosen = split
         activities = [{"name": p["name"], "emoji": p.get("emoji") or "⭐", "describe": p.get("describe") or
                        [p["name"].lower()], "vector": p.get("vector")} for p in chosen]
         activities.append({"name": themes.OTHER, "emoji": "❔", "describe": [], "vector": None})
@@ -1873,9 +1886,10 @@ class Trip:
     def has_fingerprints(self) -> bool:
         return bool(self.query("SELECT 1 FROM items WHERE clip IS NOT NULL LIMIT 1"))
 
-    def suggest_themes(self) -> None:
-        """Suggest an activity for every selected shot you haven't confirmed, learning from the ones you have."""
-        rows = self.query("SELECT path, clip, theme, tags, tags_user, scene, scene_user FROM items "
+    def suggest_themes(self) -> dict[str, tuple[str, str]]:
+        """Suggest an activity for every selected shot you haven't confirmed, learning from the ones you have.
+        Returns the shots whose suggestion changed: {path: (was, now)} (not the ones you confirmed)."""
+        rows = self.query("SELECT path, clip, theme, theme_auto, tags, tags_user, scene, scene_user FROM items "
                           "WHERE chosen = 1 AND removed = 0 AND part_of IS NULL ORDER BY taken_at, path")
         activities = self.activities()
         names = {a["name"] for a in activities}
@@ -1897,9 +1911,12 @@ class Trip:
                 name, sure = themes.by_tags(tags, r["scene_user"] or r["scene"]), 0.3
                 name = renamed.get(name, name) if renamed.get(name, name) in names else themes.OTHER
             updates.append((name, round(sure, 3), r["path"]))
+        moved = {r["path"]: (r["theme_auto"], name) for r, (name, _, _) in zip(rows, updates)
+                 if r["theme"] is None and r["theme_auto"] and r["theme_auto"] != name}
         with self._lock:
             self.db.executemany("UPDATE items SET theme_auto = ?, theme_sure = ? WHERE path = ?", updates)
             self.db.commit()
+        return moved
 
     def sort_other_on(self) -> bool:
         return bool(self._meta_json("sort_other", False))
@@ -1950,8 +1967,9 @@ class Trip:
         self.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('theme_check', ?)", (json.dumps(check),))
         self.set_theme([path], (to or shot["better"]) if move else shot["now"])
 
-    def set_theme(self, paths: list[str], activity: str | None) -> None:
-        """Confirm these shots' activity (activity None: the one suggested now), then suggest the rest again."""
+    def set_theme(self, paths: list[str], activity: str | None) -> dict[str, tuple[str, str]]:
+        """Confirm these shots' activity (activity None: the one suggested now), then suggest the rest again.
+        Returns the other shots the app moved because of it: {path: (was, now)}."""
         with self._lock:
             if activity is None:
                 self.db.executemany("UPDATE items SET theme = COALESCE(theme, theme_auto, ?) WHERE path = ?",
@@ -1959,15 +1977,17 @@ class Trip:
             else:
                 self.db.executemany("UPDATE items SET theme = ? WHERE path = ?", [(activity, p) for p in paths])
             self.db.commit()
-        self.suggest_themes()
+        moved = self.suggest_themes()
         self._remember_themes()
+        return moved
 
-    def unconfirm_theme(self, paths: list[str]) -> None:
+    def unconfirm_theme(self, paths: list[str]) -> dict[str, tuple[str, str]]:
         with self._lock:
             self.db.executemany("UPDATE items SET theme = NULL WHERE path = ?", [(p,) for p in paths])
             self.db.commit()
-        self.suggest_themes()
+        moved = self.suggest_themes()
         self._remember_themes()
+        return moved
 
     def add_activity(self, name: str, vector: list[float] | None) -> None:
         activities = self.activities()
@@ -2125,6 +2145,17 @@ class Trip:
                             not (m["activity"] == activity and m["name"] == mo["name"])])
         self.set_theme([s["path"] for s in mo["shots"]], new)
         return new
+
+    def no_sub_themes(self) -> list[str]:
+        """Every sub-theme becomes a theme of its own (you don't want sub-themes): its ticked shots move to it.
+        Returns the new themes' names."""
+        made = []
+        for mo in list(self.moments()):
+            if mo and mo.get("name"):
+                name = self.moment_to_theme(mo["activity"], mo["name"])
+                if name:
+                    made.append(name)
+        return made
 
     def theme_to_moment(self, activity: str, to: str) -> None:
         """A theme dropped into another theme: it becomes a sub-theme there. All its shots move to that theme and
@@ -2751,6 +2782,11 @@ class Trip:
     def prepare(self, on_change: Callable[[], None] | None = None) -> None:
         """The quick first look: find the files, their dates and places, and make small previews."""
         self._run(self._prepare, on_change)
+
+    def analyse_left(self) -> int:
+        """How many chosen files still wait for Analyse (0: the step is done)."""
+        return self.query("SELECT COUNT(*) AS n FROM items WHERE part_of IS NULL AND chosen = 1 AND removed = 0 "
+                          "AND (faces_done = 0 OR scene_done = 0 OR tags_done = 0)")[0]["n"]
 
     def analyse(self, on_change: Callable[[], None] | None = None) -> None:
         """Work out scenes and people for the chosen files not analysed yet. Safe to re-run."""

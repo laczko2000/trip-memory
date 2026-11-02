@@ -344,6 +344,7 @@ class Page:
             self.guided = bool(load_settings().get("guided", True))
             self.guide_step = 0
             self.guide_detour = False
+            self.analyse_open = False
             self.guide_bar()
             with ui.tabs().classes("w-full") as tabs:
                 # The path to a video, left to right; then the extra tabs for looking things up.
@@ -497,6 +498,7 @@ class Page:
         finally:
             self.open_button.enable()
         self.refresh_all()
+        self.guide_bar.refresh()  # (the ✓ on the steps that are now done)
 
     async def analyse_chosen(self) -> None:
         if not self.trip or self.trip.progress.running:
@@ -505,7 +507,15 @@ class Page:
             ui.notify("Choose at least one file first.", type="warning")
             return
         await self.run_step(self.trip.analyse)
-        self.panels.value = self.library_tab
+        self.analyse_open = False
+        if self.trip.analyse_left():
+            self.panels.value = self.library_tab
+        else:
+            ui.notify("✓ Analyse done: every chosen file is analysed. Next: People, then Themes.", type="positive")
+            if self.guided:
+                self.go_step([g[0] for g in self.GUIDE].index("People"))
+            self.refresh_all()
+        self.guide_bar.refresh()
 
     def mark_dirty(self) -> None:
         self.dirty = True
@@ -602,8 +612,9 @@ class Page:
         title, _, _, words = self.GUIDE[k]
         with ui.card().classes("w-full gap-2 bg-slate-50"):
             with ui.row().classes("w-full items-center gap-1 no-wrap overflow-x-auto"):
+                finished = self.steps_done()
                 for n, (name, *_rest) in enumerate(self.GUIDE):
-                    done, now = n < k, n == k
+                    done, now = finished.get(name, n < k), n == k
                     ui.button(f"{'✓' if done else n + 1} {name}", on_click=lambda n=n: self.go_step(n)) \
                         .props("dense no-caps rounded " + ("unelevated color=primary" if now else
                                                           "flat color=positive" if done else "flat color=grey-8"))
@@ -636,6 +647,22 @@ class Page:
             ui.button(f"Next: {self.GUIDE[k + 1][0]} →", on_click=lambda: self.go_step(k + 1)) \
                 .props("unelevated no-caps rounded color=primary").classes("shadow-lg") \
                 .style("position:fixed;right:24px;bottom:24px;z-index:1500")
+
+    def steps_done(self) -> dict[str, bool]:
+        """The steps the app can tell are fully done (the others count as done once you are past them)."""
+        if not self.trip:
+            return {}
+        out: dict[str, bool] = {}
+        try:
+            out["Files"] = bool(self.all_items)
+            out["Quality"] = bool(self.all_items) and not self.trip.quality_suggestions()
+            out["Analyse"] = bool(self.items) and not self.trip.analyse_left()
+            rows = self.trip.theme_rows()
+            out["Themes"] = bool(rows) and all(r["theme_ok"] for r in rows)
+            out["Music"] = bool(self.trip.song())
+        except Exception:  # noqa: BLE001 - a marking is never worth a broken step bar
+            pass
+        return out
 
     def set_guided(self, on: bool) -> None:
         self.guided = on
@@ -1805,16 +1832,27 @@ class Page:
         self.postit_card()
         self.best_pictures_card()
         # After the clean-up and your picks: only what is left gets analysed (the fewer, the faster).
-        with ui.card().classes("w-full mt-2 bg-green-50").props('id="tm-step-analyse"'):
-            with ui.row().classes("w-full items-center gap-3"):
-                ui.label("🔍 Analyse what's left").classes("text-lg font-semibold")
-                ui.space()
-                ui.button(f"Analyse the {chosen} chosen files", icon="auto_awesome", on_click=self.analyse_chosen) \
-                    .props("unelevated color=green-8 no-caps" + ("" if chosen else " disable"))
-            ui.label("Do this once Quality, Doubles, Best bits and Best pictures are done: the app then works out "
-                     "faces, places, scenes and themes for the files still in the trip only, so the fewer you keep, "
-                     "the faster it goes. You can analyse again any time after changing your selection.") \
-                .classes("text-sm text-gray-700")
+        left = self.trip.analyse_left() if chosen else 1
+        if not left and not self.analyse_open:  # done: folded away, with a way to run it again
+            with ui.card().classes("w-full mt-2 bg-green-50 p-2").props('id="tm-step-analyse"'):
+                with ui.row().classes("w-full items-center gap-3"):
+                    ui.label("✓ Analyse done").classes("text-lg font-semibold text-green-900")
+                    ui.label(f"All {chosen} chosen files are analysed.").classes("text-sm text-gray-700")
+                    ui.space()
+                    ui.button("Show", icon="expand_more",
+                              on_click=lambda: (setattr(self, "analyse_open", True), self.refresh_all())) \
+                        .props("flat dense no-caps size=sm")
+        else:
+            with ui.card().classes("w-full mt-2 bg-green-50").props('id="tm-step-analyse"'):
+                with ui.row().classes("w-full items-center gap-3"):
+                    ui.label("🔍 Analyse what's left").classes("text-lg font-semibold")
+                    ui.space()
+                    ui.button(f"Analyse the {chosen} chosen files", icon="auto_awesome", on_click=self.analyse_chosen) \
+                        .props("unelevated color=green-8 no-caps" + ("" if chosen else " disable"))
+                ui.label("Do this once Quality, Doubles, Best bits and Best pictures are done: the app then works out "
+                         "faces, places, scenes and themes for the files still in the trip only, so the fewer you keep, "
+                         "the faster it goes. You can analyse again any time after changing your selection.") \
+                    .classes("text-sm text-gray-700")
         ui.label(
             "Files are grouped into stories (same time and place). Similar shots sit together in a box, and the ⭐ one "
             "is the app's suggestion. Hover over a video to play it."
@@ -5167,10 +5205,9 @@ class Page:
             ui.notify(f"{made} is a theme of its own now, with its ticked shots.", type="positive")
             self.theme_shown, self.theme_moment = made, None
         elif src[0] == "t" and dst[0] == "t":
-            await run.io_bound(self.trip.theme_to_moment, src[1], dst[1])
-            ui.notify(f"{src[1]} is now a sub-theme inside {dst[1]}: all its shots moved there.", type="positive",
-                      multi_line=True)
-            self.theme_shown, self.theme_moment = dst[1], None
+            ui.notify("Themes stay separate (no sub-themes). To put shots in another theme, select them and use "
+                      "Move selected to…", type="info", multi_line=True)
+            return
         else:
             return
         self.theme_selected = set()
@@ -5312,6 +5349,13 @@ class Page:
             ui.label("Open a trip first.").classes("text-gray-500")
             return
         self.trip.confirm_moment_shots()  # ticked in a sub-theme: confirmed in its theme too
+        if not self.trip._meta_json("no_subthemes", False):  # (once per trip: no sub-themes, each is its own theme)
+            made = self.trip.no_sub_themes()
+            self.trip._set_meta_json("no_subthemes", True)
+            if made:
+                self.reload()
+                ui.notify("Sub-themes are now themes of their own: " + ", ".join(made), type="positive",
+                          multi_line=True, timeout=8000)
         rows = self.trip.theme_rows()
         if not rows:
             ui.label("Nothing selected yet: tick files in Choose files first.").classes("text-gray-500")
@@ -5406,10 +5450,9 @@ class Page:
                             folder(sub, ["m", a["name"], mo["name"]], False, True)
                             ui.label(f"↳ 🔍 {mo['name']}").classes("flex-grow text-xs")
                             ui.label(f"{len(mo['shots'])} ✓").classes("text-xs text-gray-500")
-                if saved_moments or len(activities) > 2:
-                    out = ui.label("Drag a theme onto another to put it inside · drag a sub-theme here to make it a "
-                                   "theme of its own").classes("w-full text-[11px] text-gray-500 p-2 mt-1 rounded "
-                                                               "border border-dashed border-gray-300")
+                if saved_moments:
+                    out = ui.label("Drag a sub-theme here to make it a theme of its own") \
+                        .classes("w-full text-[11px] text-gray-500 p-2 mt-1 rounded border border-dashed border-gray-300")
                     folder(out, ["new"], True, False)
                 with ui.row().classes("items-center gap-1 mt-2 no-wrap"):
                     new = ui.input(placeholder="Add an activity").props("dense outlined").classes("w-36")
@@ -5576,8 +5619,8 @@ class Page:
         with ui.row().classes("w-full items-center gap-3"):
             ui.label("✨ This trip's themes").classes("text-lg font-semibold")
             ui.label("The app put the shots that look alike together and named each group. Untick what you don't "
-                     "want, click a name to change it, or merge a group into another. Sub-themes become moments "
-                     "inside a theme.").classes("text-sm text-gray-600 flex-1")
+                     "want, click a name to change it, or merge a group into another. Smaller groups found "
+                     "inside a theme become themes of their own.").classes("text-sm text-gray-600 flex-1")
         for n, p in enumerate(proposals):
             e = edits[n]
             with ui.card().classes("w-full p-2" + ("" if e["keep"] else " opacity-50")):
@@ -5624,7 +5667,7 @@ class Page:
                         .props("flat dense no-caps size=sm")
                 if p["subs"]:
                     with ui.row().classes("w-full items-center gap-1"):
-                        ui.label("Sub-themes:").classes("text-xs text-gray-600")
+                        ui.label("Also its own theme:").classes("text-xs text-gray-600")
                         for k, sub in enumerate(p["subs"]):
                             on = e["subs"][k]
                             ui.chip(f"↳ {sub['name']} · {len(sub['paths'])}", removable=on, selectable=False,
@@ -5701,7 +5744,7 @@ class Page:
         self.theme_shown = ""
         self.reload()
         ui.notify(f"{len(chosen)} themes for this trip. The clearest shots of each are confirmed; check the rest "
-                  "(? marks a guess). Sub-themes are moments inside their theme.", type="positive", multi_line=True,
+                  "(? marks a guess).", type="positive", multi_line=True,
                   timeout=8000)
         self.themes_view.refresh()
 
@@ -5722,9 +5765,6 @@ class Page:
             if name != themes.OTHER:
                 ui.button("Rename", icon="edit", on_click=lambda: self.rename_dialog(name)) \
                     .props("flat dense no-caps size=sm")
-                ui.button("Moment", icon="add", on_click=lambda: self.new_moment_dialog(name)) \
-                    .props("flat dense no-caps size=sm") \
-                    .tooltip("Mark a moment inside these shots, e.g. kite jump: tick a few, the app finds the rest")
             self.theme_summary = ui.label(f"{len(shown)} shots · {len(shown) - len(todo)} confirmed · "
                                           f"{len(todo)} to check").classes("text-sm text-gray-600")
         with ui.row().classes("w-full items-center gap-2"):
@@ -5830,9 +5870,33 @@ class Page:
         self._show_tick(path, r["theme_ok"])
         self._theme_summary(1 if r["theme_ok"] else -1)
         if r["theme_ok"]:
-            await run.io_bound(self.trip.set_theme, [path], r["theme"])
+            moved = await run.io_bound(self.trip.set_theme, [path], r["theme"])
         else:
-            await run.io_bound(self.trip.unconfirm_theme, [path])
+            moved = await run.io_bound(self.trip.unconfirm_theme, [path])
+        self.learned_moves(moved)
+
+    def learned_moves(self, moved: dict) -> None:
+        """After each answer the app looks again at the shots you haven't confirmed: say what it moved, and show it
+        (a moment after your last click, so ticking quickly isn't interrupted)."""
+        moved = {p: m for p, m in (moved or {}).items() if m[0] != m[1]}
+        if not moved:
+            return
+        to: dict[str, int] = {}
+        for _, now in moved.values():
+            to[now] = to.get(now, 0) + 1
+        ui.notify("The app learned from that: moved " + ", ".join(
+            f"{n} similar shot{'s' if n > 1 else ''} to {name}" for name, n in sorted(to.items(), key=lambda x: -x[1])),
+            type="info", timeout=3500)
+        old = getattr(self, "theme_redraw", None)
+        if old is not None:
+            old.cancel()
+        with self.window_timers:
+            self.theme_redraw = ui.timer(2.0, self._redraw_themes, once=True)
+
+    def _redraw_themes(self) -> None:
+        self.theme_redraw = None
+        if self.showing("Themes"):
+            self.themes_view.refresh()
 
     def _theme_summary(self, confirmed: int = 0) -> None:
         self.theme_counts[0] += confirmed
@@ -5877,8 +5941,10 @@ class Page:
         dialog.close()
         if new:
             await self.add_activity(name, quiet=True)
-        await run.io_bound(self.trip.set_theme, [r["path"]], name)
+        moved = await run.io_bound(self.trip.set_theme, [r["path"]], name)
         ui.notify(f"Moved to {name}." if name != r["theme"] else f"Confirmed in {name}.", type="positive")
+        moved.pop(r["path"], None)
+        self.learned_moves(moved)
         was_ok = r["theme_ok"]
         if name == r["theme"]:
             r["theme_ok"] = True
@@ -6261,9 +6327,11 @@ class Page:
         paths = sorted(self.theme_selected)
         if not paths:
             return
-        await run.io_bound(self.trip.set_theme, paths, activity)
-        ui.notify(f"Moved {len(paths)} to {activity}. The app looked again at the shots you haven't confirmed.",
-                  type="positive")
+        moved = await run.io_bound(self.trip.set_theme, paths, activity)
+        n = sum(1 for p, m in moved.items() if p not in paths and m[0] != m[1])
+        ui.notify(f"Moved {len(paths)} to {activity}. "
+                  + (f"The app learned from it and moved {n} similar shot{'s' if n > 1 else ''} too." if n else
+                     "The app looked again at the shots you haven't confirmed."), type="positive")
         self.theme_selected = set()
         self.themes_view.refresh()
 

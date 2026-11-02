@@ -59,6 +59,11 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+**1.36**
+- Themes learn as you go: when you confirm shots or move them to another theme, the shots that still wait for a check and look like them follow on their own (e.g. move temples into Shrines and similar pictures leave Nature too). The app says how many it moved.
+- No sub-themes: groups like Deer or Aquarium are now themes of their own. Existing sub-themes are turned into themes once, and dropping one theme onto another no longer nests it.
+- Steps show when they are done: the step bar ticks ✓ Files, Quality, Analyse, Themes and Music when they are really finished, and the Analyse card folds into "✓ Analyse done" once every chosen file is analysed (Show opens it again).
+
 - **1.35** Themes: when many shots sit in Other, **Let the app sort them** puts each one into the theme it looks most like, even when unsure; you then check them theme by theme (or run the Second check). Your confirmed shots stay as they are, and **Put the unsure ones back in Other** undoes it. Needs Analyse first (the button says so).
 
 - **1.34.3** People is back in the guided steps, right after Analyse: name the faces the app found, then go on to Themes.

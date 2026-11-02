@@ -1010,10 +1010,11 @@ def test_a_new_trip_replaces_the_last_trips_themes_with_its_own(tmp_path, monkey
     food = next(p for p in found if p["name"] == "Food")
     trip.use_theme_proposals([food | {"name": "Ramen", "vector": None,
                                       "subs": [{"name": "Noodles", "paths": food["paths"][:2]}]}])
-    assert [a["name"] for a in trip.activities()] == ["Ramen", "Other"]
-    confirmed = [r for r in trip.items() if r["theme"] == "Ramen"]
-    assert len(confirmed) == 2 and trip.theme_proposals() == []
-    assert [len(m["shots"]) for m in trip.moments() if m["activity"] == "Ramen"] == [2]
+    # No sub-themes: Noodles is a theme of its own next to Ramen, with its own shots.
+    assert [a["name"] for a in trip.activities()] == ["Ramen", "Noodles", "Other"]
+    assert trip.theme_proposals() == [] and not trip.moments()
+    noodles = {r["path"] for r in trip.items() if r["theme"] == "Noodles"}
+    assert noodles <= set(food["paths"][:2]) and not noodles & {r["path"] for r in trip.items() if r["theme"] == "Ramen"}
 
 
 def test_fit_to_music_puts_every_cut_exactly_on_a_pin_whatever_the_transitions(tmp_path, monkeypatch):
@@ -1295,3 +1296,24 @@ def test_the_app_sorts_the_other_shots_into_real_themes_when_asked(tmp_path, mon
     trip.set_sort_other(True)
     assert all(r["theme"] != "Other" and not r["theme_ok"] for r in trip.theme_rows())  # each in a real theme
     assert trip.sort_other_on()
+
+
+def test_moving_a_shot_moves_its_look_alikes_too(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    folder = tmp_path / "japan"
+    folder.mkdir()
+    for n in range(4):
+        Image.new("RGB", (160, 90), "red").save(folder / f"p{n}.jpg")
+    trip = catalog.Trip(folder)
+    trip.prepare()
+    temple, other = np.eye(512, dtype=np.float32)[:2]
+    paths = [r["path"] for r in trip.items()]
+    for path, v in zip(paths, (temple, temple + 0.05 * other, temple + 0.08 * other, other)):
+        trip.execute("UPDATE items SET clip = ? WHERE path = ?", ((v / np.linalg.norm(v)).tobytes(), path))
+    trip.add_activity("Shrines & temples", None)
+    trip.suggest_themes()
+    trip.execute("UPDATE items SET theme_auto = 'Nature & views'")
+    moved = trip.set_theme([paths[0]], "Shrines & temples")
+    assert {p for p, (_, now) in moved.items() if now == "Shrines & temples"} == {paths[1], paths[2]}
+    assert paths[3] not in moved or moved[paths[3]][1] != "Shrines & temples"
