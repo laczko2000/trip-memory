@@ -1082,12 +1082,12 @@ class Page:
                         .style("height:calc(100vh - 250px);flex:none"):
                     ui.html(f'<img id="tm-bp" src="{src(it)}" draggable="false" style="max-width:calc(100vw - 180px);'
                             f'max-height:calc(100vh - 260px);object-fit:contain;border-radius:4px;'
-                            f'{"outline:4px solid #fbbf24;" if on else ""}">', sanitize=False)
+                            f'{"outline:5px solid #16a34a;" if on else ""}">', sanitize=False)
                 with ui.row().classes("w-full items-center justify-center gap-3 no-wrap"):
                     ui.button("Remove from trip", icon="delete", on_click=remove) \
                         .props("outline no-caps color=red-4 size=lg").tooltip("Delete key · the file stays on your Mac")
-                    ui.button("⭐ Favourite" if not on else "★ Favourite (click to take off)", on_click=star) \
-                        .props(("unelevated color=amber-8" if not on else "unelevated color=amber-10") + " no-caps size=lg") \
+                    ui.button("★ Favourite ✓" if on else "☆ Favourite", on_click=star) \
+                        .props(("unelevated color=green-7" if on else "unelevated color=grey-7") + " no-caps size=lg") \
                         .tooltip("Space (or Shift) · always in the video; again to take it off")
                     ui.button("Next", icon="arrow_forward", on_click=lambda: go(state["k"] + 1)) \
                         .props("outline no-caps color=grey-3 size=lg").tooltip("→ · no mark")
@@ -1096,9 +1096,9 @@ class Page:
                     for x in favourites[-30:]:
                         n = photos.index(x)
                         ui.image(data_url(x["thumb"])).classes("h-14 w-20 rounded cursor-pointer flex-none") \
-                            .props("fit=cover no-spinner").style("outline:2px solid #fbbf24" if n == state["k"] else "") \
+                            .props("fit=cover no-spinner").style("outline:2px solid #16a34a" if n == state["k"] else "") \
                             .on("click", lambda n=n: go(n)).tooltip("Go there")
-                ui.label("Shift ⭐ favourite · Delete 🗑 remove · → next · ← back").classes("text-xs text-gray-400")
+                ui.label("Space ⭐ favourite (again: off) · Delete 🗑 remove · → next · ← back").classes("text-xs text-gray-400")
                 for side, step, icon in (("left", -1, "chevron_left"), ("right", 1, "chevron_right")):
                     if 0 <= state["k"] + step < len(photos) or step == 1:
                         ui.button(icon=icon, on_click=lambda s=step: go(state["k"] + s)) \
