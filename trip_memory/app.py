@@ -5557,8 +5557,8 @@ class Page:
                     .props("flat dense no-caps color=indigo")
             return
         with ui.row().classes("w-full items-center gap-3 p-2 rounded bg-indigo-50"):
-            ui.label("✨ A new trip? Let the app look at your shots and suggest this trip's own themes and "
-                     "sub-themes (instead of the last trip's)." + (" Claude (your Pro) gives them names."
+            ui.label("✨ A new trip? Let the app look at your shots and suggest this trip's own themes, "
+                     "one simple list (instead of the last trip's)." + (" Claude (your Pro) gives them names."
                                                                     if claude else "")) \
                 .classes("text-sm text-indigo-900 flex-1")
             ui.button("Suggest themes for this trip", icon="auto_awesome", on_click=self.propose_trip_themes) \
@@ -5619,8 +5619,7 @@ class Page:
         with ui.row().classes("w-full items-center gap-3"):
             ui.label("✨ This trip's themes").classes("text-lg font-semibold")
             ui.label("The app put the shots that look alike together and named each group. Untick what you don't "
-                     "want, click a name to change it, or merge a group into another. Smaller groups found "
-                     "inside a theme become themes of their own.").classes("text-sm text-gray-600 flex-1")
+                     "want, click a name to change it, or merge a group into another.").classes("text-sm text-gray-600 flex-1")
         for n, p in enumerate(proposals):
             e = edits[n]
             with ui.card().classes("w-full p-2" + ("" if e["keep"] else " opacity-50")):

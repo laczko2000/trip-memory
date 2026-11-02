@@ -1007,6 +1007,7 @@ def test_a_new_trip_replaces_the_last_trips_themes_with_its_own(tmp_path, monkey
     assert trip.missing_fingerprints() == 0
     found = trip.propose_themes(sentences)
     assert {p["name"] for p in found} == {"Temples & shrines", "Food"} and trip.theme_proposals() == found
+    assert all(not p["subs"] for p in found)  # one flat list: no sub-themes offered
     food = next(p for p in found if p["name"] == "Food")
     trip.use_theme_proposals([food | {"name": "Ramen", "vector": None,
                                       "subs": [{"name": "Noodles", "paths": food["paths"][:2]}]}])
@@ -1317,3 +1318,16 @@ def test_moving_a_shot_moves_its_look_alikes_too(tmp_path, monkeypatch):
     moved = trip.set_theme([paths[0]], "Shrines & temples")
     assert {p for p, (_, now) in moved.items() if now == "Shrines & temples"} == {paths[1], paths[2]}
     assert paths[3] not in moved or moved[paths[3]][1] != "Shrines & temples"
+
+
+def test_suggested_themes_are_one_flat_list_without_sub_themes(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    (tmp_path / "trip").mkdir()
+    trip = catalog.Trip(tmp_path / "trip")
+    trip._set_meta_json("theme_proposals", [
+        {"name": "Nature", "emoji": "🌿", "paths": ["a", "b", "c", "d"], "sample": ["a", "c"],
+         "subs": [{"name": "Deer", "paths": ["c"]}, {"name": "Aquarium", "paths": ["d"]}]}])
+    found = trip.theme_proposals()
+    assert [(p["name"], p["paths"]) for p in found] == [("Nature", ["a", "b"]), ("Deer", ["c"]), ("Aquarium", ["d"])]
+    assert all(not p["subs"] for p in found) and found[0]["sample"] == ["a"]

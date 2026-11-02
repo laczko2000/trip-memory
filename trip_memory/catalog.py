@@ -1785,10 +1785,35 @@ class Trip:
                 "subs": [{"name": s["name"], "paths": [rows[i]["path"] for i in s["rows"]]} for s in p["subs"]]}
                for p in found]
         self._set_meta_json("theme_proposals", out)
-        return out
+        return self.theme_proposals()  # (one flat list: no sub-themes)
 
     def theme_proposals(self) -> list[dict]:
-        return self._meta_json("theme_proposals", [])
+        """The suggested themes, one flat list: a smaller group found inside a theme (Deer, Aquarium...) is offered
+        as a theme of its own, never as a sub-theme."""
+        proposals = self._meta_json("theme_proposals", [])
+        if not any(p.get("subs") for p in proposals):
+            return proposals
+        flat: list[dict] = []
+        for p in proposals:
+            subs = [sub for sub in p.get("subs") or [] if sub.get("paths") and sub.get("name")]
+            inner = {q for sub in subs for q in sub["paths"]}
+            flat.append(p | {"paths": [q for q in p["paths"] if q not in inner],
+                             "sample": [q for q in p.get("sample") or [] if q not in inner], "subs": []})
+            for sub in subs:
+                flat.append({"name": sub["name"], "emoji": p.get("emoji") or "⭐", "describe": [sub["name"].lower()],
+                             "vector": None, "paths": list(sub["paths"]), "sample": list(sub["paths"][:8]),
+                             "subs": [], "moved_in": []})
+        flat = [p for p in flat if p["paths"]]
+        names: dict[str, dict] = {}
+        for p in flat:  # (two groups with the same name: one theme)
+            key = p["name"].lower()
+            if key in names:
+                names[key]["paths"] += [q for q in p["paths"] if q not in names[key]["paths"]]
+            else:
+                names[key] = p
+        flat = list(names.values())
+        self._set_meta_json("theme_proposals", flat)
+        return flat
 
     def drop_theme_proposals(self) -> None:
         self._set_meta_json("theme_proposals", [])

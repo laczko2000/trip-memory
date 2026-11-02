@@ -59,6 +59,8 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.36.1** Suggested themes are one simple list: a smaller group found inside a theme (Deer, Aquarium...) is offered as a theme of its own, never as a sub-theme.
+
 - **1.36** Themes learn as you go: confirm or move shots and the unchecked ones that look like them follow (move temples into Shrines and similar pictures leave Nature too). No sub-themes: groups like Deer or Aquarium are themes of their own (existing ones are turned into themes once). The step bar ticks the steps that are really finished, and the Analyse card folds into "✓ Analyse done" once every chosen file is analysed.
 
 - **1.35** Themes: when many shots sit in Other, **Let the app sort them** puts each one into the theme it looks most like, even when unsure; you then check them theme by theme (or run the Second check). Your confirmed shots stay as they are, and **Put the unsure ones back in Other** undoes it. Needs Analyse first (the button says so).
