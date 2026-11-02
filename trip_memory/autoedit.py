@@ -353,6 +353,12 @@ class Limits:
     landscape: bool = True  # the video is wider than tall (upright videos can go side by side)
     open_room: float = 0.0  # seconds kept at the start for the opening card: the first shot lasts at least this
     end_room: float = 0.0  # seconds kept at the end for the ending card: the last shot lasts at least this
+    mix: str = "videos"  # videos or photos first: a key of MIX
+
+
+# What the video is mostly made of: the share of its shots that are videos (as far as the trip has them).
+MIX = {"videos": 0.75, "balanced": 0.5, "photos": 0.25}
+MIX_NAMES = {"videos": "Video heavy", "balanced": "Balanced", "photos": "Picture heavy"}
 
 
 @dataclass
@@ -1106,15 +1112,45 @@ def reserve_room(slots: list[Slot], start: float, end: float) -> list[Slot]:
 
 
 def fill_slots(slots: list[Slot], candidates: list[dict], limits: Limits) -> list[int]:
-    """Choose a shot for every slot, keeping the trip in time order, matching lively shots to lively music.
+    """Choose a shot for every slot, keeping the trip in time order, matching lively shots to lively music, with
+    about the share of videos you asked for (Video heavy, Balanced, Picture heavy).
 
     Returns the candidate index for each slot that could be filled (stops early if it runs out)."""
+    target = MIX.get(limits.mix)
+    kinds = {c.get("kind") for c in candidates}
+    if target is None or not slots or kinds != {"video", "photo"}:
+        return _fill_slots(slots, candidates, limits, 0.0)
+
+    def share(picked: list[int]) -> float:
+        return sum(candidates[i].get("kind") == "video" for i in picked) / max(1, len(picked))
+
+    # Points for a video over a photo: found by halving, so the share of videos comes close to the target.
+    low, high = -4.0, 4.0
+    best = _fill_slots(slots, candidates, limits, 0.0)
+    best_gap = abs(share(best) - target)
+    for _ in range(7):
+        if best_gap <= 0.06:
+            break
+        mid = (low + high) / 2
+        picked = _fill_slots(slots, candidates, limits, mid)
+        got = share(picked)
+        if abs(got - target) < best_gap:
+            best, best_gap = picked, abs(got - target)
+        if got < target:
+            low = mid
+        else:
+            high = mid
+    return best
+
+
+def _fill_slots(slots: list[Slot], candidates: list[dict], limits: Limits, for_video: float) -> list[int]:
     n_slots, n = len(slots), len(candidates)
     if not n_slots or not n:
         return []
     paces = [pace_of(c)[0] for c in candidates]
     wants = [c.get("pace_want") for c in candidates]
     values = [shot_value(c) + (10.0 if c.get("forced") else 4.0 if c.get("must") else 0.0) + 0.3 * min(3.0, c.get("chapter_fit") or 0.0)
+              + (for_video if c.get("kind") == "video" else 0.0)
               for c in candidates]
     # Chapters: a shot outside the part of the video its chapter should fill costs points, the further the more.
     total = slots[-1].end - slots[0].start or 1.0

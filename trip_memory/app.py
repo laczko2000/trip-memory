@@ -126,6 +126,11 @@ def pil_data_url(picture) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(out.getvalue()).decode()
 
 
+def autoedit_mix_names() -> dict:
+    from .autoedit import MIX_NAMES
+    return dict(MIX_NAMES)
+
+
 def autoedit_pack() -> dict:
     from .autoedit import PACK
     return PACK
@@ -4684,6 +4689,12 @@ class Page:
                     .tooltip("More: photos you have no room for become collages of 2–4 on one cut (a photo alone is "
                              "rare), and upright videos play side by side in a landscape video. As many as fit: up "
                              "to 4 photos and 3 videos on every cut. Normal: one shot a cut.")
+            with ui.row().classes("w-full items-center gap-3"):
+                ui.label("Mostly:").classes("text-sm")
+                ui.toggle(autoedit_mix_names(), value=getattr(self.auto_limits, "mix", "videos"),
+                          on_change=lambda e: self.set_limit("mix", e.value)).props("dense no-caps") \
+                    .tooltip("Video heavy: about 3 of 4 shots are videos (when the trip has them). Balanced: half "
+                             "and half. Picture heavy: about 3 of 4 are pictures. Your favourites always go in.")
             with ui.row().classes("w-full items-center gap-3"):
                 ui.switch("Only my favourites (⭐ pictures and videos with marks)", value=self.trip.only_marked(),
                           on_change=lambda e: self.trip.set_only_marked(e.value)) \

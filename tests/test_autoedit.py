@@ -500,3 +500,19 @@ def test_an_upright_video_gets_an_upright_photo_when_no_upright_video_is_left():
     shots = [autoedit.Shot(path="/v.mp4", kind="video", start=0.0, seconds=1.5)]
     out = autoedit.pack(shots, rows, autoedit.Limits(pack="normal"), {})
     assert out[0].effects["side"] == ["/p.jpg"]  # never alone with blurred sides; never a wide photo
+
+
+def test_video_heavy_balanced_or_picture_heavy():
+    cands = []
+    for k in range(40):
+        kind = "video" if k % 2 else "photo"
+        cands.append({"path": f"/{k}", "kind": kind, "duration": 8.0 if kind == "video" else 0.0,
+                      "taken_at": f"2025-07-03T10:{k:02d}:00", "story": 1, "peak": (k * 37 % 11) / 5})
+    slots = [autoedit.Slot(start=2.0 * j, end=2.0 * j + 2.0, energy=0.5) for j in range(10)]
+    counts = {}
+    for mix in autoedit.MIX:
+        picked = autoedit.fill_slots(slots, cands, autoedit.Limits(mix=mix))
+        counts[mix] = sum(cands[i]["kind"] == "video" for i in picked)
+    print(counts)
+    assert counts["videos"] > counts["balanced"] > counts["photos"]
+    assert counts["videos"] >= 7 and counts["photos"] <= 3 and 3 <= counts["balanced"] <= 7
