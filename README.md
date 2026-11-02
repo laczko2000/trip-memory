@@ -59,6 +59,8 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.39** Themes: a shot taken within 3 minutes of one you confirmed gets the same theme and comes already selected (the nearest confirmed shot wins; never a theme you said it isn't). In each round, the selected shots sit on top and the pool below: a click moves a shot between them.
+
 - **1.38.1** Themes rounds: an unticked shot is no longer faded, so every picture stays clear; it gets a dashed grey frame and an empty circle instead of the green frame and ✓.
 
 - **1.38** Themes are sorted in rounds, and nothing moves while you work. Round 1 is your important shots (⭐ favourites, videos with marks), round 2 the rest. In each round one theme at a time: the shots the app is sure about come ticked, the unsure ones and look-alikes sit under Maybe; untick the wrong ones, tick the right maybes, then Done, next theme. Only then the app learns and sorts the rest again. The leftovers come one by one, big: a number key per theme, N for a new theme. Show all themes instead opens the old full list.

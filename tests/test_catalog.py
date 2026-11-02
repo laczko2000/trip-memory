@@ -624,6 +624,7 @@ def test_the_storyline_follows_your_themes(tmp_path, monkeypatch):
     from trip_memory import autoedit, themes
 
     monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    monkeypatch.setattr(catalog.Trip, "NEAR_MINUTES", 0.0)  # (shots minutes apart here: judged by the picture only)
     (tmp_path / "app").mkdir()
     trip_dir = tmp_path / "trip"
     trip_dir.mkdir()
@@ -1301,6 +1302,7 @@ def test_the_app_sorts_the_other_shots_into_real_themes_when_asked(tmp_path, mon
 
 def test_moving_a_shot_moves_its_look_alikes_too(tmp_path, monkeypatch):
     monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    monkeypatch.setattr(catalog.Trip, "NEAR_MINUTES", 0.0)  # (shots minutes apart here: judged by the picture only)
     (tmp_path / "app").mkdir()
     folder = tmp_path / "japan"
     folder.mkdir()
@@ -1388,3 +1390,28 @@ def test_sorting_themes_in_rounds_important_shots_first_and_nothing_moves_until_
     assert {r["path"] for r in trip.round_leftovers()} == set(paths) - {paths[0], paths[6]}
     assert all(r["theme_auto"] == "Boat" for r in trip.round_leftovers() if r["path"] in paths[1:5])
     assert all(r["theme_auto"] == "Food" for r in trip.round_leftovers() if r["path"] in paths[5:])
+
+
+def test_shots_taken_minutes_after_a_confirmed_one_get_its_theme(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    for n, when in enumerate(["10:00:00", "10:01:30", "10:02:50", "10:20:00"]):
+        exif = Image.Exif()
+        exif[306] = f"2025:07:03 {when}"
+        Image.new("RGB", (160 + n, 90), "red").save(trip_dir / f"p{n}.jpg", exif=exif)
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    trip.execute("UPDATE items SET chosen = 1")
+    trip.save_activities([{"name": "Boat", "emoji": "⛵", "describe": ["boat"], "vector": None},
+                          {"name": "Food", "emoji": "🍜", "describe": ["food"], "vector": None},
+                          {"name": "Other", "emoji": "❔", "describe": [], "vector": None}])
+    paths = sorted(r["path"] for r in trip.items())
+    trip.set_theme([paths[0]], "Boat")
+    auto = {r["path"]: (r["theme_auto"], r["theme_sure"]) for r in trip.items()}
+    assert auto[paths[1]][0] == "Boat" and auto[paths[1]][1] >= trip.ROUND_SURE
+    assert auto[paths[2]][0] == "Boat"
+    assert auto[paths[3]][0] != "Boat"  # 20 minutes later: not by time
+    trip.rest_not_matching("Boat", [paths[2]])  # you said it isn't
+    assert {r["path"]: r["theme_auto"] for r in trip.items()}[paths[2]] != "Boat"

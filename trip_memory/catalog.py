@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import bisect
 import json
 import re
 import sqlite3
@@ -1914,7 +1915,7 @@ class Trip:
     def suggest_themes(self) -> dict[str, tuple[str, str]]:
         """Suggest an activity for every selected shot you haven't confirmed, learning from the ones you have.
         Returns the shots whose suggestion changed: {path: (was, now)} (not the ones you confirmed)."""
-        rows = self.query("SELECT path, clip, theme, theme_auto, tags, tags_user, scene, scene_user FROM items "
+        rows = self.query("SELECT path, clip, theme, theme_auto, tags, tags_user, scene, scene_user, taken_at FROM items "
                           "WHERE chosen = 1 AND removed = 0 AND part_of IS NULL ORDER BY taken_at, path")
         activities = self.activities()
         names = {a["name"] for a in activities}
@@ -1940,6 +1941,7 @@ class Trip:
             if r["path"] not in guesses and name in gone.get(r["path"], ()):  # (you said it's not that one)
                 name = themes.OTHER
             updates.append((name, round(sure, 3), r["path"]))
+        updates = self._near_in_time(rows, updates, names, gone)
         moved = {r["path"]: (r["theme_auto"], name) for r, (name, _, _) in zip(rows, updates)
                  if r["theme"] is None and r["theme_auto"] and r["theme_auto"] != name}
         with self._lock:
@@ -2070,6 +2072,33 @@ class Trip:
             gone[path] = sorted({*gone.get(path, []), activity})
         self._set_meta_json("not_themes", gone)
         return self.suggest_themes()
+
+    NEAR_MINUTES = 3.0  # a shot taken this close to one you confirmed is most likely the same theme
+
+    def _near_in_time(self, rows, updates: list[tuple], names: set[str], gone: dict) -> list[tuple]:
+        """Shots taken within a few minutes of a shot you confirmed: the same theme (the nearest confirmed one
+        wins), offered as sure, unless you said the shot is not that theme."""
+        mine = []
+        for r in rows:
+            if r["theme"] in names and r["theme"] != themes.OTHER and r["taken_at"]:
+                mine.append((datetime.fromisoformat(r["taken_at"]).timestamp(), r["theme"]))
+        if not mine:
+            return updates
+        mine.sort()
+        times = [t for t, _ in mine]
+        out = []
+        for r, (name, sure, path) in zip(rows, updates):
+            if r["theme"] is None and r["taken_at"]:
+                t = datetime.fromisoformat(r["taken_at"]).timestamp()
+                k = bisect.bisect_left(times, t)
+                near = [mine[j] for j in (k - 1, k) if 0 <= j < len(mine)]
+                near = [(abs(tt - t), theme) for tt, theme in near
+                        if abs(tt - t) <= self.NEAR_MINUTES * 60 and theme not in gone.get(path, ())]
+                if near:
+                    gap, theme = min(near)
+                    name, sure = theme, max(sure if name == theme else 0.0, 0.95 - 0.1 * gap / (self.NEAR_MINUTES * 60))
+            out.append((name, sure, path))
+        return out
 
     def sort_other_on(self) -> bool:
         return bool(self._meta_json("sort_other", False))

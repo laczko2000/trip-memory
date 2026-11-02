@@ -332,6 +332,7 @@ class Page:
         self.round_key = None
         self.round_ticks: dict[str, bool] = {}
         self.round_tiles: dict[str, object] = {}
+        self.round_sel = self.round_pool = None
         self.left_skipped: set[str] = set()
         self.left_key = None
         ui.timer(1.0, self.auto_update_tick)  # (here, outside every redrawn part, so it keeps running)
@@ -5550,29 +5551,31 @@ class Page:
         self.round_tiles = {}
         with ui.row().classes("w-full items-center gap-3 mt-2"):
             ui.label(f"{a['emoji']} {name}").classes("text-xl font-semibold")
-            ui.label("Ticked = it's this theme. Untick the wrong ones, tick the right maybes. Nothing moves until "
-                     "you press Done.").classes("text-sm text-gray-600 flex-1")
-            ui.button("Tick all", on_click=lambda: self.round_tick_all(True)).props("flat dense no-caps size=sm")
-            ui.button("Untick all", on_click=lambda: self.round_tick_all(False)).props("flat dense no-caps size=sm")
+            ui.label("Click a shot to move it between Selected and the pool. Nothing else changes until you press "
+                     "Done.").classes("text-sm text-gray-600 flex-1")
+            ui.button("Select all", on_click=lambda: self.round_tick_all(True)).props("flat dense no-caps size=sm")
+            ui.button("Back to the pool", on_click=lambda: self.round_tick_all(False)).props("flat dense no-caps size=sm")
         if shots["kept"]:
             ui.label(f"{len(shots['kept'])} shot{'s' * (len(shots['kept']) != 1)} already confirmed here.") \
                 .classes("text-xs text-gray-500")
 
-        def grid(rows: list[dict]) -> None:
-            with ui.element("div").classes("w-full grid gap-2").style(
-                    "grid-template-columns:repeat(auto-fill,minmax(170px,1fr))"):
-                for r in rows:
-                    it = items.get(r["path"])
-                    if it:
-                        self.round_tile(it)
+        # Two boxes: the shots selected as this theme on top, the pool below. A click moves a shot between them.
+        order = shots["sure"] + shots["maybe"]
 
-        if shots["sure"]:
-            ui.label(f"The app thinks these are {name} ({len(shots['sure'])})").classes("text-sm font-semibold mt-1")
-            grid(shots["sure"])
-        if shots["maybe"]:
-            ui.label(f"Maybe ({len(shots['maybe'])}): tick the ones that are {name}") \
-                .classes("text-sm font-semibold mt-2")
-            grid(shots["maybe"])
+        def grid():
+            return ui.element("div").classes("w-full grid gap-2 min-h-[60px] rounded").style(
+                "grid-template-columns:repeat(auto-fill,minmax(170px,1fr))")
+
+        self.round_sel_label = ui.label("").classes("text-sm font-semibold mt-1 text-green-800")
+        self.round_sel = grid()
+        self.round_pool_label = ui.label("").classes("text-sm font-semibold mt-3")
+        self.round_pool = grid()
+        self.round_theme_name = name
+        for r in order:
+            it = items.get(r["path"])
+            if it:
+                with (self.round_sel if self.round_ticks.get(r["path"]) else self.round_pool):
+                    self.round_tile(it)
         with ui.row().classes("w-full items-center gap-2 mt-2"):
             self.round_count = ui.label("").classes("text-sm text-gray-700")
             self._round_counted()
@@ -5607,19 +5610,33 @@ class Page:
                 child.set_text("✓" if on else "")
 
     def _round_counted(self) -> None:
+        yes = sum(self.round_ticks.get(p, False) for p in self.round_tiles)
+        no = len(self.round_tiles) - yes
+        name = getattr(self, "round_theme_name", "")
         if getattr(self, "round_count", None) is not None:
-            yes = sum(self.round_ticks.get(p, False) for p in self.round_tiles)
-            self.round_count.set_text(f"{yes} ticked · {len(self.round_tiles) - yes} not this theme")
+            self.round_count.set_text(f"{yes} selected · {no} not this theme")
+        if getattr(self, "round_sel_label", None) is not None:
+            self.round_sel_label.set_text(f"✓ Selected as {name} ({yes})" + ("" if yes else
+                                          ": click a shot in the pool below to add it"))
+            self.round_pool_label.set_text(f"Pool ({no}): click the ones that are {name} too" if no else
+                                           "Pool: empty")
+
+    def _round_place(self, path: str) -> None:
+        tile = self.round_tiles.get(path)
+        box = self.round_sel if self.round_ticks.get(path) else self.round_pool
+        if tile is not None and box is not None and tile.parent_slot.parent is not box:
+            tile.move(box)
+        self._round_show(path)
 
     def round_toggle(self, path: str) -> None:
         self.round_ticks[path] = not self.round_ticks.get(path, False)
-        self._round_show(path)
+        self._round_place(path)
         self._round_counted()
 
     def round_tick_all(self, on: bool) -> None:
         for path in self.round_tiles:
             self.round_ticks[path] = on
-            self._round_show(path)
+            self._round_place(path)
         self._round_counted()
 
     async def round_done(self, name: str, skip: bool = False) -> None:
