@@ -59,6 +59,8 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.39.1** Themes rounds: a bar fixed at the bottom of the screen shows the round's themes (click one to open it), the count and Done, next theme, so you never scroll back up.
+
 - **1.39** Themes: a shot taken within 3 minutes of one you confirmed gets the same theme and comes already selected (the nearest confirmed shot wins; never a theme you said it isn't). In each round, the selected shots sit on top and the pool below: a click moves a shot between them.
 
 - **1.38.1** Themes rounds: an unticked shot is no longer faded, so every picture stays clear; it gets a dashed grey frame and an empty circle instead of the green frame and ✓.

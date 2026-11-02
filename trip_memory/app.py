@@ -5502,14 +5502,8 @@ class Page:
                         .classes("text-sm text-gray-700 flex-1")
                 ui.button("Show all themes instead", on_click=lambda: self.set_theme_classic(True)) \
                     .props("flat dense no-caps size=sm")
-            with ui.row().classes("w-full items-center gap-1"):
-                for a in done:
-                    ui.chip(f"✓ {a['emoji']} {a['name']}", color="green-1").props("dense")
-                for a in todo:
-                    on = self.round_key and self.round_key[1] == a["name"]
-                    ui.chip(f"{a['emoji']} {a['name']} · {a['count']}", color="indigo-2" if on else "white",
-                            on_click=lambda n=a["name"]: self.open_round_theme(n)).props("dense clickable")
-                ui.chip(f"Leftovers · one by one", color="amber-2" if not todo else "white").props("dense")
+            self.round_chip_data = (done, todo)
+            self._round_chips()
         if todo:
             names = [a["name"] for a in todo]
             if not self.round_key or self.round_key[0] != state["round"] or self.round_key[1] not in names:
@@ -5518,6 +5512,18 @@ class Page:
         else:
             self.round_leftovers_view(pool)
         return True
+
+    def _round_chips(self) -> None:
+        """The round's themes as chips (✓ done, the one open highlighted): at the top and in the bar at the bottom."""
+        done, todo = getattr(self, "round_chip_data", ([], []))
+        with ui.row().classes("items-center gap-1"):
+            for a in done:
+                ui.chip(f"✓ {a['emoji']} {a['name']}", color="green-1").props("dense")
+            for a in todo:
+                on = self.round_key and self.round_key[1] == a["name"]
+                ui.chip(f"{a['emoji']} {a['name']} · {a['count']}", color="indigo-2" if on else "white",
+                        on_click=lambda n=a["name"]: self.open_round_theme(n)).props("dense clickable")
+            ui.chip("Leftovers · one by one", color="amber-2" if not todo else "white").props("dense")
 
     def set_theme_classic(self, on: bool) -> None:
         self.theme_classic = on
@@ -5576,10 +5582,14 @@ class Page:
             if it:
                 with (self.round_sel if self.round_ticks.get(r["path"]) else self.round_pool):
                     self.round_tile(it)
-        with ui.row().classes("w-full items-center gap-2 mt-2"):
-            self.round_count = ui.label("").classes("text-sm text-gray-700")
+        # (always in view at the bottom of the screen: the themes, the count and Done, without scrolling)
+        ui.element("div").style("height:110px")  # (room for the bar below, so it never covers the last shots)
+        with ui.row().classes("items-center gap-2 p-2 rounded shadow-lg bg-white no-wrap border") \
+                .style("position:fixed;bottom:12px;left:24px;right:200px;z-index:1400"):
+            with ui.column().classes("gap-0 flex-1 min-w-0"):
+                self._round_chips()
+                self.round_count = ui.label("").classes("text-sm text-gray-700")
             self._round_counted()
-            ui.space()
             ui.button("Skip this theme", on_click=lambda: self.round_done(name, skip=True)) \
                 .props("flat no-caps").tooltip("Leave these shots for later (leftovers)")
             ui.button("Done, next theme", icon="arrow_forward", on_click=lambda: self.round_done(name)) \
