@@ -327,6 +327,13 @@ class Page:
         ui.on("tm_bbmark", lambda e: self.bb_mark and self.bb_mark(e))
         ui.on("tm_bbmove", lambda e: self.bb_move and self.bb_move(e))
         ui.on("tm_bp", lambda e: self.bp_key and self.bp_key(e))
+        ui.on("tm_left", lambda e: self.left_key and self.left_key(e))
+        self.theme_classic = False  # Themes: the full list of every theme instead of sorting in rounds
+        self.round_key = None
+        self.round_ticks: dict[str, bool] = {}
+        self.round_tiles: dict[str, object] = {}
+        self.left_skipped: set[str] = set()
+        self.left_key = None
         ui.timer(1.0, self.auto_update_tick)  # (here, outside every redrawn part, so it keeps running)
         self.window_box = ui.element("div")  # the shot window lives here: redrawing a tab never closes it
         self.window_timers = ui.element("div")
@@ -589,7 +596,8 @@ class Page:
          "Name the faces the app found (after Analyse): pick a name or type a new one, Unknown for strangers. Names "
          "help the themes and the story (e.g. 'Kitesurfing · Laszlo')."),
         ("Themes", "Themes", None,
-         "Confirm what each shot is: tick the right ones, ⇄ moves a wrong one. Run the Second check."),
+         "Sort your shots into themes, one theme at a time: your important shots first, then the rest, then the "
+         "leftovers one by one (number keys)."),
         ("Music", "Music & audio", None, "Choose the song, trim it, and put pins where you want the cuts."),
         ("Story", "Storyboard", None,
          "Choose how the story runs (As it happened, By theme or My story) and press Make the first cut."),
@@ -5369,6 +5377,9 @@ class Page:
             self.theme_review(proposals)
             return
         self.new_themes_bar()
+        if not self.theme_classic and self.theme_rounds_view():
+            return
+        self.rounds_done_bar()
         self.theme_check_card()
         activities = self.trip.activities()
         names = [a["name"] for a in activities]
@@ -5460,6 +5471,266 @@ class Page:
                     ui.button(icon="add", on_click=lambda: self.add_activity(new.value)).props("flat dense round")
             with ui.column().classes("flex-grow gap-2 min-w-0"):
                 self.theme_grid(rows, activities)
+
+    # ---- Sorting in rounds: one theme at a time, nothing moves while you work on it ----
+
+    def theme_rounds_view(self) -> bool:
+        """The rounds, while shots wait: True when shown (else the full theme list shows)."""
+        self.left_key = None
+        state = self.trip.theme_round()
+        pool = self.trip.round_leftovers()
+        if not pool:
+            if not state["finished"]:
+                self.trip.next_round()
+                if state["round"] == 2:
+                    ui.notify("✓ Every shot is sorted into a theme.", type="positive")
+            return False
+        todo = [a for a in self.trip.round_themes() if not a["done"] and a["count"]]
+        done = [a for a in self.trip.round_themes() if a["done"]]
+        with ui.card().classes("w-full p-3 bg-indigo-50"):
+            with ui.row().classes("w-full items-center gap-3"):
+                if state["round"] == 1:
+                    ui.label("Round 1 of 2 · your important shots").classes("text-lg font-semibold")
+                    ui.label(f"⭐ favourite pictures and videos with marks: {len(pool)} to sort. The app learns from "
+                             "these first, so round 2 (the rest) comes much better sorted.") \
+                        .classes("text-sm text-gray-700 flex-1")
+                else:
+                    ui.label("Round 2 of 2 · the rest").classes("text-lg font-semibold")
+                    ui.label(f"{len(pool)} shot{'s' * (len(pool) != 1)} to sort, suggested from everything you "
+                             "answered so far.") \
+                        .classes("text-sm text-gray-700 flex-1")
+                ui.button("Show all themes instead", on_click=lambda: self.set_theme_classic(True)) \
+                    .props("flat dense no-caps size=sm")
+            with ui.row().classes("w-full items-center gap-1"):
+                for a in done:
+                    ui.chip(f"✓ {a['emoji']} {a['name']}", color="green-1").props("dense")
+                for a in todo:
+                    on = self.round_key and self.round_key[1] == a["name"]
+                    ui.chip(f"{a['emoji']} {a['name']} · {a['count']}", color="indigo-2" if on else "white",
+                            on_click=lambda n=a["name"]: self.open_round_theme(n)).props("dense clickable")
+                ui.chip(f"Leftovers · one by one", color="amber-2" if not todo else "white").props("dense")
+        if todo:
+            names = [a["name"] for a in todo]
+            if not self.round_key or self.round_key[0] != state["round"] or self.round_key[1] not in names:
+                self.open_round_theme(names[0], refresh=False)
+            self.round_sort(self.round_key[1], todo)
+        else:
+            self.round_leftovers_view(pool)
+        return True
+
+    def set_theme_classic(self, on: bool) -> None:
+        self.theme_classic = on
+        self.themes_view.refresh()
+
+    def rounds_done_bar(self) -> None:
+        state = self.trip.theme_round()
+        with ui.row().classes("w-full items-center gap-2"):
+            if state["finished"] or not self.trip.round_leftovers():
+                ui.label("✓ Every shot is sorted into a theme. Change any shot below.") \
+                    .classes("text-sm font-medium text-green-800 flex-1")
+            else:
+                ui.label("Shots are waiting to be sorted.").classes("text-sm text-gray-700 flex-1")
+                ui.button("Sort them in rounds", icon="checklist", on_click=lambda: self.set_theme_classic(False)) \
+                    .props("unelevated dense no-caps color=indigo")
+
+    def open_round_theme(self, name: str, refresh: bool = True) -> None:
+        state = self.trip.theme_round()
+        self.round_key = (state["round"], name)
+        shots = self.trip.round_shots(name)
+        self.round_ticks = {r["path"]: True for r in shots["sure"]} | {r["path"]: False for r in shots["maybe"]}
+        if refresh:
+            self.themes_view.refresh()
+
+    def round_sort(self, name: str, todo: list[dict]) -> None:
+        a = next(x for x in todo if x["name"] == name)
+        shots = self.trip.round_shots(name)
+        items = {it["path"]: it for it in self.items}
+        for r in shots["sure"] + shots["maybe"]:
+            self.round_ticks.setdefault(r["path"], False)
+        self.round_tiles = {}
+        with ui.row().classes("w-full items-center gap-3 mt-2"):
+            ui.label(f"{a['emoji']} {name}").classes("text-xl font-semibold")
+            ui.label("Ticked = it's this theme. Untick the wrong ones, tick the right maybes. Nothing moves until "
+                     "you press Done.").classes("text-sm text-gray-600 flex-1")
+            ui.button("Tick all", on_click=lambda: self.round_tick_all(True)).props("flat dense no-caps size=sm")
+            ui.button("Untick all", on_click=lambda: self.round_tick_all(False)).props("flat dense no-caps size=sm")
+        if shots["kept"]:
+            ui.label(f"{len(shots['kept'])} shot{'s' * (len(shots['kept']) != 1)} already confirmed here.") \
+                .classes("text-xs text-gray-500")
+
+        def grid(rows: list[dict]) -> None:
+            with ui.element("div").classes("w-full grid gap-2").style(
+                    "grid-template-columns:repeat(auto-fill,minmax(170px,1fr))"):
+                for r in rows:
+                    it = items.get(r["path"])
+                    if it:
+                        self.round_tile(it)
+
+        if shots["sure"]:
+            ui.label(f"The app thinks these are {name} ({len(shots['sure'])})").classes("text-sm font-semibold mt-1")
+            grid(shots["sure"])
+        if shots["maybe"]:
+            ui.label(f"Maybe ({len(shots['maybe'])}): tick the ones that are {name}") \
+                .classes("text-sm font-semibold mt-2")
+            grid(shots["maybe"])
+        with ui.row().classes("w-full items-center gap-2 mt-2"):
+            self.round_count = ui.label("").classes("text-sm text-gray-700")
+            self._round_counted()
+            ui.space()
+            ui.button("Skip this theme", on_click=lambda: self.round_done(name, skip=True)) \
+                .props("flat no-caps").tooltip("Leave these shots for later (leftovers)")
+            ui.button("Done, next theme", icon="arrow_forward", on_click=lambda: self.round_done(name)) \
+                .props("unelevated no-caps color=primary size=lg")
+
+    def round_tile(self, it: dict) -> None:
+        path = it["path"]
+        with ui.element("div").classes("relative rounded p-1 cursor-pointer") as tile:
+            self.preview(it, "width:100%;aspect-ratio:4/3", start=self.hover_start(it), view="round")
+            ui.label("✓").classes("tm-round-check absolute top-2 left-2 rounded-full text-white text-center "
+                                  "font-bold").style("width:24px;height:24px;line-height:24px;font-size:15px")
+        tile.on("click", lambda p=path: self.round_toggle(p))
+        tile.on("dblclick", lambda p=path: self.shot_window(p, "Themes"))
+        self.round_tiles[path] = tile
+        self._round_show(path)
+
+    def _round_show(self, path: str) -> None:
+        tile = self.round_tiles.get(path)
+        if tile is None:
+            return
+        on = self.round_ticks.get(path, False)
+        tile.style("outline:4px solid #16a34a;background:#dcfce7" if on else
+                   "outline:1px solid #d1d5db;background:#f9fafb;opacity:.55")
+        for child in tile.default_slot.children:
+            if "tm-round-check" in child.classes:
+                child.style("background:#16a34a" if on else "background:#9ca3af")
+                child.set_text("✓" if on else "")
+
+    def _round_counted(self) -> None:
+        if getattr(self, "round_count", None) is not None:
+            yes = sum(self.round_ticks.get(p, False) for p in self.round_tiles)
+            self.round_count.set_text(f"{yes} ticked · {len(self.round_tiles) - yes} not this theme")
+
+    def round_toggle(self, path: str) -> None:
+        self.round_ticks[path] = not self.round_ticks.get(path, False)
+        self._round_show(path)
+        self._round_counted()
+
+    def round_tick_all(self, on: bool) -> None:
+        for path in self.round_tiles:
+            self.round_ticks[path] = on
+            self._round_show(path)
+        self._round_counted()
+
+    async def round_done(self, name: str, skip: bool = False) -> None:
+        shown = list(self.round_tiles)
+        yes = [] if skip else [p for p in shown if self.round_ticks.get(p)]
+        # (unticked: not this theme; when skipped, nothing is said about them)
+        no = [] if skip else [p for p in shown if not self.round_ticks.get(p)]
+        note = ui.notification("Learning from your answers…", spinner=True, timeout=None)
+        try:
+            await run.io_bound(self.trip.finish_round_theme, name, yes, no)
+        finally:
+            note.dismiss()
+        if not skip:
+            ui.notify(f"✓ {name}: {len(yes)} confirmed" + (f", {len(no)} sorted again" if no else "") +
+                      ". The next theme is suggested with what the app just learned.", type="positive")
+        self.round_key = None
+        self.reload()
+        self.themes_view.refresh()
+
+    def round_leftovers_view(self, pool: list[dict]) -> None:
+        """The shots no theme took: one at a time, big, a key per theme."""
+        waiting = [r for r in pool if r["path"] not in self.left_skipped] or pool
+        if waiting is pool:
+            self.left_skipped = set()
+        r = waiting[0]
+        it = next((x for x in self.items if x["path"] == r["path"]), r)
+        acts = [a for a in self.trip.activities() if a["name"] != themes.OTHER]
+        rows = self.trip.theme_rows()
+        acts.sort(key=lambda a: -sum(x["theme"] == a["name"] for x in rows))
+        guess = r.get("theme_auto")
+        keys = {str(n + 1): a["name"] for n, a in enumerate(acts[:9])}
+        keys["0"] = themes.OTHER
+
+        def key(e) -> None:
+            k = str((e.args or {}).get("k", "")).lower()
+            if k in keys:
+                self.left_answer(r["path"], keys[k])
+            elif k == "n":
+                self.left_new_theme(r["path"])
+            elif k == "skip":
+                self.left_skipped.add(r["path"])
+                self.themes_view.refresh()
+
+        self.left_key = key
+        with ui.row().classes("w-full items-center gap-3 mt-2"):
+            ui.label(f"Leftovers · {len(pool)} to go").classes("text-xl font-semibold")
+            ui.label("The shots no theme took. Press the number of its theme (or click), N for a new theme, → to "
+                     "skip. The app's guess is highlighted.").classes("text-sm text-gray-600 flex-1")
+            ui.button("Put all the rest in Other", on_click=lambda: self.left_rest_other([x["path"] for x in pool])) \
+                .props("flat dense no-caps size=sm")
+        with ui.row().classes("w-full no-wrap items-start gap-4").props('id="tm-left"'):
+            with ui.element("div").classes("flex-none").style("width:min(52vw,720px)"):
+                if it.get("kind") == "photo":
+                    try:
+                        big = self.trip.big_picture(it["path"])
+                        ui.html(f'<img src="/data/{big.relative_to(app_dir()).as_posix()}" style="width:100%;'
+                                f'max-height:50vh;object-fit:contain;background:#222;border-radius:6px">',
+                                sanitize=False)
+                    except Exception:  # noqa: BLE001 - (unreadable: its preview)
+                        self.preview(it, "width:100%;height:50vh")
+                else:
+                    self.preview(it, "width:100%;height:50vh", start=self.hover_start(it), view="left")
+                ui.label(f"{Path(it['path']).name} · {fmt_time(it['taken_at']) if it.get('taken_at') else ''}") \
+                    .classes("text-xs text-gray-500")
+            with ui.element("div").classes("flex-grow grid gap-1").style(
+                    "grid-template-columns:repeat(%d,minmax(0,1fr))" % (2 if len(acts) > 9 else 1)):
+                for n, a in enumerate(acts):
+                    hint = f"{n + 1}  " if n < 9 else ""
+                    ui.button(f"{hint}{a['emoji']} {a['name']}",
+                              on_click=lambda name=a["name"]: self.left_answer(r["path"], name)) \
+                        .props(("unelevated color=indigo" if a["name"] == guess else "outline color=grey-8") +
+                               " no-caps dense align=left").classes("w-full")
+                ui.button("0  ❔ Other (none of them)", on_click=lambda: self.left_answer(r["path"], themes.OTHER)) \
+                    .props("outline color=grey-6 no-caps dense align=left").classes("w-full")
+                with ui.row().classes("w-full gap-2 col-span-full"):
+                    ui.button("N  New theme", icon="add", on_click=lambda: self.left_new_theme(r["path"])) \
+                        .props("outline color=positive no-caps").classes("flex-grow")
+                    ui.button("Skip →", on_click=lambda: key(type("E", (), {"args": {"k": "skip"}})())) \
+                        .props("flat no-caps")
+
+    def left_answer(self, path: str, name: str) -> None:
+        self.trip.sort_leftover(path, name)  # (one quick change: nothing else moves)
+        self.left_skipped.discard(path)
+        self.reload()
+        self.themes_view.refresh()
+
+    def left_new_theme(self, path: str) -> None:
+        with ui.dialog() as dialog, ui.card().classes("w-96"):
+            ui.label("A new theme for this shot").classes("text-lg font-semibold")
+            name = ui.input(placeholder="e.g. Night market").props("dense outlined autofocus").classes("w-full")
+
+            async def add() -> None:
+                new = " ".join((name.value or "").split())[:30]
+                if not new:
+                    ui.notify("Type the new theme's name first.", type="warning")
+                    return
+                dialog.close()
+                await self.add_activity(new, quiet=True)
+                self.left_answer(path, new)
+
+            name.on("keydown.enter", add)
+            with ui.row().classes("w-full justify-end gap-2"):
+                ui.button("Cancel", on_click=dialog.close).props("flat no-caps")
+                ui.button("Add", icon="add", on_click=add).props("unelevated no-caps color=positive")
+        dialog.open()
+
+    async def left_rest_other(self, paths: list[str]) -> None:
+        for path in paths:
+            await run.io_bound(self.trip.sort_leftover, path, themes.OTHER)
+        self.left_skipped = set()
+        self.reload()
+        self.themes_view.refresh()
 
     def theme_check_card(self) -> None:
         """Second check: the app sorts every shot again, learning from the ones you confirmed, and shows only the
@@ -10002,6 +10273,13 @@ document.addEventListener('keydown', (e) => {
   if (!document.getElementById('tm-bp') || e.repeat || ['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
   if (e.key === 'Shift') emitEvent('tm_bp', {a: 'star'});
   else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); emitEvent('tm_bp', {a: 'remove'}); }
+}, true);
+// Themes leftovers: 1-9 and 0 pick a theme, N a new one, → skips.
+document.addEventListener('keydown', (e) => {
+  if (!document.getElementById('tm-left') || e.repeat || e.metaKey || e.ctrlKey || document.querySelector('.q-dialog')
+      || ['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
+  if (/^[0-9]$/.test(e.key) || e.key.toLowerCase() === 'n') { e.preventDefault(); emitEvent('tm_left', {k: e.key}); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); emitEvent('tm_left', {k: 'skip'}); }
 }, true);
 // ← → walk through the shots in the big window; hold the key to keep going (one shot every 0.35 s).
 function tmNavKey(e) {

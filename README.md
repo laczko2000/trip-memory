@@ -59,6 +59,8 @@ copies of the chosen pictures, and three frames of each video, are sent to Anthr
 
 ## What's new
 
+- **1.38** Themes are sorted in rounds, and nothing moves while you work. Round 1 is your important shots (⭐ favourites, videos with marks), round 2 the rest. In each round one theme at a time: the shots the app is sure about come ticked, the unsure ones and look-alikes sit under Maybe; untick the wrong ones, tick the right maybes, then Done, next theme. Only then the app learns and sorts the rest again. The leftovers come one by one, big: a number key per theme, N for a new theme. Show all themes instead opens the old full list.
+
 - **1.37** Themes: **Rest not matching** next to All correct: the shots you ticked stay, every shot you haven't ticked leaves the theme, is sorted again and never comes back there (look-alikes stay away too). The Second check has a **New theme** button for a shot that fits none of the themes; the app also moves look-alikes after each Second check answer.
 
 - **1.36.1** Suggested themes are one simple list: a smaller group found inside a theme (Deer, Aquarium...) is offered as a theme of its own, never as a sub-theme.

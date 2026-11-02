@@ -1346,3 +1346,45 @@ def test_rest_not_matching_keeps_the_unticked_shots_and_their_look_alikes_out_of
     assert out[0] == ("Boat", 1.0)
     assert out[3][0] != "Boat"  # never there again
     assert all(out[i][0] != "Boat" for i in (4, 5))  # its look-alikes stay away too
+
+
+def test_sorting_themes_in_rounds_important_shots_first_and_nothing_moves_until_done(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "app_dir", lambda: tmp_path / "app")
+    (tmp_path / "app").mkdir()
+    trip_dir = tmp_path / "trip"
+    trip_dir.mkdir()
+    for n in range(8):
+        exif = Image.Exif()
+        exif[306] = f"2025:07:03 1{n}:00:00"
+        Image.new("RGB", (160 + n, 90), "red").save(trip_dir / f"p{n}.jpg", exif=exif)
+    trip = catalog.Trip(trip_dir)
+    trip.prepare()
+    rng = np.random.default_rng(3)
+    boat, food = rng.normal(size=512), rng.normal(size=512)
+    paths = sorted(r["path"] for r in trip.items())
+    for n, path in enumerate(paths):
+        v = (boat if n < 5 else food) + 0.15 * rng.normal(size=512)
+        trip.execute("UPDATE items SET clip = ?, chosen = 1 WHERE path = ?",
+                     ((v / np.linalg.norm(v)).astype(np.float32).tobytes(), path))
+    trip.save_activities([{"name": "Boat", "emoji": "⛵", "describe": ["boat"], "vector": None},
+                          {"name": "Food", "emoji": "🍜", "describe": ["food"], "vector": None},
+                          {"name": "Other", "emoji": "❔", "describe": [], "vector": None}])
+    trip.execute("UPDATE items SET theme_auto = 'Boat', theme_sure = 0.9")
+    trip.set_star(paths[0], True)  # a favourite: round 1
+    trip.set_star(paths[6], True)
+    assert trip.theme_round()["round"] == 1
+    assert {r["path"] for r in trip.round_leftovers()} == {paths[0], paths[6]}
+    shots = trip.round_shots("Boat")
+    assert {r["path"] for r in shots["sure"]} == {paths[0], paths[6]}
+    # Boat: the boat picture is right, the food one is not.
+    trip.finish_round_theme("Boat", [paths[0]], [paths[6]])
+    assert trip.theme_round()["done"] == ["Boat"]
+    left = trip.round_leftovers()
+    assert [r["path"] for r in left] == [paths[6]] and left[0]["theme_auto"] != "Boat"
+    trip.sort_leftover(paths[6], "Food")
+    # Round 1 over: on to the rest, sorted again from what you answered.
+    state = trip.theme_round()
+    assert state["round"] == 2 and state["done"] == []
+    assert {r["path"] for r in trip.round_leftovers()} == set(paths) - {paths[0], paths[6]}
+    assert all(r["theme_auto"] == "Boat" for r in trip.round_leftovers() if r["path"] in paths[1:5])
+    assert all(r["theme_auto"] == "Food" for r in trip.round_leftovers() if r["path"] in paths[5:])

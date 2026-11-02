@@ -1947,6 +1947,116 @@ class Trip:
             self.db.commit()
         return moved
 
+    # Sorting the shots into themes in rounds (nothing moves while you work on a theme): round 1 your important
+    # shots (favourite pictures, videos with best-bit marks, locked parts), round 2 everything else. In each round
+    # one theme at a time, then the leftovers one by one.
+    ROUND_SURE = 0.5  # the app's guess counts as sure (comes ticked) from here
+    ROUND_MAYBE = 12  # at most this many look-alikes from elsewhere offered as "maybe" for a theme
+    ROUND_LOOKS = 0.72  # ... and only when they look at least this much like the theme's shots
+
+    @staticmethod
+    def is_important(r: dict) -> bool:
+        return bool((r.get("postits") and r["postits"] != "[]") or (r.get("locks") and r["locks"] != "[]"))
+
+    def theme_round(self) -> dict:
+        """{"round": 1 or 2, "done": [themes finished in this round], "finished": all sorted}."""
+        state = self._meta_json("theme_rounds", {}) or {}
+        state.setdefault("round", 1)
+        state.setdefault("done", [])
+        state.setdefault("finished", False)
+        if state["round"] == 1 and not self._round_pool(1):
+            state = {"round": 2, "done": [], "finished": False}  # (no important shots waiting: on to the rest)
+            self._set_round(state)
+        return state
+
+    def _set_round(self, state: dict) -> None:
+        self._set_meta_json("theme_rounds", state)
+
+    def restart_rounds(self) -> None:
+        self._set_round({"round": 1, "done": [], "finished": False})
+
+    def _round_pool(self, rnd: int) -> list[dict]:
+        """The shots still to sort in this round: not confirmed yet (round 1: only the important ones)."""
+        rows = [r for r in self.theme_rows() if not r["theme_ok"] and not r.get("part_of") and not r.get("removed")]
+        return [r for r in rows if self.is_important(r)] if rnd == 1 else rows
+
+    def round_themes(self) -> list[dict]:
+        """The themes to go through in this round, in order (most shots first), each with "count" and "done"."""
+        state = self.theme_round()
+        pool = self._round_pool(state["round"])
+        out = []
+        for a in self.activities():
+            if a["name"] == themes.OTHER:
+                continue
+            count = sum(r["theme_auto"] == a["name"] for r in pool)
+            done = a["name"] in state["done"]
+            if count or done:
+                out.append(a | {"count": count, "done": done})
+        out.sort(key=lambda a: (a["done"], -a["count"]))
+        return out
+
+    def round_shots(self, activity: str) -> dict:
+        """This theme's shots in the current round: {"sure": [rows] (come ticked), "maybe": [rows] (the app's
+        unsure ones here, and look-alikes from other themes), "kept": rows you confirmed here before}."""
+        state = self.theme_round()
+        pool = self._round_pool(state["round"])
+        gone = self.not_themes()
+        mine = [r for r in pool if r["theme_auto"] == activity]
+        mine.sort(key=lambda r: -(r["theme_sure"] or 0))
+        sure = [r for r in mine if (r["theme_sure"] or 0) >= self.ROUND_SURE]
+        maybe = [r for r in mine if (r["theme_sure"] or 0) < self.ROUND_SURE]
+        kept = [r for r in self.theme_rows() if r["theme_ok"] and r["theme"] == activity]
+        clips = {r["path"]: np.frombuffer(r["clip"], dtype=np.float32) for r in self.query(
+            "SELECT path, clip FROM items WHERE clip IS NOT NULL AND part_of IS NULL")}
+        examples = [clips[r["path"]] for r in kept + sure if r["path"] in clips]
+        if examples:
+            x = np.array(examples)
+            others = [r for r in pool if r["theme_auto"] != activity and r["path"] in clips
+                      and activity not in gone.get(r["path"], ())]
+            if others:
+                sims = (np.array([clips[r["path"]] for r in others]) @ x.T).max(axis=1)
+                order = [int(i) for i in np.argsort(-sims) if sims[i] >= self.ROUND_LOOKS][:self.ROUND_MAYBE]
+                maybe += [others[i] for i in order]
+        return {"sure": sure, "maybe": maybe, "kept": kept}
+
+    def finish_round_theme(self, activity: str, yes: list[str], no: list[str]) -> dict[str, tuple[str, str]]:
+        """Done with a theme in this round: the ticked shots are confirmed there, the unticked ones are not that
+        theme (never offered there again). Only now the app learns from it and sorts the rest again."""
+        self.checkpoint(f"sorting {activity}")
+        with self._lock:
+            self.db.executemany("UPDATE items SET theme = ? WHERE path = ?", [(activity, p) for p in yes])
+            self.db.commit()
+        if no:
+            gone = self.not_themes()
+            for path in no:
+                gone[path] = sorted({*gone.get(path, []), activity})
+            self._set_meta_json("not_themes", gone)
+        state = self.theme_round()
+        state["done"] = sorted({*state["done"], activity})
+        self._set_round(state)
+        return self.suggest_themes()
+
+    def round_leftovers(self) -> list[dict]:
+        """After every theme of the round: the shots of the round still not sorted, to answer one by one."""
+        state = self.theme_round()
+        return self._round_pool(state["round"])
+
+    def sort_leftover(self, path: str, activity: str) -> None:
+        """One leftover answered: confirmed in that theme (nothing else moves)."""
+        self.execute("UPDATE items SET theme = ? WHERE path = ?", (activity, path))
+
+    def next_round(self) -> dict:
+        """Round 1 done: on to the rest (sorted again from everything you answered). Round 2 done: all sorted."""
+        state = self.theme_round()
+        if state["round"] == 1:
+            state = {"round": 2, "done": [], "finished": False}
+            self._set_round(state)
+            self.suggest_themes()
+        else:
+            state["finished"] = True
+            self._set_round(state)
+        return state
+
     def not_themes(self) -> dict[str, list[str]]:
         """{path: themes you said the shot is not} (Rest not matching)."""
         return self._meta_json("not_themes", {})
