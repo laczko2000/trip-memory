@@ -26,7 +26,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 from . import titles
 from .looks import look_filter
-from .media import MediaItem
+from .media import PHOTO_EXTS, MediaItem
 from .transitions import MIXED, STYLES, ZOOM_INTO, ZOOM_OUT_OF, seconds_of, xfade_args
 from .tools import FFmpegError, has_encoder, has_filter, probe, run_ffmpeg
 
@@ -272,7 +272,14 @@ def _side_segment(item: MediaItem, s: RenderSettings, out: Path) -> float:
     framed += [None] * (len(clips) - len(framed))
     for k, ((path, at, turn, look), (x, y, tw, th), frame) in enumerate(zip(clips, tiles, framed)):
         n = inputs.count("-i")
-        inputs += ["-ss", f"{at:.3f}", "-t", f"{length:.3f}", "-i", path]
+        if Path(path).suffix.lower() in PHOTO_EXTS:  # an upright photo next to the video: a still, upright
+            still = out.parent / f"{out.stem}_side{k}.jpg"
+            with Image.open(path) as img:
+                ImageOps.exif_transpose(img).convert("RGB").rotate(-turn, expand=True).save(still, quality=92)
+            inputs += ["-loop", "1", "-framerate", str(FPS), "-t", f"{length:.3f}", "-i", str(still)]
+            turn = 0
+        else:
+            inputs += ["-ss", f"{at:.3f}", "-t", f"{length:.3f}", "-i", path]
         delay = SIDE_STAGGER * k
         f = frame or {}
         z, fx_, fy_ = max(1.0, frame_zoom(f)), float(f.get("x", 0.5)), float(f.get("y", 0.5))

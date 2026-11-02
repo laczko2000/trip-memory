@@ -450,6 +450,23 @@ def test_upright_videos_play_side_by_side(tmp_path):
     assert centres[0][0] > 150 and centres[1][1] > 100 and centres[2][2] > 150  # red, green, blue next to each other
 
 
+def test_an_upright_photo_can_stand_next_to_an_upright_video(tmp_path):
+    from trip_memory.render import side_tiles
+
+    trip = tmp_path / "trip"
+    trip.mkdir()
+    subprocess.run([ffmpeg_paths()[0], "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=red:s=360x640:r=30:d=3", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    str(trip / "0.mp4")], check=True)
+    Image.new("RGB", (360, 640), "blue").save(trip / "still.jpg")
+    first = next(i for i in scan_folder(trip)[0] if i.name == "0.mp4")
+    first.effects = {"side": [str(trip / "still.jpg")], "starts": [0.0]}
+    out = render([first], RenderSettings(width=640, height=360), tmp_path / "s.mp4")
+    frame = _frame(out, 1.5)
+    centres = [frame[y + th // 2, x + tw // 2].astype(int) for x, y, tw, th in side_tiles(2, 640, 360)]
+    assert centres[0][0] > 150 and centres[1][2] > 150  # the red video, the blue photo next to it
+
+
 def test_a_zoomed_in_video_keeps_just_that_part():
     from trip_memory.render import crop_filter
     assert crop_filter(None) == "" and crop_filter({"zoom": 1.0}) == ""

@@ -377,7 +377,7 @@ def test_more_moments_pack_spare_photos_into_collages_and_upright_videos_side_by
         return {"path": path, "kind": kind, "taken_at": f"2026-10-03T10:{minute:02d}:00", "story": story,
                 "upright": upright, "duration": duration}
 
-    photos = [row(f"p{k}.jpg", "photo", k) for k in range(10)]
+    photos = [row(f"p{k}.jpg", "photo", 3 * k) for k in range(10)]  # (3 minutes apart: never too alike)
     videos = [row(f"v{k}.mov", "video", 20 + k, upright=True, duration=8.0) for k in range(4)]
     wide = row("w.mov", "video", 30, upright=False, duration=8.0)
     other = row("o.jpg", "photo", 1, story=2)
@@ -472,3 +472,31 @@ def test_collages_never_show_a_double_of_a_shot_in_the_video():
     used = [p for s in out for p in s.effects.get("collage", [])]
     assert "/a2.jpg" not in used and "/b.HEIC" not in used  # (a's double, b's twin by name)
     assert used and set(used) <= {"/c.jpg", "/d.jpg"}
+
+
+
+def test_collage_photos_never_look_alike():
+    import numpy as np
+    rng = np.random.default_rng(1)
+    beach, temple = rng.normal(size=512).astype(np.float32), rng.normal(size=512).astype(np.float32)
+
+    def row(path, minute, v, people=()):
+        v = (v + 0.05 * rng.normal(size=512)).astype(np.float32)
+        return {"path": path, "taken_at": f"2026-10-03T1{minute // 60}:{minute % 60:02d}:00",
+                "clip": (v / np.linalg.norm(v)).tobytes(), "person_ids": set(people)}
+
+    a, same_minute = row("a.jpg", 0, beach), row("b.jpg", 1, temple)
+    later_same_scene, later_other = row("c.jpg", 40, beach), row("d.jpg", 40, temple)
+    assert autoedit.too_alike(a, same_minute)  # within 2 minutes
+    assert autoedit.too_alike(a, later_same_scene)  # the same scene, 40 minutes later
+    assert not autoedit.too_alike(a, later_other)
+
+
+def test_an_upright_video_gets_an_upright_photo_when_no_upright_video_is_left():
+    rows = [{"path": "/v.mp4", "kind": "video", "upright": True, "duration": 10.0, "story": 1,
+             "taken_at": "2025-07-03T10:00:00"},
+            {"path": "/p.jpg", "kind": "photo", "upright": True, "story": 1, "taken_at": "2025-07-03T10:05:00"},
+            {"path": "/w.jpg", "kind": "photo", "upright": False, "story": 1, "taken_at": "2025-07-03T10:01:00"}]
+    shots = [autoedit.Shot(path="/v.mp4", kind="video", start=0.0, seconds=1.5)]
+    out = autoedit.pack(shots, rows, autoedit.Limits(pack="normal"), {})
+    assert out[0].effects["side"] == ["/p.jpg"]  # never alone with blurred sides; never a wide photo

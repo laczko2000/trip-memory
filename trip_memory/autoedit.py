@@ -761,7 +761,9 @@ def collages(shots: list[Shot], slots: list[Slot], rows: dict[str, dict], transi
         shot = shots[n]
         return (shot.kind == "photo" and not shot.effects and n < len(slots) and not slots[n].room
                 and (everywhere or (shot.seconds <= COLLAGE_SHOT and slots[n].energy >= 0.62))
-                and not rows.get(shot.path, {}).get("locked") and _group_of(rows.get(shot.path, {})) == story)
+                and not rows.get(shot.path, {}).get("locked") and _group_of(rows.get(shot.path, {})) == story
+                and not any(too_alike(rows.get(shot.path, {"path": shot.path}), rows.get(g.path, {"path": g.path}))
+                            for g in shots[k:n]))
 
     while k < len(shots):
         story = _group_of(rows.get(shots[k].path, {}))
@@ -805,10 +807,63 @@ PACK = {"normal": "Normal: one shot a cut", "more": "More moments: collages and 
 POP_GAP = 0.45  # at least this many seconds between two photos popping into a collage
 SIDE_FROM = 0.5  # upright videos go side by side on cuts at least this long (in a landscape video: always)
 TRIPLE_FROM = 2.0  # ... and three of them on cuts at least this long
+SIDE_SHORTEST = 1.0  # a shorter upright video can stand next to one (it holds its last picture at the end)
 
 
 def _source(path: str) -> str:
     return path.split("#")[0]
+
+
+COLLAGE_APART = 120.0  # two photos in one collage are taken at least this many seconds apart
+LOOKS_SAME = 0.93  # ... and don't look like the same scene (picture fingerprints this close)
+LOOKS_SAME_PEOPLE = 0.86  # ... nor the same people in a similar setting (same faces, fingerprints this close)
+_vectors: dict[str, object] = {}
+
+
+def _vector(r: dict):
+    import numpy as np
+    clip = r.get("clip")
+    if clip is None or not isinstance(clip, (bytes, bytearray, memoryview)):
+        return None
+    key = r.get("path") or ""
+    v = _vectors.get(key)
+    if v is None or len(_vectors) > 20000:
+        if len(_vectors) > 20000:
+            _vectors.clear()
+        v = np.frombuffer(bytes(clip), dtype=np.float32)
+        n = float(np.linalg.norm(v))
+        v = v / n if n else v
+        _vectors[key] = v
+    return v
+
+
+def too_alike(a: dict, b: dict) -> bool:
+    """Two photos that would look like the same picture side by side in a collage: taken within a couple of
+    minutes, or the same scene (setting, background, clothes, composition), or the same people somewhere similar."""
+    ta, tb = _when(a), _when(b)
+    if ta and tb and abs(ta - tb) < COLLAGE_APART:
+        return True
+    va, vb = _vector(a), _vector(b)
+    if va is None or vb is None or len(va) != len(vb):
+        return False
+    sim = float(va @ vb)
+    if sim >= LOOKS_SAME:
+        return True
+    pa, pb = set(a.get("person_ids") or ()), set(b.get("person_ids") or ())
+    return bool(pa) and pa == pb and sim >= LOOKS_SAME_PEOPLE
+
+
+def _different(lead: dict, room: list[dict], count: int) -> tuple[list[dict], list[dict]]:
+    """Up to `count` photos from `room` (closest in time first) that don't look like the lead or each other;
+    and the rest of the room."""
+    picked: list[dict] = []
+    rest: list[dict] = []
+    for x in room:
+        if len(picked) < count and not too_alike(lead, x) and not any(too_alike(x, g) for g in picked):
+            picked.append(x)
+        else:
+            rest.append(x)
+    return picked, rest
 
 
 def _family(r: dict) -> set[tuple]:
@@ -914,7 +969,9 @@ def pack(shots: list[Shot], candidates: list[dict], limits: Limits, curves: dict
             if extra >= 1:
                 when = _when(r)
                 room.sort(key=lambda x: abs(_when(x) - when))
-                group, spare[key] = room[:extra], room[extra:]
+                group, spare[key] = _different(r or {"path": shot.path}, room, extra)
+                extra = len(group)
+            if extra >= 1:
                 step = min(QUICK_POP, shot.seconds * 0.5 / extra)
                 shot = replace(shot, effects={"collage": [g["path"] for g in group],
                                               "appear": [round(k * step, 3) for k in range(extra + 1)]},
@@ -941,13 +998,22 @@ def pack(shots: list[Shot], candidates: list[dict], limits: Limits, curves: dict
                 for g, _ in picked:
                     taken.add(_source(g["path"]))
                     shown |= _family(g)
-                others = sorted((x for x in candidates if x.get("upright") is True and x["kind"] == "video"
-                                 and "#" not in x["path"] and not x.get("locks") and not x.get("locked")
-                                 and _source(x["path"]) not in taken and not _family(x) & shown
-                                 and (x.get("duration") or 0) >= shot.seconds),
-                                key=lambda x: (_group_of(x) != _group_of(r), abs(_when(x) - when)))
-                for g in others[:want - 1 - len(picked)]:
-                    picked.append((g, None))
+                def free(x: dict) -> bool:
+                    return (x.get("upright") is True and "#" not in x["path"] and not x.get("locks")
+                            and not x.get("locked") and _source(x["path"]) not in taken and not _family(x) & shown
+                            and x["path"] not in {g["path"] for g, _ in picked})
+
+                near = lambda x: (_group_of(x) != _group_of(r), abs(_when(x) - when))  # noqa: E731
+                # An upright video is never alone with blurred sides: another upright video long enough, else a
+                # shorter one (it holds its last picture), else an upright photo next to it.
+                for test in (lambda x: x["kind"] == "video" and (x.get("duration") or 0) >= shot.seconds,
+                             lambda x: x["kind"] == "video" and (x.get("duration") or 0) >= SIDE_SHORTEST,
+                             lambda x: x["kind"] == "photo"):
+                    if len(picked) >= want - 1:
+                        break
+                    others = sorted((x for x in candidates if free(x) and test(x)), key=near)
+                    for g in others[:want - 1 - len(picked)]:
+                        picked.append((g, None))
             for g, _ in picked:  # (each one once)
                 taken.add(_source(g["path"]))
                 shown |= _family(g)
@@ -957,8 +1023,13 @@ def pack(shots: list[Shot], candidates: list[dict], limits: Limits, curves: dict
             if group:
                 starts = []
                 for g, fixed in picked:
+                    if g["kind"] == "photo":  # (a still next to the video)
+                        starts.append(0.0)
+                        continue
                     length = g.get("duration") or shot.seconds
-                    if fixed is None:
+                    if fixed is None and length <= shot.seconds:  # (shorter: from its start, then it holds)
+                        a = 0.0
+                    elif fixed is None:
                         curve = curves.get(g["path"])
                         a = best_start(curve, length, shot.seconds) if curve is not None else (length - shot.seconds) / 2
                         a = cover_bookmark(min(max(0.0, a), length - shot.seconds), shot.seconds, length,

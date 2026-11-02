@@ -588,7 +588,7 @@ class Page:
          "Watch your videos one by one and tap Shift at every great moment. After 20-30 videos, let the app mark the "
          "rest. The final cut always uses the seconds around your marks."),
         ("Best pictures", "Choose files", "tm-step-bestpics",
-         "Look through your pictures one by one: Shift marks a favourite (always in the video), Delete takes a bad one "
+         "Look through your pictures one by one: Space marks a favourite (always in the video), Delete takes a bad one "
          "out, → goes on."),
         ("Analyse", "Choose files", "tm-step-analyse",
          "Your selection is done: analyse what's left (faces, places, scenes, themes). Only the files still in the "
@@ -971,7 +971,7 @@ class Page:
                           on_click=lambda: self.best_pictures_window(0)).props("flat color=light-blue-9 no-caps")
                 ui.button("Continue", icon="play_circle", on_click=lambda: self.best_pictures_window()) \
                     .props("unelevated color=light-blue-8 no-caps")
-            ui.label("Each picture opens big, from the first one you took. Shift (or ⭐) marks a favourite: it is "
+            ui.label("Each picture opens big, from the first one you took. Space, Shift or ⭐ marks a favourite (again takes it off): it is "
                      "always in the video. Delete (or 🗑) takes it out of the trip (the file stays on your Mac). → or › "
                      "just goes on to the next one, ← goes back.").classes("text-sm text-gray-700")
 
@@ -1088,7 +1088,7 @@ class Page:
                         .props("outline no-caps color=red-4 size=lg").tooltip("Delete key · the file stays on your Mac")
                     ui.button("⭐ Favourite" if not on else "★ Favourite (click to take off)", on_click=star) \
                         .props(("unelevated color=amber-8" if not on else "unelevated color=amber-10") + " no-caps size=lg") \
-                        .tooltip("Shift · always in the video")
+                        .tooltip("Space (or Shift) · always in the video; again to take it off")
                     ui.button("Next", icon="arrow_forward", on_click=lambda: go(state["k"] + 1)) \
                         .props("outline no-caps color=grey-3 size=lg").tooltip("→ · no mark")
                 with ui.row().classes("w-full items-center gap-2 no-wrap overflow-x-auto").style("min-height:64px"):
@@ -7745,12 +7745,13 @@ class Page:
             if k:
                 it = items.get(path) or {}
                 thumb = data_url(it.get("thumb")) if it.get("thumb") else ""
+                moving = side and it.get("kind", "video") == "video"  # (an upright photo next to a video: a still)
                 try:
-                    src = self.video_src(Path(path)) if side or Path(path).suffix.lower() in (
+                    src = self.video_src(Path(path)) if moving or Path(path).suffix.lower() in (
                         ".jpg", ".jpeg", ".png", ".webp", ".gif") else thumb
                 except ValueError:
                     src = thumb
-                tile.update(k="v" if side else "p", src=src or thumb, fb=thumb, rot=it.get("rotation") or 0,
+                tile.update(k="v" if moving else "p", src=src or thumb, fb=thumb, rot=it.get("rotation") or 0,
                             at=0.0, mv=["in", "out", "left", "right"][k % 4],  # (all on at once, each moving)
                             a=float(starts[k - 1]) if side and k - 1 < len(starts) else 0.0)
             out.append(tile)
@@ -8522,7 +8523,7 @@ class Page:
                         for k, (p, (x, y, tw, th)) in enumerate(zip(order, places)):
                             it = rows.get(p) or {}
                             f = framed.get(p) or {}
-                            video = key == "side"
+                            video = key == "side" and it.get("kind", "video") == "video"
                             try:
                                 src = self.video_src(Path(it.get("part_of") or p))
                             except ValueError:
@@ -10304,10 +10305,10 @@ function tmCropDown(e, box) {
   };
   box.addEventListener('pointermove', move); box.addEventListener('pointerup', up);
 }
-// The Best pictures window: Shift marks a favourite, Delete (or Backspace) takes the picture out of the trip.
+// The Best pictures window: Space (or Shift) marks or unmarks a favourite, Delete (or Backspace) takes the picture out of the trip.
 document.addEventListener('keydown', (e) => {
   if (!document.getElementById('tm-bp') || e.repeat || ['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
-  if (e.key === 'Shift') emitEvent('tm_bp', {a: 'star'});
+  if (e.key === 'Shift' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); emitEvent('tm_bp', {a: 'star'}); }
   else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); emitEvent('tm_bp', {a: 'remove'}); }
 }, true);
 // Themes leftovers: 1-9 and 0 pick a theme, N a new one, → skips.
